@@ -24,7 +24,7 @@ export type TwoChoicePrompt = {
 type PromptTuple = readonly [question: string, optionA: string, optionB: string];
 
 export const twoChoiceCategories: readonly { value: TwoChoiceCategory; label: string }[] = [
-  { value: "all", label: "通常全部" },
+  { value: "all", label: "全部" },
   { value: "icebreak", label: "アイスブレイク" },
   { value: "food", label: "食べ物" },
   { value: "holiday", label: "休日" },
@@ -37,6 +37,8 @@ export const twoChoiceCategories: readonly { value: TwoChoiceCategory; label: st
   { value: "daily", label: "日常" },
   { value: "adult", label: "大人向け" },
 ];
+
+export const normalTwoChoiceCategories = twoChoiceCategories.filter((category) => category.value !== "adult");
 
 const promptGroups = {
   icebreak: [

@@ -19,8 +19,15 @@ import {
   Users,
   Vote,
 } from "lucide-react";
-import { normalTwoChoicePrompts, twoChoiceCategories, twoChoicePrompts, type TwoChoiceCategory } from "./data/twoChoicePrompts";
 import {
+  normalTwoChoiceCategories,
+  normalTwoChoicePrompts,
+  twoChoiceCategories,
+  twoChoicePrompts,
+  type TwoChoiceCategory,
+} from "./data/twoChoicePrompts";
+import {
+  normalWordWolfCategories,
   normalWordWolfTopics,
   wordWolfCategories,
   wordWolfTopics,
@@ -320,6 +327,31 @@ function SegmentedControl<T extends string>({
   );
 }
 
+function ToggleSwitch({
+  label,
+  description,
+  checked,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className={`toggle-control ${checked ? "enabled" : ""}`}>
+      <span className="toggle-copy">
+        <strong>{label}</strong>
+        <span>{description}</span>
+      </span>
+      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+      <span className="toggle-track" aria-hidden="true">
+        <span className="toggle-thumb" />
+      </span>
+    </label>
+  );
+}
+
 function GameFrame({
   title,
   subtitle,
@@ -360,6 +392,7 @@ type TwoChoiceQuestionCount = 5 | 10 | 20 | 30 | 50 | 100 | 300;
 type TwoChoiceState = {
   players: Player[];
   category: TwoChoiceCategory;
+  includeAdultTopics: boolean;
   questionCount: TwoChoiceQuestionCount;
   step: TwoChoiceStep;
   promptId: string | null;
@@ -381,6 +414,7 @@ const twoChoiceQuestionCountOptions: SegmentedOption<string>[] = [
 const initialTwoChoiceState: TwoChoiceState = {
   players: [],
   category: "all",
+  includeAdultTopics: false,
   questionCount: 10,
   step: "setup",
   promptId: null,
@@ -394,16 +428,19 @@ function TwoChoiceGame({ onHome }: { onHome: () => void }) {
   const state = { ...initialTwoChoiceState, ...storedState };
   const prompt = twoChoicePrompts.find((item) => item.id === state.promptId) ?? null;
   const canStart = state.players.length >= 2 && state.players.every((player) => player.name.trim());
+  const activeTwoChoiceCategory = !state.includeAdultTopics && state.category === "adult" ? "all" : state.category;
+  const availableTwoChoiceCategories = state.includeAdultTopics ? twoChoiceCategories : normalTwoChoiceCategories;
   const promptPool = useMemo(
     () =>
-      state.category === "all"
-        ? normalTwoChoicePrompts
-        : twoChoicePrompts.filter((item) => item.category === state.category),
-    [state.category],
+      activeTwoChoiceCategory === "all"
+        ? state.includeAdultTopics
+          ? twoChoicePrompts
+          : normalTwoChoicePrompts
+        : twoChoicePrompts.filter((item) => item.category === activeTwoChoiceCategory),
+    [activeTwoChoiceCategory, state.includeAdultTopics],
   );
   const selectedQuestionCount = Math.min(state.questionCount, promptPool.length);
   const progressLabel = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "";
-  const isTwoChoiceAdultCategory = state.category === "adult";
 
   useEffect(() => {
     if ((state.step === "vote" || state.step === "result") && !prompt) {
@@ -461,7 +498,7 @@ function TwoChoiceGame({ onHome }: { onHome: () => void }) {
             <h3>進め方</h3>
             <ol className="rule-list">
               <li>参加者を2人以上登録します。</li>
-              <li>カテゴリと今回使う設問数を選びます。</li>
+              <li>カテゴリ、Hな話題のON/OFF、今回使う設問数を選びます。</li>
               <li>お題が出たら、全員がAかBを選びます。答えにくい人はパスできます。</li>
               <li>結果が出たら、少数派または気になった回答の人から理由を聞きます。</li>
               <li>正解はありません。違いを楽しみながら、軽く会話を広げるゲームです。</li>
@@ -475,9 +512,28 @@ function TwoChoiceGame({ onHome }: { onHome: () => void }) {
           />
           <SegmentedControl
             label="カテゴリ"
-            options={twoChoiceCategories}
-            value={state.category}
+            options={availableTwoChoiceCategories}
+            value={activeTwoChoiceCategory}
             onChange={(category) => setState({ ...state, category, deckPromptIds: [], deckIndex: 0, promptId: null })}
+          />
+          <ToggleSwitch
+            label="Hな話題"
+            description={
+              state.includeAdultTopics
+                ? "ON: 全部に大人向けも混ぜます。カテゴリで大人向けだけも選べます。"
+                : "OFF: 軽いH寄りの恋バナや距離感の話題は出ません。"
+            }
+            checked={state.includeAdultTopics}
+            onChange={(includeAdultTopics) =>
+              setState({
+                ...state,
+                includeAdultTopics,
+                category: state.category === "adult" ? "all" : state.category,
+                deckPromptIds: [],
+                deckIndex: 0,
+                promptId: null,
+              })
+            }
           />
           <SegmentedControl
             label="今回の設問数"
@@ -495,12 +551,12 @@ function TwoChoiceGame({ onHome }: { onHome: () => void }) {
           />
           <p className="soft-note">
             この条件では{promptPool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。
-            「通常全部」には大人向けカテゴリを含めていません。
+            Hな話題は{state.includeAdultTopics ? "ON" : "OFF"}です。
           </p>
-          {isTwoChoiceAdultCategory && (
+          {state.includeAdultTopics && (
             <div className="notice-panel">
-              <strong>大人向けカテゴリです</strong>
-              <p>軽いH寄りの恋バナや距離感の話題を含みます。苦手な人がいる場では、別カテゴリを選んでください。</p>
+              <strong>Hな話題がONです</strong>
+              <p>軽いH寄りの恋バナや距離感の話題を含みます。苦手な人がいる場ではOFFにしてください。</p>
             </div>
           )}
           <div className="action-row">
@@ -669,6 +725,7 @@ type WordWolfAssignment = {
 type WordWolfState = {
   players: Player[];
   category: WordWolfCategory;
+  includeAdultTopics: boolean;
   seconds: number;
   step: WordWolfStep;
   topicId: string | null;
@@ -690,6 +747,7 @@ const wordWolfTimeOptions: SegmentedOption<"180" | "300" | "420">[] = [
 const initialWordWolfState: WordWolfState = {
   players: [],
   category: "all",
+  includeAdultTopics: false,
   seconds: 300,
   step: "setup",
   topicId: null,
@@ -705,12 +763,18 @@ const initialWordWolfState: WordWolfState = {
 function WordWolfGame({ onHome }: { onHome: () => void }) {
   const [state, setState] = useStoredState<WordWolfState>("word-wolf", initialWordWolfState);
   const canStart = state.players.length >= 4 && state.players.every((player) => player.name.trim());
+  const activeWordWolfCategory = !state.includeAdultTopics && state.category === "adult" ? "all" : state.category;
+  const availableWordWolfCategories = state.includeAdultTopics ? wordWolfCategories : normalWordWolfCategories;
   const topicPool = useMemo(
-    () => (state.category === "all" ? normalWordWolfTopics : wordWolfTopics.filter((topic) => topic.category === state.category)),
-    [state.category],
+    () =>
+      activeWordWolfCategory === "all"
+        ? state.includeAdultTopics
+          ? wordWolfTopics
+          : normalWordWolfTopics
+        : wordWolfTopics.filter((topic) => topic.category === activeWordWolfCategory),
+    [activeWordWolfCategory, state.includeAdultTopics],
   );
-  const isAdultCategory = state.category === "adult";
-  const selectedWordWolfCategory = wordWolfCategories.find((category) => category.value === state.category);
+  const selectedWordWolfCategory = wordWolfCategories.find((category) => category.value === activeWordWolfCategory);
 
   useEffect(() => {
     if (state.step !== "discussion" || !state.timerRunning) return;
@@ -777,6 +841,7 @@ function WordWolfGame({ onHome }: { onHome: () => void }) {
             <h3>進め方</h3>
             <ol className="rule-list">
               <li>参加者を4人以上登録します。</li>
+              <li>お題カテゴリとHな話題のON/OFFを選びます。</li>
               <li>アプリが多数派のお題と、1人だけ違う少数派のお題を配ります。</li>
               <li>スマホを順番に回し、自分のお題だけを確認します。</li>
               <li>会話タイムでは、お題そのものを言わずに特徴や経験を話します。</li>
@@ -791,18 +856,38 @@ function WordWolfGame({ onHome }: { onHome: () => void }) {
           />
           <SegmentedControl
             label="お題"
-            options={wordWolfCategories}
-            value={state.category}
+            options={availableWordWolfCategories}
+            value={activeWordWolfCategory}
             onChange={(category) => setState({ ...state, category })}
+          />
+          <ToggleSwitch
+            label="Hな話題"
+            description={
+              state.includeAdultTopics
+                ? "ON: 全部に大人向けも混ぜます。カテゴリで大人向けだけも選べます。"
+                : "OFF: 軽い恋バナや距離感の強い話題は出ません。"
+            }
+            checked={state.includeAdultTopics}
+            onChange={(includeAdultTopics) =>
+              setState({
+                ...state,
+                includeAdultTopics,
+                category: state.category === "adult" ? "all" : state.category,
+                topicId: null,
+                assignments: [],
+                votes: {},
+                voteIndex: 0,
+              })
+            }
           />
           <p className="soft-note">
             {selectedWordWolfCategory?.label ?? "選択中"}: {topicPool.length}ペアからランダムに1つ配ります。
-            「通常全部」には大人向けカテゴリを含めていません。
+            Hな話題は{state.includeAdultTopics ? "ON" : "OFF"}です。
           </p>
-          {isAdultCategory && (
+          {state.includeAdultTopics && (
             <div className="notice-panel">
-              <strong>大人向けカテゴリです</strong>
-              <p>軽い恋バナや距離感の話題を含みます。苦手な人がいる場では、別カテゴリを選んでください。</p>
+              <strong>Hな話題がONです</strong>
+              <p>軽い恋バナや距離感の話題を含みます。苦手な人がいる場ではOFFにしてください。</p>
             </div>
           )}
           <SegmentedControl

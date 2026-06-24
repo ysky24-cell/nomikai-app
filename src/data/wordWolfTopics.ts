@@ -22,7 +22,7 @@ export type WordWolfTopicPair = {
 type TopicTuple = readonly [majorityWord: string, minorityWord: string];
 
 export const wordWolfCategories: readonly { value: WordWolfCategory; label: string }[] = [
-  { value: "all", label: "通常全部" },
+  { value: "all", label: "全部" },
   { value: "food", label: "食べ物" },
   { value: "daily", label: "日常" },
   { value: "outing", label: "おでかけ" },
@@ -34,6 +34,8 @@ export const wordWolfCategories: readonly { value: WordWolfCategory; label: stri
   { value: "night", label: "夜の話題" },
   { value: "adult", label: "大人向け" },
 ];
+
+export const normalWordWolfCategories = wordWolfCategories.filter((category) => category.value !== "adult");
 
 const topicGroups = {
   food: [
