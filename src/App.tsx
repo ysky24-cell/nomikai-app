@@ -504,6 +504,10 @@ function App() {
     return <AnonymousQuestionBoxGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
   }
 
+  if (activeGame === "werewolf-game") {
+    return <WerewolfGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+  }
+
   if (isUrlCandidateGameKey(activeGame)) {
     return (
       <UrlCandidateGame
@@ -1326,6 +1330,768 @@ function UrlActionLog({ logs }: { logs: readonly string[] }) {
         <span key={`${log}-${index}`}>{log}</span>
       ))}
     </div>
+  );
+}
+
+type WerewolfRole = "werewolf" | "villager" | "seer" | "knight" | "medium";
+type WerewolfPhase = "setup" | "reveal" | "night" | "day" | "vote" | "voteResult" | "result";
+type WerewolfNightStep = "werewolf" | "seer" | "knight" | "medium" | "dawn";
+type WerewolfWinner = "village" | "werewolves";
+
+type WerewolfAssignment = {
+  playerId: string;
+  role: WerewolfRole;
+  alive: boolean;
+};
+
+type WerewolfState = {
+  players: Player[];
+  phase: WerewolfPhase;
+  assignments: WerewolfAssignment[];
+  revealIndex: number;
+  revealVisible: boolean;
+  dayNumber: number;
+  discussionSeconds: number;
+  remainingSeconds: number;
+  timerRunning: boolean;
+  nightStep: WerewolfNightStep;
+  werewolfTargetId: string | null;
+  seerTargetId: string | null;
+  knightTargetId: string | null;
+  mediumChecked: boolean;
+  lastExecutedId: string | null;
+  lastKilledId: string | null;
+  morningMessage: string;
+  votes: Record<string, string>;
+  voteIndex: number;
+  tiedTargetIds: string[];
+  winner: WerewolfWinner | null;
+  resultReason: string;
+  actionLog: string[];
+};
+
+const werewolfRoleOrder: readonly WerewolfRole[] = ["werewolf", "seer", "knight", "medium", "villager"];
+
+const werewolfRoleLabels: Record<WerewolfRole, string> = {
+  werewolf: "人狼",
+  villager: "村人",
+  seer: "占い師",
+  knight: "騎士",
+  medium: "霊媒師",
+};
+
+const werewolfRoleDescriptions: Record<WerewolfRole, string> = {
+  werewolf: "夜に仲間と相談し、襲撃する相手を1人選びます。昼は正体を隠して村人側に紛れ込みます。",
+  villager: "特殊能力はありません。昼の話し合いで矛盾や反応を見て、人狼を探します。",
+  seer: "夜に1人を占い、その人が人狼かどうかを知ることができます。",
+  knight: "夜に1人を守ります。守った相手が襲撃された場合、その夜は誰も脱落しません。",
+  medium: "夜に、直前の昼に追放された人が人狼だったかどうかを確認できます。",
+};
+
+const werewolfDiscussionTimeOptions: SegmentedOption<"180" | "300" | "420">[] = [
+  { value: "180", label: "3分" },
+  { value: "300", label: "5分" },
+  { value: "420", label: "7分" },
+];
+
+const initialWerewolfState: WerewolfState = {
+  players: [],
+  phase: "setup",
+  assignments: [],
+  revealIndex: 0,
+  revealVisible: false,
+  dayNumber: 1,
+  discussionSeconds: 300,
+  remainingSeconds: 300,
+  timerRunning: false,
+  nightStep: "werewolf",
+  werewolfTargetId: null,
+  seerTargetId: null,
+  knightTargetId: null,
+  mediumChecked: false,
+  lastExecutedId: null,
+  lastKilledId: null,
+  morningMessage: "",
+  votes: {},
+  voteIndex: 0,
+  tiedTargetIds: [],
+  winner: null,
+  resultReason: "",
+  actionLog: [],
+};
+
+function getWerewolfRoleDeck(playerCount: number): WerewolfRole[] {
+  const roles: WerewolfRole[] =
+    playerCount <= 6
+      ? ["werewolf", "seer", "knight"]
+      : playerCount <= 8
+        ? ["werewolf", "werewolf", "seer", "knight"]
+        : playerCount <= 10
+          ? ["werewolf", "werewolf", "seer", "knight", "medium"]
+          : ["werewolf", "werewolf", "werewolf", "seer", "knight", "medium"];
+  const villagerCount = Math.max(0, playerCount - roles.length);
+  return [...roles, ...Array.from({ length: villagerCount }, () => "villager" as const)];
+}
+
+function countWerewolfRoles(roles: readonly WerewolfRole[]) {
+  return werewolfRoleOrder.map((role) => ({
+    role,
+    count: roles.filter((item) => item === role).length,
+  }));
+}
+
+function createWerewolfAssignments(players: Player[]) {
+  const roles = shuffle(getWerewolfRoleDeck(players.length));
+  return players.map((player, index) => ({
+    playerId: player.id,
+    role: roles[index],
+    alive: true,
+  })) satisfies WerewolfAssignment[];
+}
+
+function getWerewolfAssignment(assignments: readonly WerewolfAssignment[], playerId: string) {
+  return assignments.find((assignment) => assignment.playerId === playerId) ?? null;
+}
+
+function getWerewolfPlayerName(players: readonly Player[], playerId: string | null) {
+  if (!playerId) return "該当者なし";
+  return players.find((player) => player.id === playerId)?.name ?? "該当者なし";
+}
+
+function hasAliveWerewolfRole(assignments: readonly WerewolfAssignment[], role: WerewolfRole) {
+  return assignments.some((assignment) => assignment.alive && assignment.role === role);
+}
+
+function getAliveWerewolfPlayers(players: readonly Player[], assignments: readonly WerewolfAssignment[]) {
+  return players.filter((player) => getWerewolfAssignment(assignments, player.id)?.alive);
+}
+
+function getWerewolfOutcome(assignments: readonly WerewolfAssignment[]) {
+  const alive = assignments.filter((assignment) => assignment.alive);
+  const werewolves = alive.filter((assignment) => assignment.role === "werewolf").length;
+  const villagers = alive.length - werewolves;
+  if (werewolves === 0) {
+    return { winner: "village" as const, reason: "人狼を全員追放しました。" };
+  }
+  if (werewolves >= villagers) {
+    return { winner: "werewolves" as const, reason: "人狼の数が村人側以上になりました。" };
+  }
+  return null;
+}
+
+function markWerewolfPlayerDead(assignments: readonly WerewolfAssignment[], playerId: string) {
+  return assignments.map((assignment) =>
+    assignment.playerId === playerId ? { ...assignment, alive: false } : assignment,
+  );
+}
+
+function getNextWerewolfNightStep(
+  currentStep: WerewolfNightStep,
+  assignments: readonly WerewolfAssignment[],
+  lastExecutedId: string | null,
+): WerewolfNightStep {
+  const order: readonly WerewolfNightStep[] = ["werewolf", "seer", "knight", "medium", "dawn"];
+  const startIndex = order.indexOf(currentStep) + 1;
+  for (const step of order.slice(startIndex)) {
+    if (step === "seer" && !hasAliveWerewolfRole(assignments, "seer")) continue;
+    if (step === "knight" && !hasAliveWerewolfRole(assignments, "knight")) continue;
+    if (step === "medium" && (!hasAliveWerewolfRole(assignments, "medium") || !lastExecutedId)) continue;
+    return step;
+  }
+  return "dawn";
+}
+
+function tallyWerewolfVotes(votes: Record<string, string>, candidates: readonly Player[]) {
+  const rows = candidates.map((player) => ({
+    player,
+    count: Object.values(votes).filter((targetId) => targetId === player.id).length,
+  }));
+  const maxVotes = Math.max(0, ...rows.map((row) => row.count));
+  const topTargetIds = rows.filter((row) => row.count === maxVotes && maxVotes > 0).map((row) => row.player.id);
+  return { rows, maxVotes, topTargetIds };
+}
+
+function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
+  const [storedState, setState] = useStoredState<WerewolfState>("werewolf-game", initialWerewolfState);
+  const state = { ...initialWerewolfState, ...storedState };
+  const canStart = state.players.length >= 6 && state.players.every((player) => player.name.trim());
+  const rolePreview = countWerewolfRoles(getWerewolfRoleDeck(Math.max(6, state.players.length || 6)));
+  const alivePlayers = getAliveWerewolfPlayers(state.players, state.assignments);
+  const deadPlayers = state.players.filter((player) => !alivePlayers.some((alivePlayer) => alivePlayer.id === player.id));
+  const currentRevealPlayer = state.players[state.revealIndex] ?? null;
+  const currentRevealAssignment = currentRevealPlayer
+    ? getWerewolfAssignment(state.assignments, currentRevealPlayer.id)
+    : null;
+  const currentVoter = alivePlayers[state.voteIndex] ?? null;
+  const voteParticipantIds = new Set([...Object.keys(state.votes), ...Object.values(state.votes)]);
+  const voteDisplayPlayers =
+    state.phase === "voteResult" && voteParticipantIds.size > 0
+      ? state.players.filter((player) => voteParticipantIds.has(player.id))
+      : alivePlayers;
+  const voteTally = tallyWerewolfVotes(state.votes, voteDisplayPlayers);
+
+  useEffect(() => {
+    if (state.phase !== "day" || !state.timerRunning) return;
+    const timer = window.setInterval(() => {
+      setState((current) => {
+        if (current.phase !== "day" || !current.timerRunning) return current;
+        const next = Math.max(0, current.remainingSeconds - 1);
+        return {
+          ...current,
+          remainingSeconds: next,
+          timerRunning: next > 0,
+        };
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [setState, state.phase, state.timerRunning]);
+
+  function startWerewolfGame() {
+    const assignments = createWerewolfAssignments(state.players);
+    setState({
+      ...initialWerewolfState,
+      players: state.players,
+      discussionSeconds: state.discussionSeconds,
+      remainingSeconds: state.discussionSeconds,
+      phase: "reveal",
+      assignments,
+      actionLog: ["役職を配りました。スマホを順番に回して本人だけ確認します。"],
+    });
+  }
+
+  function goToNextNight(nextState: WerewolfState = state) {
+    setState({
+      ...nextState,
+      phase: "night",
+      dayNumber: nextState.dayNumber + 1,
+      timerRunning: false,
+      nightStep: "werewolf",
+      werewolfTargetId: null,
+      seerTargetId: null,
+      knightTargetId: null,
+      mediumChecked: false,
+      morningMessage: "",
+      votes: {},
+      voteIndex: 0,
+      tiedTargetIds: [],
+    });
+  }
+
+  function finishNight() {
+    const killedId =
+      state.werewolfTargetId && state.werewolfTargetId !== state.knightTargetId ? state.werewolfTargetId : null;
+    const nextAssignments = killedId ? markWerewolfPlayerDead(state.assignments, killedId) : state.assignments;
+    const morningMessage = killedId
+      ? `${getWerewolfPlayerName(state.players, killedId)}さんが襲撃されました。`
+      : "平和な朝です。騎士の護衛が成功したか、人狼の襲撃が通りませんでした。";
+    const outcome = getWerewolfOutcome(nextAssignments);
+    const nextLog = [morningMessage, ...state.actionLog].slice(0, 10);
+    if (outcome) {
+      setState({
+        ...state,
+        assignments: nextAssignments,
+        phase: "result",
+        lastKilledId: killedId,
+        morningMessage,
+        winner: outcome.winner,
+        resultReason: `${morningMessage} ${outcome.reason}`,
+        actionLog: nextLog,
+      });
+      return;
+    }
+    setState({
+      ...state,
+      assignments: nextAssignments,
+      phase: "day",
+      lastKilledId: killedId,
+      morningMessage,
+      remainingSeconds: state.discussionSeconds,
+      timerRunning: false,
+      votes: {},
+      voteIndex: 0,
+      tiedTargetIds: [],
+      actionLog: nextLog,
+    });
+  }
+
+  function finishVote(targetId: string) {
+    if (!currentVoter) return;
+    const nextVotes = { ...state.votes, [currentVoter.id]: targetId };
+    if (state.voteIndex + 1 < alivePlayers.length) {
+      setState({ ...state, votes: nextVotes, voteIndex: state.voteIndex + 1 });
+      return;
+    }
+
+    const tally = tallyWerewolfVotes(nextVotes, alivePlayers);
+    if (tally.topTargetIds.length !== 1) {
+      setState({
+        ...state,
+        votes: nextVotes,
+        phase: "voteResult",
+        tiedTargetIds: tally.topTargetIds,
+        lastExecutedId: null,
+        timerRunning: false,
+        actionLog: [`同票です。${tally.maxVotes}票で並びました。`, ...state.actionLog].slice(0, 10),
+      });
+      return;
+    }
+
+    const executedId = tally.topTargetIds[0];
+    const nextAssignments = markWerewolfPlayerDead(state.assignments, executedId);
+    const executedName = getWerewolfPlayerName(state.players, executedId);
+    const outcome = getWerewolfOutcome(nextAssignments);
+    const nextLog = [`${executedName}さんを追放しました。`, ...state.actionLog].slice(0, 10);
+    if (outcome) {
+      setState({
+        ...state,
+        assignments: nextAssignments,
+        votes: nextVotes,
+        phase: "result",
+        tiedTargetIds: [],
+        lastExecutedId: executedId,
+        winner: outcome.winner,
+        resultReason: `${executedName}さんを追放しました。${outcome.reason}`,
+        timerRunning: false,
+        actionLog: nextLog,
+      });
+      return;
+    }
+
+    setState({
+      ...state,
+      assignments: nextAssignments,
+      votes: nextVotes,
+      phase: "voteResult",
+      tiedTargetIds: [],
+      lastExecutedId: executedId,
+      timerRunning: false,
+      actionLog: nextLog,
+    });
+  }
+
+  const werewolfTargets = alivePlayers.filter((player) => getWerewolfAssignment(state.assignments, player.id)?.role !== "werewolf");
+  const seerTargets = alivePlayers.filter((player) => getWerewolfAssignment(state.assignments, player.id)?.role !== "seer");
+  const knightTargets = alivePlayers;
+  const selectedSeerAssignment = state.seerTargetId ? getWerewolfAssignment(state.assignments, state.seerTargetId) : null;
+  const lastExecutedAssignment = state.lastExecutedId ? getWerewolfAssignment(state.assignments, state.lastExecutedId) : null;
+
+  return (
+    <GameFrame
+      title="人狼ゲーム"
+      subtitle="役職を隠して、夜の行動と昼の話し合いで人狼を探す進行補助です。"
+      onHome={onHome}
+      onResetAll={onResetAll}
+    >
+      {state.phase === "setup" && (
+        <section className="tool-surface">
+          <div className="howto-panel">
+            <h3>詳しい進め方</h3>
+            <ol className="rule-list">
+              <li>司会を1人決めます。司会は参加者欄に入れず、画面を見ながら進行します。</li>
+              <li>参加者を6〜12人で登録し、役職を配ります。</li>
+              <li>スマホを順番に回して、本人だけが自分の役職を確認します。</li>
+              <li>夜は司会の合図で、人狼の襲撃、占い師の占い、騎士の護衛、霊媒師の確認を処理します。</li>
+              <li>昼は議論してから投票します。人狼を全員追放すれば村人側、人狼が村人側以上の人数になれば人狼側の勝ちです。</li>
+            </ol>
+          </div>
+
+          <PlayerSetup
+            players={state.players}
+            minPlayers={6}
+            maxPlayers={12}
+            onChange={(players) => setState({ ...state, players, assignments: [], phase: "setup" })}
+          />
+
+          <SegmentedControl
+            label="昼の議論時間"
+            options={werewolfDiscussionTimeOptions}
+            value={String(state.discussionSeconds) as "180" | "300" | "420"}
+            onChange={(seconds) =>
+              setState({ ...state, discussionSeconds: Number(seconds), remainingSeconds: Number(seconds) })
+            }
+          />
+
+          <div className="howto-panel compact">
+            <h3>今回の役職配分</h3>
+            <div className="chip-list">
+              {rolePreview
+                .filter((item) => item.count > 0)
+                .map((item) => (
+                  <span key={item.role}>
+                    {werewolfRoleLabels[item.role]} {item.count}人
+                  </span>
+                ))}
+            </div>
+          </div>
+
+          <div className="notice-panel calm">
+            <strong>Hなお題はありません</strong>
+            <p>人狼は推理と会話のゲームとして進行します。飲酒の強要、暴露、個人攻撃になる言い方は司会が止めます。</p>
+          </div>
+
+          <div className="action-row">
+            <button className="primary-button" disabled={!canStart} onClick={startWerewolfGame}>
+              <Play size={18} />
+              役職を配る
+            </button>
+            <button className="secondary-button" onClick={() => setState(initialWerewolfState)}>
+              <RotateCcw size={18} />
+              リセット
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.phase === "reveal" && currentRevealPlayer && currentRevealAssignment && (
+        <section className="tool-surface center-flow">
+          <p className="eyebrow">
+            役職確認 {state.revealIndex + 1}/{state.players.length}
+          </p>
+          <h2>{currentRevealPlayer.name}さん</h2>
+          <p className="soft-note">本人だけが見てください。見終わったら必ず隠してから次の人へ回します。</p>
+          <div className={`secret-word ${state.revealVisible ? "visible" : ""}`}>
+            {state.revealVisible ? werewolfRoleLabels[currentRevealAssignment.role] : "役職を隠しています"}
+          </div>
+          {state.revealVisible && (
+            <div className="answer-panel">
+              <strong>役職の説明</strong>
+              <p>{werewolfRoleDescriptions[currentRevealAssignment.role]}</p>
+            </div>
+          )}
+          <div className="action-row centered">
+            <button className="primary-button" onClick={() => setState({ ...state, revealVisible: !state.revealVisible })}>
+              {state.revealVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+              {state.revealVisible ? "隠す" : "見る"}
+            </button>
+            <button
+              className="secondary-button"
+              disabled={!state.revealVisible}
+              onClick={() => {
+                if (state.revealIndex + 1 >= state.players.length) {
+                  setState({ ...state, phase: "night", revealVisible: false, nightStep: "werewolf" });
+                } else {
+                  setState({ ...state, revealIndex: state.revealIndex + 1, revealVisible: false });
+                }
+              }}
+            >
+              <ChevronRight size={18} />
+              {state.revealIndex + 1 >= state.players.length ? "最初の夜へ" : "次へ"}
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.phase === "night" && (
+        <section className="tool-surface">
+          <div className="prompt-panel">
+            <p className="eyebrow">夜 {state.dayNumber}</p>
+            <h2>司会用の夜行動</h2>
+            <p>司会だけが画面を見てください。該当する役職の人に静かに目を開けてもらい、対象を記録します。</p>
+          </div>
+
+          <div className="position-list">
+            {alivePlayers.map((player) => (
+              <span key={player.id}>{player.name}</span>
+            ))}
+          </div>
+
+          {state.nightStep === "werewolf" && (
+            <div className="url-interaction-panel">
+              <h3>1. 人狼の襲撃</h3>
+              <p className="soft-note">人狼は目を開け、襲撃する相手を1人選びます。人狼同士はここで仲間を確認できます。</p>
+              <div className="chip-list">
+                {state.players
+                  .filter((player) => {
+                    const assignment = getWerewolfAssignment(state.assignments, player.id);
+                    return assignment?.role === "werewolf" && assignment.alive;
+                  })
+                  .map((player) => (
+                    <span key={player.id}>{player.name}</span>
+                  ))}
+              </div>
+              <div className="candidate-grid">
+                {werewolfTargets.map((player) => (
+                  <button
+                    className={state.werewolfTargetId === player.id ? "selected-choice" : ""}
+                    key={player.id}
+                    onClick={() => setState({ ...state, werewolfTargetId: player.id })}
+                  >
+                    {player.name}
+                  </button>
+                ))}
+              </div>
+              <div className="action-row">
+                <button
+                  className="primary-button"
+                  disabled={!state.werewolfTargetId}
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      nightStep: getNextWerewolfNightStep("werewolf", state.assignments, state.lastExecutedId),
+                    })
+                  }
+                >
+                  <ChevronRight size={18} />
+                  次の夜行動へ
+                </button>
+              </div>
+            </div>
+          )}
+
+          {state.nightStep === "seer" && (
+            <div className="url-interaction-panel">
+              <h3>2. 占い師の占い</h3>
+              <p className="soft-note">占い師は目を開け、占いたい人を1人選びます。司会は結果だけを静かに伝えます。</p>
+              <div className="candidate-grid">
+                {seerTargets.map((player) => (
+                  <button
+                    className={state.seerTargetId === player.id ? "selected-choice" : ""}
+                    key={player.id}
+                    onClick={() => setState({ ...state, seerTargetId: player.id })}
+                  >
+                    {player.name}
+                  </button>
+                ))}
+              </div>
+              {state.seerTargetId && selectedSeerAssignment && (
+                <div className="answer-panel">
+                  <strong>{getWerewolfPlayerName(state.players, state.seerTargetId)}さんの占い結果</strong>
+                  <p>{selectedSeerAssignment.role === "werewolf" ? "人狼です" : "人狼ではありません"}</p>
+                </div>
+              )}
+              <div className="action-row">
+                <button
+                  className="primary-button"
+                  disabled={!state.seerTargetId}
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      nightStep: getNextWerewolfNightStep("seer", state.assignments, state.lastExecutedId),
+                    })
+                  }
+                >
+                  <ChevronRight size={18} />
+                  次の夜行動へ
+                </button>
+              </div>
+            </div>
+          )}
+
+          {state.nightStep === "knight" && (
+            <div className="url-interaction-panel">
+              <h3>3. 騎士の護衛</h3>
+              <p className="soft-note">騎士は目を開け、守りたい人を1人選びます。同じ人を連続で守るかどうかは、場のルールで決めてOKです。</p>
+              <div className="candidate-grid">
+                {knightTargets.map((player) => (
+                  <button
+                    className={state.knightTargetId === player.id ? "selected-choice" : ""}
+                    key={player.id}
+                    onClick={() => setState({ ...state, knightTargetId: player.id })}
+                  >
+                    {player.name}
+                  </button>
+                ))}
+              </div>
+              <div className="action-row">
+                <button
+                  className="primary-button"
+                  disabled={!state.knightTargetId}
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      nightStep: getNextWerewolfNightStep("knight", state.assignments, state.lastExecutedId),
+                    })
+                  }
+                >
+                  <ChevronRight size={18} />
+                  次の夜行動へ
+                </button>
+              </div>
+            </div>
+          )}
+
+          {state.nightStep === "medium" && lastExecutedAssignment && (
+            <div className="url-interaction-panel">
+              <h3>4. 霊媒師の確認</h3>
+              <p className="soft-note">霊媒師は目を開け、直前の昼に追放された人が人狼だったかどうかを確認します。</p>
+              <div className="answer-panel">
+                <strong>{getWerewolfPlayerName(state.players, state.lastExecutedId)}さんの霊媒結果</strong>
+                <p>{lastExecutedAssignment.role === "werewolf" ? "人狼でした" : "人狼ではありませんでした"}</p>
+              </div>
+              <div className="action-row">
+                <button
+                  className="primary-button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      mediumChecked: true,
+                      nightStep: getNextWerewolfNightStep("medium", state.assignments, state.lastExecutedId),
+                    })
+                  }
+                >
+                  <ChevronRight size={18} />
+                  朝へ
+                </button>
+              </div>
+            </div>
+          )}
+
+          {state.nightStep === "dawn" && (
+            <div className="url-interaction-panel">
+              <h3>朝にする</h3>
+              <p className="soft-note">
+                襲撃対象は{getWerewolfPlayerName(state.players, state.werewolfTargetId)}さん、護衛対象は
+                {getWerewolfPlayerName(state.players, state.knightTargetId)}さんです。
+              </p>
+              <div className="action-row">
+                <button className="primary-button" onClick={finishNight}>
+                  <Play size={18} />
+                  朝の結果を出す
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+
+      {state.phase === "day" && (
+        <section className="tool-surface center-flow">
+          <p className="eyebrow">昼 {state.dayNumber}</p>
+          <h2>{state.morningMessage}</h2>
+          <div className="timer-display">{formatTime(state.remainingSeconds)}</div>
+          <div className="howto-panel compact">
+            <h3>昼の進め方</h3>
+            <ul className="rule-list">
+              <li>生存者だけで話し合います。脱落者は発言しません。</li>
+              <li>占い師や霊媒師は、結果を出すか隠すかを自分で判断します。</li>
+              <li>個人攻撃ではなく、発言の矛盾や投票理由を中心に話します。</li>
+            </ul>
+          </div>
+          <div className="position-list">
+            <span>生存 {alivePlayers.length}人</span>
+            <span>脱落 {deadPlayers.length}人</span>
+          </div>
+          <div className="action-row centered">
+            <button
+              className="primary-button"
+              onClick={() => setState({ ...state, timerRunning: !state.timerRunning })}
+              disabled={state.remainingSeconds === 0}
+            >
+              {state.timerRunning ? <Pause size={18} /> : <Play size={18} />}
+              {state.timerRunning ? "止める" : "開始"}
+            </button>
+            <button
+              className="secondary-button"
+              onClick={() => setState({ ...state, phase: "vote", timerRunning: false, votes: {}, voteIndex: 0 })}
+            >
+              <Vote size={18} />
+              投票へ
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.phase === "vote" && currentVoter && (
+        <section className="tool-surface">
+          <div className="prompt-panel">
+            <p className="eyebrow">
+              投票 {state.voteIndex + 1}/{alivePlayers.length}
+            </p>
+            <h2>{currentVoter.name}さんの投票</h2>
+            <p>追放したい人を1人選びます。自分には投票できません。</p>
+          </div>
+          <div className="candidate-grid">
+            {alivePlayers
+              .filter((player) => player.id !== currentVoter.id)
+              .map((player) => (
+                <button key={player.id} onClick={() => finishVote(player.id)}>
+                  {player.name}
+                </button>
+              ))}
+          </div>
+        </section>
+      )}
+
+      {state.phase === "voteResult" && (
+        <section className="tool-surface">
+          <div className="result-heading">
+            <Vote size={24} />
+            <div>
+              <p className="eyebrow">投票結果</p>
+              <h2>{state.tiedTargetIds.length > 1 ? "同票です" : `${getWerewolfPlayerName(state.players, state.lastExecutedId)}さんを追放しました`}</h2>
+            </div>
+          </div>
+          <div className="result-table">
+            {voteTally.rows.map(({ player, count }) => (
+              <div className="result-row" key={player.id}>
+                <strong>{player.name}</strong>
+                <span>{count}票</span>
+                <span>{state.tiedTargetIds.includes(player.id) ? "同票" : player.id === state.lastExecutedId ? "追放" : "継続"}</span>
+                <span>{getWerewolfAssignment(state.assignments, player.id)?.alive ? "生存" : "脱落"}</span>
+              </div>
+            ))}
+          </div>
+          {state.tiedTargetIds.length > 1 ? (
+            <div className="action-row">
+              <button
+                className="primary-button"
+                onClick={() => setState({ ...state, phase: "vote", votes: {}, voteIndex: 0, tiedTargetIds: [] })}
+              >
+                <Vote size={18} />
+                再投票
+              </button>
+              <button className="secondary-button" onClick={() => goToNextNight({ ...state, lastExecutedId: null })}>
+                <ChevronRight size={18} />
+                追放なしで夜へ
+              </button>
+            </div>
+          ) : (
+            <div className="action-row">
+              <button className="primary-button" onClick={() => goToNextNight()}>
+                <ChevronRight size={18} />
+                次の夜へ
+              </button>
+            </div>
+          )}
+        </section>
+      )}
+
+      {state.phase === "result" && (
+        <section className="tool-surface">
+          <div className="result-heading">
+            <Trophy size={24} />
+            <div>
+              <p className="eyebrow">ゲーム終了</p>
+              <h2>{state.winner === "village" ? "村人側の勝ち" : "人狼側の勝ち"}</h2>
+            </div>
+          </div>
+          <p className="talk-cue">{state.resultReason}</p>
+          <div className="result-table">
+            {state.players.map((player) => {
+              const assignment = getWerewolfAssignment(state.assignments, player.id);
+              return (
+                <div className="result-row" key={player.id}>
+                  <strong>{player.name}</strong>
+                  <span>{assignment ? werewolfRoleLabels[assignment.role] : "不明"}</span>
+                  <span>{assignment?.alive ? "生存" : "脱落"}</span>
+                  <span>{assignment?.role === "werewolf" ? "人狼側" : "村人側"}</span>
+                </div>
+              );
+            })}
+          </div>
+          <div className="action-row">
+            <button className="primary-button" onClick={startWerewolfGame}>
+              <RotateCcw size={18} />
+              同じメンバーでもう一度
+            </button>
+            <button className="secondary-button" onClick={() => setState({ ...initialWerewolfState, players: state.players })}>
+              <Users size={18} />
+              設定へ
+            </button>
+          </div>
+        </section>
+      )}
+    </GameFrame>
   );
 }
 

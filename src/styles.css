@@ -476,6 +476,7 @@ input:focus {
 .segmented button.selected,
 .vote-buttons button.selected-choice,
 .ranking-vote-buttons button.selected-choice,
+.candidate-grid button.selected-choice,
 .candidate-grid button:hover {
   border-color: var(--teal);
   background: var(--teal-soft);

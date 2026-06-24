@@ -89,6 +89,7 @@ type PromptScene = {
 };
 
 type GameSpec = Omit<UrlCandidateGameConfig, "prompts"> & {
+  promptDeck?: "generated" | "none";
   style:
     | "majority"
     | "truthLie"
@@ -803,6 +804,7 @@ const specs: readonly GameSpec[] = [
     minPlayers: 6,
     maxPlayers: 12,
     style: "werewolf",
+    promptDeck: "none",
     answerMode: "open",
     setupSteps: [
       "参加者を6〜12人で登録し、司会を1人決めます。司会は役職を秘密で割り当てます。",
@@ -825,7 +827,7 @@ const specs: readonly GameSpec[] = [
 
 export const urlCandidateGameConfigs: readonly UrlCandidateGameConfig[] = specs.map((spec) => ({
   ...spec,
-  prompts: buildPrompts(spec),
+  prompts: spec.promptDeck === "none" ? [] : buildPrompts(spec),
 }));
 
 export const urlCandidateGameKeys = urlCandidateGameConfigs.map((config) => config.key);
