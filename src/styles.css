@@ -843,6 +843,72 @@ input:focus {
   line-height: 1.4;
 }
 
+.answer-input-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfb;
+  padding: 14px;
+  margin-top: 14px;
+}
+
+.answer-input-panel label {
+  display: grid;
+  gap: 8px;
+  color: var(--text);
+  font-weight: 900;
+}
+
+.answer-input-panel input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+}
+
+.warning-text {
+  margin: 10px 0 0;
+  color: var(--danger);
+  font-weight: 800;
+  line-height: 1.55;
+}
+
+.yamanote-board {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(220px, 0.65fr);
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.yamanote-board > div {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.answer-log-list,
+.score-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.answer-log-list span,
+.score-list span {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--soft);
+  color: var(--muted);
+  padding: 7px 10px;
+  font-weight: 900;
+}
+
+.score-list.wide {
+  justify-content: center;
+}
+
 .choice-display {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1106,6 +1172,7 @@ input:focus {
   .choice-display,
   .result-row,
   .quadrant-grid,
+  .yamanote-board,
   .question-log-form,
   .question-log-row,
   .question-submit-row,

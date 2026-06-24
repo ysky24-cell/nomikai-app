@@ -61,8 +61,14 @@ import {
   turtleSoupCategories,
   type TurtleSoupFilter,
 } from "./data/turtleSoupCases";
+import {
+  yamanoteCategories,
+  yamanoteThemes,
+  type YamanoteCategory,
+} from "./data/yamanoteThemes";
 
 type GameKey =
+  | "yamanote"
   | "two-choice"
   | "word-wolf"
   | "ng-word"
@@ -89,6 +95,7 @@ type GameMeta = {
 
 const STORAGE_PREFIX = "nomikai-app:v1:";
 const STORED_GAME_KEYS: readonly GameKey[] = [
+  "yamanote",
   "two-choice",
   "word-wolf",
   "ng-word",
@@ -100,6 +107,15 @@ const STORED_GAME_KEYS: readonly GameKey[] = [
 ];
 
 const activeGames: GameMeta[] = [
+  {
+    key: "yamanote",
+    title: "山手線ゲーム",
+    description: "お題に合う言葉をリズムよく順番に答える",
+    people: "2人から",
+    minutes: "3分から",
+    accent: "teal",
+    icon: Timer,
+  },
   {
     key: "two-choice",
     title: "二択トーク",
@@ -232,6 +248,10 @@ function App() {
   function resetAllGames() {
     clearStoredGameStates();
     setActiveGame(null);
+  }
+
+  if (activeGame === "yamanote") {
+    return <YamanoteGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
   }
 
   if (activeGame === "two-choice") {
@@ -514,6 +534,331 @@ function GameFrame({
 
 function EmptyState({ text }: { text: string }) {
   return <p className="empty-state">{text}</p>;
+}
+
+type YamanoteStep = "setup" | "play" | "complete";
+type YamanoteThemeCount = 5 | 10 | 20 | 30 | 50 | 100 | 300;
+type YamanoteSeconds = 3 | 5 | 10;
+
+type YamanoteAnswerLog = {
+  id: string;
+  playerId: string;
+  playerName: string;
+  answer: string;
+};
+
+type YamanoteState = {
+  players: Player[];
+  category: YamanoteCategory;
+  themeCount: YamanoteThemeCount;
+  secondsPerTurn: YamanoteSeconds;
+  step: YamanoteStep;
+  deckThemeIds: string[];
+  deckIndex: number;
+  currentPlayerIndex: number;
+  answerLog: YamanoteAnswerLog[];
+  missCounts: Record<string, number>;
+};
+
+const yamanoteThemeCountOptions: SegmentedOption<string>[] = [
+  { value: "5", label: "5問" },
+  { value: "10", label: "10問" },
+  { value: "20", label: "20問" },
+  { value: "30", label: "30問" },
+  { value: "50", label: "50問" },
+  { value: "100", label: "100問" },
+  { value: "300", label: "300問" },
+];
+
+const yamanoteSecondsOptions: SegmentedOption<string>[] = [
+  { value: "3", label: "3秒" },
+  { value: "5", label: "5秒" },
+  { value: "10", label: "10秒" },
+];
+
+const initialYamanoteState: YamanoteState = {
+  players: [],
+  category: "all",
+  themeCount: 10,
+  secondsPerTurn: 3,
+  step: "setup",
+  deckThemeIds: [],
+  deckIndex: 0,
+  currentPlayerIndex: 0,
+  answerLog: [],
+  missCounts: {},
+};
+
+function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
+  const [storedState, setState] = useStoredState<YamanoteState>("yamanote", initialYamanoteState);
+  const [draftAnswer, setDraftAnswer] = useState("");
+  const state = { ...initialYamanoteState, ...storedState };
+  const themePool = useMemo(
+    () => (state.category === "all" ? yamanoteThemes : yamanoteThemes.filter((theme) => theme.category === state.category)),
+    [state.category],
+  );
+  const selectedThemeCount = Math.min(state.themeCount, themePool.length);
+  const activeTheme = yamanoteThemes.find((theme) => theme.id === state.deckThemeIds[state.deckIndex]) ?? null;
+  const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+  const canStart = state.players.length >= 2 && state.players.every((player) => player.name.trim());
+  const progressLabel = state.deckThemeIds.length > 0 ? `${state.deckIndex + 1}/${state.deckThemeIds.length}` : "";
+  const normalizedAnswers = new Set(state.answerLog.map((item) => item.answer.trim().toLowerCase()));
+  const normalizedDraft = draftAnswer.trim().toLowerCase();
+  const isDuplicateAnswer = Boolean(normalizedDraft && normalizedAnswers.has(normalizedDraft));
+
+  useEffect(() => {
+    if (state.step === "play" && !activeTheme) {
+      setState({ ...state, step: "setup", deckThemeIds: [], deckIndex: 0, answerLog: [] });
+    }
+  }, [activeTheme, setState, state.step]);
+
+  function startYamanote() {
+    const deckThemeIds = shuffle(themePool)
+      .slice(0, selectedThemeCount)
+      .map((theme) => theme.id);
+    setState({
+      ...state,
+      step: "play",
+      deckThemeIds,
+      deckIndex: 0,
+      currentPlayerIndex: 0,
+      answerLog: [],
+      missCounts: {},
+    });
+    setDraftAnswer("");
+  }
+
+  function rotatePlayer(extraMissForPlayerId?: string) {
+    setState({
+      ...state,
+      currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length),
+      missCounts: extraMissForPlayerId
+        ? { ...state.missCounts, [extraMissForPlayerId]: (state.missCounts[extraMissForPlayerId] ?? 0) + 1 }
+        : state.missCounts,
+    });
+    setDraftAnswer("");
+  }
+
+  function addYamanoteAnswer() {
+    const answer = draftAnswer.trim();
+    if (!answer || !currentPlayer || isDuplicateAnswer) return;
+    setState({
+      ...state,
+      currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length),
+      answerLog: [
+        ...state.answerLog,
+        { id: createId("answer"), playerId: currentPlayer.id, playerName: currentPlayer.name, answer },
+      ],
+    });
+    setDraftAnswer("");
+  }
+
+  function moveToNextYamanoteTheme() {
+    const nextIndex = state.deckIndex + 1;
+    if (nextIndex >= state.deckThemeIds.length) {
+      setState({ ...state, step: "complete", answerLog: [] });
+      setDraftAnswer("");
+      return;
+    }
+    setState({
+      ...state,
+      deckIndex: nextIndex,
+      currentPlayerIndex: nextIndex % Math.max(1, state.players.length),
+      answerLog: [],
+    });
+    setDraftAnswer("");
+  }
+
+  return (
+    <GameFrame
+      title="山手線ゲーム"
+      subtitle="お題に合う言葉を、リズムよく順番に答えていく古今東西ゲームです。"
+      onHome={onHome}
+      onResetAll={onResetAll}
+    >
+      {state.step === "setup" && (
+        <section className="tool-surface">
+          <div className="howto-panel">
+            <h3>進め方</h3>
+            <ol className="rule-list">
+              <li>参加者を2人以上登録します。</li>
+              <li>カテゴリ、今回使うお題数、1人の持ち時間を選びます。</li>
+              <li>お題が出たら、全員で手拍子などの一定リズムを作ります。</li>
+              <li>順番に、お題に合う言葉を1つずつ答えます。</li>
+              <li>同じ答え、長すぎる沈黙、明らかに違う答えはアウトとして記録します。</li>
+            </ol>
+          </div>
+          <PlayerSetup
+            players={state.players}
+            minPlayers={2}
+            maxPlayers={20}
+            onChange={(players) => setState({ ...state, players })}
+          />
+          <SegmentedControl
+            label="カテゴリ"
+            options={yamanoteCategories}
+            value={state.category}
+            onChange={(category) => setState({ ...state, category, deckThemeIds: [], deckIndex: 0, answerLog: [] })}
+          />
+          <SegmentedControl
+            label="今回のお題数"
+            options={yamanoteThemeCountOptions}
+            value={String(state.themeCount)}
+            onChange={(themeCount) =>
+              setState({
+                ...state,
+                themeCount: Number(themeCount) as YamanoteThemeCount,
+                deckThemeIds: [],
+                deckIndex: 0,
+                answerLog: [],
+              })
+            }
+          />
+          <SegmentedControl
+            label="1人の持ち時間"
+            options={yamanoteSecondsOptions}
+            value={String(state.secondsPerTurn)}
+            onChange={(secondsPerTurn) =>
+              setState({ ...state, secondsPerTurn: Number(secondsPerTurn) as YamanoteSeconds })
+            }
+          />
+          <p className="soft-note">
+            この条件では{themePool.length}問から、今回は{selectedThemeCount}問をランダムに使います。全体のお題は300問です。
+          </p>
+          <div className="notice-panel calm">
+            <strong>今年流の遊び方</strong>
+            <p>
+              内輪すぎない範囲で「このメンバーの共通体験」「今日の会場にあるもの」などに寄せると盛り上がります。
+              判断に迷ったら司会が明るく決めて、テンポを止めないのがコツです。
+            </p>
+          </div>
+          <div className="action-row">
+            <button className="primary-button" disabled={!canStart || selectedThemeCount === 0} onClick={startYamanote}>
+              <Play size={18} />
+              はじめる
+            </button>
+            <button className="secondary-button" onClick={() => setState(initialYamanoteState)}>
+              <RotateCcw size={18} />
+              リセット
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "play" && activeTheme && currentPlayer && (
+        <section className="tool-surface">
+          <div className="prompt-panel">
+            <p className="eyebrow">お題 {progressLabel}</p>
+            <h2>{activeTheme.theme}</h2>
+            <p>
+              {currentPlayer.name}さんの番です。{state.secondsPerTurn}秒以内を目安に、まだ出ていない答えを1つ言います。
+            </p>
+          </div>
+          <div className="chip-list">
+            {activeTheme.examples.map((example) => (
+              <span key={example}>例: {example}</span>
+            ))}
+          </div>
+          <div className="answer-input-panel">
+            <label>
+              答えを記録
+              <input
+                value={draftAnswer}
+                onChange={(event) => setDraftAnswer(event.target.value)}
+                placeholder="答えを入力"
+                maxLength={32}
+              />
+            </label>
+            {isDuplicateAnswer && <p className="warning-text">同じ答えがすでに出ています。アウトにするか、別の答えにしてください。</p>}
+            <div className="action-row">
+              <button className="primary-button" disabled={!draftAnswer.trim() || isDuplicateAnswer} onClick={addYamanoteAnswer}>
+                <Check size={18} />
+                セーフで次へ
+              </button>
+              <button className="secondary-button" onClick={() => rotatePlayer()}>
+                <ChevronRight size={18} />
+                パスで次へ
+              </button>
+              <button className="danger-button" onClick={() => rotatePlayer(currentPlayer.id)}>
+                <ShieldAlert size={18} />
+                アウト
+              </button>
+            </div>
+          </div>
+          <div className="yamanote-board">
+            <div>
+              <h3>出た答え</h3>
+              {state.answerLog.length === 0 ? (
+                <EmptyState text="まだありません" />
+              ) : (
+                <div className="answer-log-list">
+                  {state.answerLog.map((item) => (
+                    <span key={item.id}>
+                      {item.playerName}: {item.answer}
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div>
+              <h3>アウト記録</h3>
+              <div className="score-list">
+                {state.players.map((player) => (
+                  <span key={player.id}>
+                    {player.name}: {state.missCounts[player.id] ?? 0}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+          <div className="howto-panel compact">
+            <h3>判定の目安</h3>
+            <ul className="rule-list">
+              <li>すでに出た答えはアウトです。</li>
+              <li>お題から大きく外れた答えは、司会判断でアウトにします。</li>
+              <li>厳しくしすぎず、迷ったら「あり」にして次へ進むと場が止まりません。</li>
+            </ul>
+          </div>
+          <div className="action-row">
+            <button className="primary-button" onClick={moveToNextYamanoteTheme}>
+              {state.deckIndex + 1 >= state.deckThemeIds.length ? <Check size={18} /> : <ChevronRight size={18} />}
+              {state.deckIndex + 1 >= state.deckThemeIds.length ? "完了" : "次のお題"}
+            </button>
+            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup" })}>
+              <Users size={18} />
+              設定へ
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "complete" && (
+        <section className="tool-surface center-flow">
+          <Timer size={32} />
+          <p className="eyebrow">終了</p>
+          <h2>{state.deckThemeIds.length}問おつかれさまでした</h2>
+          <div className="score-list wide">
+            {state.players.map((player) => (
+              <span key={player.id}>
+                {player.name}: アウト{state.missCounts[player.id] ?? 0}回
+              </span>
+            ))}
+          </div>
+          <p className="talk-cue">場が温まっていたら、カテゴリを変えてもう一度遊べます。</p>
+          <div className="action-row centered">
+            <button className="primary-button" onClick={startYamanote}>
+              <RotateCcw size={18} />
+              もう一度
+            </button>
+            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup" })}>
+              <Users size={18} />
+              設定へ
+            </button>
+          </div>
+        </section>
+      )}
+    </GameFrame>
+  );
 }
 
 type JohariStep = "setup" | "self" | "peer" | "result" | "complete";
