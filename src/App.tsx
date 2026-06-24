@@ -453,6 +453,16 @@ function TwoChoiceGame({ onHome }: { onHome: () => void }) {
     <GameFrame title="二択トーク" subtitle="選んだ理由を話すだけで、場がすぐ温まります。" onHome={onHome}>
       {state.step === "setup" && (
         <section className="tool-surface">
+          <div className="howto-panel">
+            <h3>進め方</h3>
+            <ol className="rule-list">
+              <li>参加者を2人以上登録します。</li>
+              <li>カテゴリと今回使う設問数を選びます。</li>
+              <li>お題が出たら、全員がAかBを選びます。答えにくい人はパスできます。</li>
+              <li>結果が出たら、少数派または気になった回答の人から理由を聞きます。</li>
+              <li>正解はありません。違いを楽しみながら、軽く会話を広げるゲームです。</li>
+            </ol>
+          </div>
           <PlayerSetup
             players={state.players}
             minPlayers={2}
@@ -504,6 +514,14 @@ function TwoChoiceGame({ onHome }: { onHome: () => void }) {
               <span>A. {prompt.optionA}</span>
               <span>B. {prompt.optionB}</span>
             </div>
+          </div>
+          <div className="howto-panel compact">
+            <h3>投票のしかた</h3>
+            <ul className="rule-list">
+              <li>直感で選んで大丈夫です。</li>
+              <li>全員の投票が終わるまで、理由はまだ話さないと結果がきれいに出ます。</li>
+              <li>迷った人は「今の気分なら」で選ぶか、パスを使います。</li>
+            </ul>
           </div>
 
           <div className="vote-list">
@@ -562,7 +580,14 @@ function TwoChoiceGame({ onHome }: { onHome: () => void }) {
             <NameCluster title={prompt.optionA} players={result.byChoice.A} />
             <NameCluster title={prompt.optionB} players={result.byChoice.B} />
           </div>
-          <p className="talk-cue">少なかった側から理由を聞くと、話が広がりやすいです。</p>
+          <div className="howto-panel compact">
+            <h3>結果後の声かけ</h3>
+            <ul className="rule-list">
+              <li>少なかった側から「どうして？」と聞くと話が広がりやすいです。</li>
+              <li>同数なら、それぞれ1人ずつ理由を聞きます。</li>
+              <li>盛り上がったら深掘りして、落ち着いたら次のお題へ進みます。</li>
+            </ul>
+          </div>
           <div className="action-row">
             <button className="primary-button" onClick={moveToNextPrompt}>
               {state.deckIndex + 1 >= state.deckPromptIds.length ? <Check size={18} /> : <ChevronRight size={18} />}
@@ -1044,6 +1069,16 @@ function NgWordGame({ onHome }: { onHome: () => void }) {
     <GameFrame title="NGワードゲーム" subtitle="言わせたい、でも自分は言わない。会話中に遊べます。" onHome={onHome}>
       {state.step === "setup" && (
         <section className="tool-surface">
+          <div className="howto-panel">
+            <h3>進め方</h3>
+            <ol className="rule-list">
+              <li>参加者を3人以上登録します。</li>
+              <li>アプリが参加者ごとにNGワードを1つずつ配ります。</li>
+              <li>本人は自分のNGワードを見ません。他の人だけが確認します。</li>
+              <li>会話中に自分のNGワードを言ったら、その人に+1点を記録します。</li>
+              <li>制限時間が終わったら結果へ進み、点数が少ない人が勝ちです。</li>
+            </ol>
+          </div>
           <PlayerSetup
             players={state.players}
             minPlayers={3}
@@ -1081,7 +1116,9 @@ function NgWordGame({ onHome }: { onHome: () => void }) {
             {state.revealIndex + 1}/{state.players.length}
           </p>
           <h2>{currentRevealPlayer.name}さんのNGワード</h2>
-          <p className="soft-note">{currentRevealPlayer.name}さん本人は画面を見ないでください。</p>
+          <p className="soft-note">
+            {currentRevealPlayer.name}さん本人は画面を見ないでください。他の人が確認したら、次の人へ回します。
+          </p>
           <div className={`secret-word warning ${state.revealVisible ? "visible" : ""}`}>
             {state.revealVisible ? currentRevealAssignment.word : "NGワードを隠しています"}
           </div>
@@ -1105,6 +1142,14 @@ function NgWordGame({ onHome }: { onHome: () => void }) {
               次へ
             </button>
           </div>
+          <div className="howto-panel compact">
+            <h3>配るときの注意</h3>
+            <ul className="rule-list">
+              <li>本人に画面が見えない角度で確認します。</li>
+              <li>NGワードを声に出して読まないようにします。</li>
+              <li>見終わったら必ず隠してからスマホを渡します。</li>
+            </ul>
+          </div>
         </section>
       )}
 
@@ -1123,6 +1168,15 @@ function NgWordGame({ onHome }: { onHome: () => void }) {
               {state.timerRunning ? <Pause size={18} /> : <Play size={18} />}
               {state.timerRunning ? "止める" : "開始"}
             </button>
+          </div>
+
+          <div className="howto-panel compact">
+            <h3>会話中の進め方</h3>
+            <ul className="rule-list">
+              <li>誰かが自分のNGワードを言ったら、その人の+1を押します。</li>
+              <li>言ったか迷う場合は、その場の多数決で決めます。</li>
+              <li>脱落はなしです。点が入っても最後まで会話に参加します。</li>
+            </ul>
           </div>
 
           <div className="penalty-list">
@@ -1178,6 +1232,7 @@ function NgWordGame({ onHome }: { onHome: () => void }) {
             ))}
           </div>
           <p className="talk-cue">言わせようとした場面を振り返ると、もう一段盛り上がります。</p>
+          <p className="soft-note">同点の場合は全員勝ちとして扱うと、飲み会では終わり方が軽くなります。</p>
           <div className="action-row">
             <button className="primary-button" onClick={startRound}>
               <RotateCcw size={18} />
