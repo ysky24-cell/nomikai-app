@@ -135,7 +135,7 @@ const STORED_GAME_KEYS: readonly GameKey[] = [
 
 const homeFilterOptions: readonly SegmentedOption<HomeFilter>[] = [
   { value: "all", label: "全部" },
-  { value: "url", label: "URL候補" },
+  { value: "url", label: "定番" },
   { value: "talk", label: "会話" },
   { value: "reaction", label: "反射" },
   { value: "luck", label: "運" },
@@ -544,7 +544,7 @@ function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey) => void;
       <section className="home-filter" aria-label="ゲーム絞り込み">
         <SegmentedControl label="表示するゲーム" options={homeFilterOptions} value={filter} onChange={setFilter} />
         <p className="soft-note">
-          {visibleGames.length}件を表示中。URL候補は記事のゲームを静的ページ向けに置き換えた個別入口です。
+          {visibleGames.length}件を表示中。定番は、飲み会で使いやすい会話・反射・運試し系をまとめた入口です。
         </p>
       </section>
 
@@ -989,7 +989,7 @@ function UrlCandidateGame({
         <section className="tool-surface">
           <div className="prompt-panel">
             <p className="eyebrow">
-              URL候補 {config.articleOrder} / お題 {progressLabel}
+              定番ゲーム {config.articleOrder} / お題 {progressLabel}
             </p>
             <h2>{prompt.title}</h2>
             <p>{prompt.instruction}</p>
