@@ -19,6 +19,7 @@ import {
   Users,
   Vote,
 } from "lucide-react";
+import { twoChoiceCategories, twoChoicePrompts, type TwoChoiceCategory } from "./data/twoChoicePrompts";
 
 type GameKey = "two-choice" | "word-wolf" | "ng-word";
 
@@ -290,7 +291,7 @@ function SegmentedControl<T extends string>({
   onChange,
 }: {
   label: string;
-  options: SegmentedOption<T>[];
+  options: readonly SegmentedOption<T>[];
   value: T;
   onChange: (value: T) => void;
 }) {
@@ -346,64 +347,59 @@ function EmptyState({ text }: { text: string }) {
   return <p className="empty-state">{text}</p>;
 }
 
-type TwoChoiceCategory = "icebreak" | "food" | "holiday";
 type TwoChoiceChoice = "A" | "B" | "skip";
-type TwoChoiceStep = "setup" | "vote" | "result";
-
-type TwoChoicePrompt = {
-  id: string;
-  category: TwoChoiceCategory;
-  question: string;
-  optionA: string;
-  optionB: string;
-};
+type TwoChoiceStep = "setup" | "vote" | "result" | "complete";
+type TwoChoiceQuestionCount = 5 | 10 | 20 | 30 | 50 | 100 | 300;
 
 type TwoChoiceState = {
   players: Player[];
   category: TwoChoiceCategory;
+  questionCount: TwoChoiceQuestionCount;
   step: TwoChoiceStep;
   promptId: string | null;
   votes: Record<string, TwoChoiceChoice>;
-  usedPromptIds: string[];
+  deckPromptIds: string[];
+  deckIndex: number;
 };
 
-const twoChoiceCategoryOptions: SegmentedOption<TwoChoiceCategory>[] = [
-  { value: "icebreak", label: "アイスブレイク" },
-  { value: "food", label: "食べ物" },
-  { value: "holiday", label: "休日" },
-];
-
-const twoChoicePrompts: TwoChoicePrompt[] = [
-  { id: "icebreak-sea-mountain", category: "icebreak", question: "旅行するなら？", optionA: "海", optionB: "山" },
-  { id: "icebreak-morning-night", category: "icebreak", question: "自分に近いのは？", optionA: "朝型", optionB: "夜型" },
-  { id: "icebreak-sweet-salty", category: "icebreak", question: "今食べるなら？", optionA: "甘いもの", optionB: "しょっぱいもの" },
-  { id: "icebreak-plan-feel", category: "icebreak", question: "動き方はどっち？", optionA: "計画派", optionB: "直感派" },
-  { id: "icebreak-home-out", category: "icebreak", question: "休日の気分は？", optionA: "家でゆっくり", optionB: "外に出かける" },
-  { id: "food-ramen-curry", category: "food", question: "今日の締めなら？", optionA: "ラーメン", optionB: "カレー" },
-  { id: "food-yakiniku-sushi", category: "food", question: "ごほうびご飯なら？", optionA: "焼肉", optionB: "寿司" },
-  { id: "food-coffee-tea", category: "food", question: "一息つくなら？", optionA: "コーヒー", optionB: "紅茶" },
-  { id: "food-rice-bread", category: "food", question: "朝ごはんは？", optionA: "ごはん", optionB: "パン" },
-  { id: "food-ice-cake", category: "food", question: "デザートなら？", optionA: "アイス", optionB: "ケーキ" },
-  { id: "holiday-planned-free", category: "holiday", question: "休みの日は？", optionA: "予定を入れる", optionB: "何も決めない" },
-  { id: "holiday-far-near", category: "holiday", question: "出かけるなら？", optionA: "遠出", optionB: "近場" },
-  { id: "holiday-movie-walk", category: "holiday", question: "空き時間なら？", optionA: "映画", optionB: "散歩" },
-  { id: "holiday-alone-people", category: "holiday", question: "回復するなら？", optionA: "ひとり時間", optionB: "誰かと会う" },
-  { id: "holiday-early-sleep", category: "holiday", question: "休日の朝は？", optionA: "早起き", optionB: "寝坊" },
+const twoChoiceQuestionCountOptions: SegmentedOption<string>[] = [
+  { value: "5", label: "5問" },
+  { value: "10", label: "10問" },
+  { value: "20", label: "20問" },
+  { value: "30", label: "30問" },
+  { value: "50", label: "50問" },
+  { value: "100", label: "100問" },
+  { value: "300", label: "300問" },
 ];
 
 const initialTwoChoiceState: TwoChoiceState = {
   players: [],
-  category: "icebreak",
+  category: "all",
+  questionCount: 10,
   step: "setup",
   promptId: null,
   votes: {},
-  usedPromptIds: [],
+  deckPromptIds: [],
+  deckIndex: 0,
 };
 
 function TwoChoiceGame({ onHome }: { onHome: () => void }) {
-  const [state, setState] = useStoredState<TwoChoiceState>("two-choice", initialTwoChoiceState);
+  const [storedState, setState] = useStoredState<TwoChoiceState>("two-choice", initialTwoChoiceState);
+  const state = { ...initialTwoChoiceState, ...storedState };
   const prompt = twoChoicePrompts.find((item) => item.id === state.promptId) ?? null;
   const canStart = state.players.length >= 2 && state.players.every((player) => player.name.trim());
+  const promptPool = useMemo(
+    () => (state.category === "all" ? twoChoicePrompts : twoChoicePrompts.filter((item) => item.category === state.category)),
+    [state.category],
+  );
+  const selectedQuestionCount = Math.min(state.questionCount, promptPool.length);
+  const progressLabel = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "";
+
+  useEffect(() => {
+    if ((state.step === "vote" || state.step === "result") && !prompt) {
+      setState({ ...state, step: "setup", promptId: null, votes: {}, deckPromptIds: [], deckIndex: 0 });
+    }
+  }, [prompt, setState, state.step]);
 
   const result = useMemo(() => {
     if (!prompt) return null;
@@ -416,28 +412,32 @@ function TwoChoiceGame({ onHome }: { onHome: () => void }) {
     return { byChoice, total };
   }, [prompt, state.players, state.votes]);
 
-  function selectPrompt(nextCategory = state.category) {
-    const pool = twoChoicePrompts.filter((item) => item.category === nextCategory);
-    const usedInCategory = state.usedPromptIds.filter((id) => pool.some((item) => item.id === id));
-    let candidates = pool.filter((item) => !usedInCategory.includes(item.id));
-    let nextUsed = usedInCategory;
-    if (candidates.length === 0) {
-      candidates = pool;
-      nextUsed = [];
-    }
-    const nextPrompt = pickOne(candidates);
+  function startTwoChoiceRound() {
+    const deckPromptIds = shuffle(promptPool)
+      .slice(0, selectedQuestionCount)
+      .map((item) => item.id);
     setState({
       ...state,
-      category: nextCategory,
       step: "vote",
-      promptId: nextPrompt.id,
+      promptId: deckPromptIds[0] ?? null,
       votes: {},
-      usedPromptIds: [...nextUsed, nextPrompt.id],
+      deckPromptIds,
+      deckIndex: 0,
     });
   }
 
   function updateVote(playerId: string, choice: TwoChoiceChoice) {
     setState({ ...state, votes: { ...state.votes, [playerId]: choice } });
+  }
+
+  function moveToNextPrompt() {
+    const nextIndex = state.deckIndex + 1;
+    const nextPromptId = state.deckPromptIds[nextIndex];
+    if (!nextPromptId) {
+      setState({ ...state, step: "complete", votes: {}, promptId: null });
+      return;
+    }
+    setState({ ...state, step: "vote", promptId: nextPromptId, deckIndex: nextIndex, votes: {} });
   }
 
   const votedCount = state.players.filter((player) => state.votes[player.id]).length;
@@ -455,12 +455,29 @@ function TwoChoiceGame({ onHome }: { onHome: () => void }) {
           />
           <SegmentedControl
             label="カテゴリ"
-            options={twoChoiceCategoryOptions}
+            options={twoChoiceCategories}
             value={state.category}
-            onChange={(category) => setState({ ...state, category })}
+            onChange={(category) => setState({ ...state, category, deckPromptIds: [], deckIndex: 0, promptId: null })}
           />
+          <SegmentedControl
+            label="今回の設問数"
+            options={twoChoiceQuestionCountOptions}
+            value={String(state.questionCount)}
+            onChange={(questionCount) =>
+              setState({
+                ...state,
+                questionCount: Number(questionCount) as TwoChoiceQuestionCount,
+                deckPromptIds: [],
+                deckIndex: 0,
+                promptId: null,
+              })
+            }
+          />
+          <p className="soft-note">
+            この条件では{promptPool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。
+          </p>
           <div className="action-row">
-            <button className="primary-button" disabled={!canStart} onClick={() => selectPrompt()}>
+            <button className="primary-button" disabled={!canStart || selectedQuestionCount === 0} onClick={startTwoChoiceRound}>
               <Play size={18} />
               はじめる
             </button>
@@ -475,7 +492,7 @@ function TwoChoiceGame({ onHome }: { onHome: () => void }) {
       {state.step === "vote" && prompt && (
         <section className="tool-surface">
           <div className="prompt-panel">
-            <p className="eyebrow">お題</p>
+            <p className="eyebrow">お題 {progressLabel}</p>
             <h2>{prompt.question}</h2>
             <div className="choice-display">
               <span>A. {prompt.optionA}</span>
@@ -541,13 +558,32 @@ function TwoChoiceGame({ onHome }: { onHome: () => void }) {
           </div>
           <p className="talk-cue">少なかった側から理由を聞くと、話が広がりやすいです。</p>
           <div className="action-row">
-            <button className="primary-button" onClick={() => selectPrompt()}>
-              <ChevronRight size={18} />
-              次のお題
+            <button className="primary-button" onClick={moveToNextPrompt}>
+              {state.deckIndex + 1 >= state.deckPromptIds.length ? <Check size={18} /> : <ChevronRight size={18} />}
+              {state.deckIndex + 1 >= state.deckPromptIds.length ? "完了" : "次のお題"}
             </button>
             <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", votes: {} })}>
               <Users size={18} />
               参加者を変える
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "complete" && (
+        <section className="tool-surface center-flow">
+          <Trophy size={32} />
+          <p className="eyebrow">終了</p>
+          <h2>{state.deckPromptIds.length}問おつかれさまでした</h2>
+          <p className="talk-cue">続ける場合は、同じ設定で新しい設問をシャッフルできます。</p>
+          <div className="action-row centered">
+            <button className="primary-button" onClick={startTwoChoiceRound}>
+              <RotateCcw size={18} />
+              もう一度
+            </button>
+            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", votes: {}, promptId: null })}>
+              <Users size={18} />
+              設定へ
             </button>
           </div>
         </section>
