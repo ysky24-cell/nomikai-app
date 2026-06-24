@@ -68,6 +68,13 @@ button:disabled {
   padding: 18px 0 20px;
 }
 
+.top-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .eyebrow {
   margin: 0 0 7px;
   color: var(--muted);
@@ -232,6 +239,8 @@ h3 {
 
 .game-nav {
   display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
   justify-content: flex-start;
   margin-bottom: 18px;
 }
@@ -463,6 +472,15 @@ input:focus {
   border-color: var(--line);
   background: #ffffff;
   color: var(--text);
+}
+
+.reset-all-button {
+  border-color: #f2c6bd;
+  color: var(--danger);
+}
+
+.reset-all-button:hover {
+  background: #fff7f3;
 }
 
 .danger-button {
@@ -777,6 +795,10 @@ input:focus {
     display: grid;
   }
 
+  .top-actions {
+    justify-content: flex-start;
+  }
+
   .game-grid {
     grid-template-columns: 1fr;
   }
@@ -814,8 +836,9 @@ input:focus {
     font-size: 3.2rem;
   }
 
-  .primary-button,
-  .secondary-button {
+  .tool-surface .primary-button,
+  .tool-surface .secondary-button,
+  .game-nav .secondary-button {
     width: 100%;
   }
 }

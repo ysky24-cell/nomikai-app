@@ -52,6 +52,7 @@ type GameMeta = {
 };
 
 const STORAGE_PREFIX = "nomikai-app:v1:";
+const STORED_GAME_KEYS: readonly GameKey[] = ["two-choice", "word-wolf", "ng-word"];
 
 const activeGames: GameMeta[] = [
   {
@@ -134,25 +135,36 @@ function useStoredState<T>(key: string, initialState: T) {
   return [state, setState] as const;
 }
 
+function clearStoredGameStates() {
+  STORED_GAME_KEYS.forEach((key) => {
+    window.localStorage.removeItem(`${STORAGE_PREFIX}${key}`);
+  });
+}
+
 function App() {
   const [activeGame, setActiveGame] = useState<GameKey | null>(null);
 
+  function resetAllGames() {
+    clearStoredGameStates();
+    setActiveGame(null);
+  }
+
   if (activeGame === "two-choice") {
-    return <TwoChoiceGame onHome={() => setActiveGame(null)} />;
+    return <TwoChoiceGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
   }
 
   if (activeGame === "word-wolf") {
-    return <WordWolfGame onHome={() => setActiveGame(null)} />;
+    return <WordWolfGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
   }
 
   if (activeGame === "ng-word") {
-    return <NgWordGame onHome={() => setActiveGame(null)} />;
+    return <NgWordGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
   }
 
-  return <HomeScreen onStart={setActiveGame} />;
+  return <HomeScreen onStart={setActiveGame} onResetAll={resetAllGames} />;
 }
 
-function HomeScreen({ onStart }: { onStart: (game: GameKey) => void }) {
+function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey) => void; onResetAll: () => void }) {
   return (
     <main className="app-shell">
       <section className="top-bar" aria-label="アプリ概要">
@@ -161,9 +173,15 @@ function HomeScreen({ onStart }: { onStart: (game: GameKey) => void }) {
           <h1>飲み会アプリ</h1>
           <p className="lead">幹事のスマホを回して、すぐ遊べるミニゲーム集。</p>
         </div>
-        <div className="status-pill">
-          <Check size={18} />
-          DB不要
+        <div className="top-actions">
+          <div className="status-pill">
+            <Check size={18} />
+            DB不要
+          </div>
+          <button className="secondary-button reset-all-button" onClick={onResetAll}>
+            <RotateCcw size={18} />
+            初期化
+          </button>
         </div>
       </section>
 
@@ -356,11 +374,13 @@ function GameFrame({
   title,
   subtitle,
   onHome,
+  onResetAll,
   children,
 }: {
   title: string;
   subtitle: string;
   onHome: () => void;
+  onResetAll: () => void;
   children: React.ReactNode;
 }) {
   return (
@@ -369,6 +389,10 @@ function GameFrame({
         <button className="secondary-button" onClick={onHome}>
           <Home size={18} />
           トップ
+        </button>
+        <button className="secondary-button reset-all-button" onClick={onResetAll}>
+          <RotateCcw size={18} />
+          初期化してトップへ
         </button>
       </nav>
       <section className="game-title">
@@ -423,7 +447,7 @@ const initialTwoChoiceState: TwoChoiceState = {
   deckIndex: 0,
 };
 
-function TwoChoiceGame({ onHome }: { onHome: () => void }) {
+function TwoChoiceGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
   const [storedState, setState] = useStoredState<TwoChoiceState>("two-choice", initialTwoChoiceState);
   const state = { ...initialTwoChoiceState, ...storedState };
   const prompt = twoChoicePrompts.find((item) => item.id === state.promptId) ?? null;
@@ -491,7 +515,7 @@ function TwoChoiceGame({ onHome }: { onHome: () => void }) {
   const allVoted = votedCount === state.players.length && state.players.length > 0;
 
   return (
-    <GameFrame title="二択トーク" subtitle="選んだ理由を話すだけで、場がすぐ温まります。" onHome={onHome}>
+    <GameFrame title="二択トーク" subtitle="選んだ理由を話すだけで、場がすぐ温まります。" onHome={onHome} onResetAll={onResetAll}>
       {state.step === "setup" && (
         <section className="tool-surface">
           <div className="howto-panel">
@@ -760,7 +784,7 @@ const initialWordWolfState: WordWolfState = {
   voteIndex: 0,
 };
 
-function WordWolfGame({ onHome }: { onHome: () => void }) {
+function WordWolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
   const [state, setState] = useStoredState<WordWolfState>("word-wolf", initialWordWolfState);
   const canStart = state.players.length >= 4 && state.players.every((player) => player.name.trim());
   const activeWordWolfCategory = !state.includeAdultTopics && state.category === "adult" ? "all" : state.category;
@@ -834,7 +858,12 @@ function WordWolfGame({ onHome }: { onHome: () => void }) {
   }, [state.assignments, state.players, state.votes]);
 
   return (
-    <GameFrame title="ワードウルフ" subtitle="似ているけど少し違うお題を、会話と投票で見破るゲームです。" onHome={onHome}>
+    <GameFrame
+      title="ワードウルフ"
+      subtitle="似ているけど少し違うお題を、会話と投票で見破るゲームです。"
+      onHome={onHome}
+      onResetAll={onResetAll}
+    >
       {state.step === "setup" && (
         <section className="tool-surface">
           <div className="howto-panel">
@@ -1098,7 +1127,7 @@ function getNgWordPool(difficulty: NgDifficulty, playerCount: number) {
   return playerCount <= primary.length ? primary : [...primary, ...secondary];
 }
 
-function NgWordGame({ onHome }: { onHome: () => void }) {
+function NgWordGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
   const [state, setState] = useStoredState<NgWordState>("ng-word", initialNgWordState);
   const canStart = state.players.length >= 3 && state.players.every((player) => player.name.trim());
 
@@ -1162,7 +1191,12 @@ function NgWordGame({ onHome }: { onHome: () => void }) {
   }
 
   return (
-    <GameFrame title="NGワードゲーム" subtitle="言わせたい、でも自分は言わない。会話中に遊べます。" onHome={onHome}>
+    <GameFrame
+      title="NGワードゲーム"
+      subtitle="言わせたい、でも自分は言わない。会話中に遊べます。"
+      onHome={onHome}
+      onResetAll={onResetAll}
+    >
       {state.step === "setup" && (
         <section className="tool-surface">
           <div className="howto-panel">
