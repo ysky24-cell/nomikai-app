@@ -18,3 +18,4 @@
 
 各ゲームごとの要件定義は [docs/requirements.md](docs/requirements.md) を参照してください。
 
+実装に向けた詳細仕様は [docs/game-details.md](docs/game-details.md) を参照してください。
