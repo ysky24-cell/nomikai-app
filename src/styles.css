@@ -138,6 +138,14 @@ h3 {
   gap: 14px;
 }
 
+.home-filter {
+  margin-bottom: 16px;
+}
+
+.home-filter .control-block {
+  margin-bottom: 8px;
+}
+
 .game-card {
   display: flex;
   min-height: 280px;
@@ -669,6 +677,102 @@ input:focus {
   font-size: 1rem;
 }
 
+.url-interaction-panel {
+  display: grid;
+  gap: 14px;
+  margin: 18px 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfb;
+  padding: 14px;
+}
+
+.url-counter {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+  text-align: center;
+}
+
+.url-counter strong {
+  display: grid;
+  width: 96px;
+  min-height: 96px;
+  place-items: center;
+  border-radius: 8px;
+  background: var(--teal-soft);
+  color: var(--teal);
+  font-size: 2.7rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.draw-status,
+.matchup-panel,
+.position-list {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.draw-status strong,
+.matchup-panel span,
+.position-list span {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px 12px;
+  font-weight: 900;
+}
+
+.draw-status span {
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.matchup-panel strong {
+  color: var(--coral);
+  font-size: 1.2rem;
+}
+
+.territory-grid {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.territory-grid button {
+  aspect-ratio: 1;
+  min-height: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--text);
+  font-weight: 900;
+}
+
+.territory-grid button.owned {
+  border-color: var(--teal);
+  background: var(--teal-soft);
+  color: var(--teal);
+}
+
+.url-action-log {
+  display: grid;
+  gap: 8px;
+}
+
+.url-action-log span {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px 12px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
 .word-choice-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(138px, 1fr));
@@ -1184,6 +1288,14 @@ input:focus {
   .candidate-grid,
   .word-choice-grid {
     grid-template-columns: 1fr;
+  }
+
+  .url-counter {
+    grid-template-columns: 1fr;
+  }
+
+  .territory-grid {
+    gap: 5px;
   }
 
   .timer-strip {

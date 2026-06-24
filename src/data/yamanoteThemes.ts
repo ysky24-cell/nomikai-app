@@ -8,7 +8,8 @@ export type YamanoteThemeCategory =
   | "travel"
   | "season"
   | "memory"
-  | "imagination";
+  | "imagination"
+  | "adult";
 
 export type YamanoteCategory = "all" | YamanoteThemeCategory;
 
@@ -31,7 +32,10 @@ export const yamanoteCategories: readonly { value: YamanoteCategory; label: stri
   { value: "season", label: "季節" },
   { value: "memory", label: "思い出" },
   { value: "imagination", label: "もしも" },
+  { value: "adult", label: "大人向け" },
 ];
+
+export const normalYamanoteCategories = yamanoteCategories.filter((category) => category.value !== "adult");
 
 const themeGroups = {
   classic: [
@@ -354,6 +358,38 @@ const themeGroups = {
     ["みんなで作る映画のタイトル", ["終電前の奇跡", "唐揚げの夜", "席替えの謎"]],
     ["願いが一つ叶うなら", ["健康", "旅行", "時間"]],
   ],
+  adult: [
+    ["恋バナで盛り上がる話題", ["初デート", "連絡頻度", "理想の距離感"]],
+    ["ドキッとするしぐさ", ["目が合う", "笑顔", "袖を直す"]],
+    ["大人っぽいと思う行動", ["余裕がある", "聞き上手", "落ち着いている"]],
+    ["初デートで行きたい場所", ["夜景", "カフェ", "水族館"]],
+    ["恋人に言われたい一言", ["会いたかった", "安心する", "似合ってる"]],
+    ["距離が縮まる会話", ["好きなもの", "休日", "将来の話"]],
+    ["照れる褒め言葉", ["かわいい", "かっこいい", "色気がある"]],
+    ["好意に気づくサイン", ["返信が早い", "よく笑う", "質問が多い"]],
+    ["夜に似合う場所", ["バー", "夜景スポット", "散歩道"]],
+    ["大人のデートで持っていくもの", ["香水", "ハンカチ", "予約情報"]],
+    ["恋愛で大事にしたいこと", ["誠実さ", "距離感", "安心感"]],
+    ["二人きりで話したいこと", ["好きな映画", "最近の悩み", "行きたい場所"]],
+    ["少し甘えたい時の行動", ["近くに座る", "相談する", "名前を呼ぶ"]],
+    ["色気を感じるもの", ["声", "姿勢", "香り"]],
+    ["恋人との休日にしたいこと", ["料理", "散歩", "映画"]],
+    ["大人っぽいプレゼント", ["花", "お酒", "小物"]],
+    ["終電前に迷うこと", ["もう一軒", "帰り道", "連絡先"]],
+    ["恋バナで聞きたいこと", ["理想のタイプ", "告白の思い出", "距離感"]],
+    ["一緒にいると安心する人の特徴", ["穏やか", "聞いてくれる", "急かさない"]],
+    ["デート前に気にすること", ["服装", "香り", "時間"]],
+    ["好きな人に見せたい一面", ["やさしさ", "頼もしさ", "自然体"]],
+    ["恋愛で照れる瞬間", ["褒められる", "見つめられる", "名前を呼ばれる"]],
+    ["夜の散歩で話したいこと", ["思い出", "これから", "好きな場所"]],
+    ["大人の余裕を感じること", ["待てる", "聞ける", "押しすぎない"]],
+    ["恋人と分けたいもの", ["デザート", "時間", "景色"]],
+    ["気になる人に聞きたいこと", ["休日", "好きな味", "最近の楽しみ"]],
+    ["少し攻めた質問", ["好きなタイプ", "嫉妬する瞬間", "甘え方"]],
+    ["デートで緊張する場面", ["待ち合わせ", "沈黙", "別れ際"]],
+    ["恋愛でうれしい気遣い", ["歩幅を合わせる", "寒くないか聞く", "帰り道を気にする"]],
+    ["秘密にしたい弱点", ["寂しがり", "照れ屋", "甘いもの好き"]],
+  ],
 } as const satisfies Record<YamanoteThemeCategory, readonly (readonly [string, readonly string[]])[]>;
 
 export const yamanoteThemes: YamanoteTheme[] = Object.entries(themeGroups).flatMap(([category, themes]) =>
@@ -364,3 +400,5 @@ export const yamanoteThemes: YamanoteTheme[] = Object.entries(themeGroups).flatM
     examples,
   })),
 );
+
+export const normalYamanoteThemes = yamanoteThemes.filter((theme) => theme.category !== "adult");

@@ -8,7 +8,8 @@ export type ImpressionPromptCategory =
   | "lifestyle"
   | "entertainment"
   | "travel"
-  | "imagination";
+  | "imagination"
+  | "adult";
 
 export type ImpressionCategory = "all" | ImpressionPromptCategory;
 
@@ -30,7 +31,10 @@ export const impressionCategories: readonly { value: ImpressionCategory; label: 
   { value: "entertainment", label: "遊び" },
   { value: "travel", label: "おでかけ" },
   { value: "imagination", label: "もしも" },
+  { value: "adult", label: "大人向け" },
 ];
+
+export const normalImpressionCategories = impressionCategories.filter((category) => category.value !== "adult");
 
 const promptGroups = {
   warmup: [
@@ -353,6 +357,38 @@ const promptGroups = {
     "一番未来の自分に会いに行きそうな人は？",
     "一番みんなの願いを叶えようとしそうな人は？",
   ],
+  adult: [
+    "一番恋バナを聞き出すのが上手そうな人は？",
+    "一番初デートで自然体に見えそうな人は？",
+    "一番ドキッとする褒め方をしそうな人は？",
+    "一番大人っぽい余裕がありそうな人は？",
+    "一番夜景デートが似合いそうな人は？",
+    "一番好きな人にやさしくなりそうな人は？",
+    "一番照れ隠しがかわいそうな人は？",
+    "一番連絡の距離感が上手そうな人は？",
+    "一番本命にだけ特別扱いしそうな人は？",
+    "一番恋愛相談に向いていそうな人は？",
+    "一番二人きりだと雰囲気が変わりそうな人は？",
+    "一番甘え上手そうな人は？",
+    "一番甘えられ上手そうな人は？",
+    "一番好きな香りにこだわりそうな人は？",
+    "一番終電前に迷わせそうな人は？",
+    "一番さりげない色気がありそうな人は？",
+    "一番好きな人の前で緊張しそうな人は？",
+    "一番恋人に安心感を与えそうな人は？",
+    "一番デートプランを考えるのが上手そうな人は？",
+    "一番嫉妬しても顔に出なさそうな人は？",
+    "一番大人の失敗談を面白く話せそうな人は？",
+    "一番秘密を守ってくれそうな人は？",
+    "一番距離を縮める一言が上手そうな人は？",
+    "一番好きな人にだけ弱みを見せそうな人は？",
+    "一番恋愛で誠実そうな人は？",
+    "一番別れ際の一言が印象に残りそうな人は？",
+    "一番デート前に服装を悩みそうな人は？",
+    "一番照れる話題をうまく流せそうな人は？",
+    "一番好きな人の変化に気づきそうな人は？",
+    "一番大人向けの質問でも場を和ませそうな人は？",
+  ],
 } as const satisfies Record<ImpressionPromptCategory, readonly string[]>;
 
 export const impressionPrompts: ImpressionPrompt[] = Object.entries(promptGroups).flatMap(([category, prompts]) =>
@@ -362,3 +398,5 @@ export const impressionPrompts: ImpressionPrompt[] = Object.entries(promptGroups
     question,
   })),
 );
+
+export const normalImpressionPrompts = impressionPrompts.filter((prompt) => prompt.category !== "adult");

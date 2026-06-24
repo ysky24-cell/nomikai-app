@@ -28,6 +28,8 @@ import {
 import {
   impressionCategories,
   impressionPrompts,
+  normalImpressionCategories,
+  normalImpressionPrompts,
   type ImpressionCategory,
 } from "./data/impressionPrompts";
 import {
@@ -62,12 +64,24 @@ import {
   type TurtleSoupFilter,
 } from "./data/turtleSoupCases";
 import {
+  urlCandidateGameByKey,
+  urlCandidateGameConfigs,
+  urlCandidateGameKeys,
+  type UrlCandidateGameConfig,
+  type UrlCandidateGameKey,
+  type UrlCandidateGameKind,
+  type UrlCandidateIconName,
+  type UrlCandidatePrompt,
+} from "./data/urlCandidateGames";
+import {
+  normalYamanoteCategories,
+  normalYamanoteThemes,
   yamanoteCategories,
   yamanoteThemes,
   type YamanoteCategory,
 } from "./data/yamanoteThemes";
 
-type GameKey =
+type BuiltInGameKey =
   | "yamanote"
   | "two-choice"
   | "word-wolf"
@@ -77,6 +91,10 @@ type GameKey =
   | "johari-window"
   | "turtle-soup"
   | "anonymous-box";
+
+type GameKey = BuiltInGameKey | UrlCandidateGameKey;
+
+type HomeFilter = "all" | "url" | "talk" | "reaction" | "luck" | "drawing" | "board" | "large";
 
 type Player = {
   id: string;
@@ -91,6 +109,7 @@ type GameMeta = {
   minutes: string;
   accent: "teal" | "coral" | "indigo" | "gold";
   icon: LucideIcon;
+  groups: readonly HomeFilter[];
 };
 
 const STORAGE_PREFIX = "nomikai-app:v1:";
@@ -104,7 +123,40 @@ const STORED_GAME_KEYS: readonly GameKey[] = [
   "johari-window",
   "turtle-soup",
   "anonymous-box",
+  ...urlCandidateGameKeys,
 ];
+
+const homeFilterOptions: readonly SegmentedOption<HomeFilter>[] = [
+  { value: "all", label: "全部" },
+  { value: "url", label: "URL候補" },
+  { value: "talk", label: "会話" },
+  { value: "reaction", label: "反射" },
+  { value: "luck", label: "運" },
+  { value: "drawing", label: "描く" },
+  { value: "board", label: "ボード風" },
+  { value: "large", label: "大人数" },
+];
+
+const urlCandidateIconMap: Record<UrlCandidateIconName, LucideIcon> = {
+  timer: Timer,
+  vote: Vote,
+  question: MessageCircleQuestion,
+  shield: ShieldAlert,
+  sparkles: Sparkles,
+  trophy: Trophy,
+  list: ListChecks,
+};
+
+const urlCandidateGameMeta: GameMeta[] = urlCandidateGameConfigs.map((game) => ({
+  key: game.key,
+  title: game.title,
+  description: game.description,
+  people: game.people,
+  minutes: game.minutes,
+  accent: game.accent,
+  icon: urlCandidateIconMap[game.icon],
+  groups: ["url", ...game.groups],
+}));
 
 const activeGames: GameMeta[] = [
   {
@@ -115,6 +167,7 @@ const activeGames: GameMeta[] = [
     minutes: "3分から",
     accent: "teal",
     icon: Timer,
+    groups: ["url", "reaction"],
   },
   {
     key: "two-choice",
@@ -124,6 +177,7 @@ const activeGames: GameMeta[] = [
     minutes: "3分から",
     accent: "teal",
     icon: Vote,
+    groups: ["talk"],
   },
   {
     key: "word-wolf",
@@ -133,6 +187,7 @@ const activeGames: GameMeta[] = [
     minutes: "5分から",
     accent: "coral",
     icon: MessageCircleQuestion,
+    groups: ["talk"],
   },
   {
     key: "ng-word",
@@ -142,6 +197,7 @@ const activeGames: GameMeta[] = [
     minutes: "5分から",
     accent: "indigo",
     icon: ShieldAlert,
+    groups: ["talk"],
   },
   {
     key: "impression-ranking",
@@ -151,6 +207,7 @@ const activeGames: GameMeta[] = [
     minutes: "5分から",
     accent: "gold",
     icon: Sparkles,
+    groups: ["url", "talk", "large"],
   },
   {
     key: "party-pack",
@@ -160,6 +217,7 @@ const activeGames: GameMeta[] = [
     minutes: "3分から",
     accent: "indigo",
     icon: ListChecks,
+    groups: ["reaction", "talk", "drawing"],
   },
   {
     key: "johari-window",
@@ -169,6 +227,7 @@ const activeGames: GameMeta[] = [
     minutes: "10分から",
     accent: "teal",
     icon: Eye,
+    groups: ["talk"],
   },
   {
     key: "turtle-soup",
@@ -178,6 +237,7 @@ const activeGames: GameMeta[] = [
     minutes: "5分から",
     accent: "coral",
     icon: MessageCircleQuestion,
+    groups: ["talk"],
   },
   {
     key: "anonymous-box",
@@ -187,7 +247,9 @@ const activeGames: GameMeta[] = [
     minutes: "5分から",
     accent: "gold",
     icon: ListChecks,
+    groups: ["talk"],
   },
+  ...urlCandidateGameMeta,
 ];
 
 const futureGames: string[] = [];
@@ -242,6 +304,10 @@ function clearStoredGameStates() {
   });
 }
 
+function isUrlCandidateGameKey(key: GameKey | null): key is UrlCandidateGameKey {
+  return Boolean(key && key in urlCandidateGameByKey);
+}
+
 function App() {
   const [activeGame, setActiveGame] = useState<GameKey | null>(null);
 
@@ -286,10 +352,23 @@ function App() {
     return <AnonymousQuestionBoxGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
   }
 
+  if (isUrlCandidateGameKey(activeGame)) {
+    return (
+      <UrlCandidateGame
+        config={urlCandidateGameByKey[activeGame]}
+        onHome={() => setActiveGame(null)}
+        onResetAll={resetAllGames}
+      />
+    );
+  }
+
   return <HomeScreen onStart={setActiveGame} onResetAll={resetAllGames} />;
 }
 
 function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey) => void; onResetAll: () => void }) {
+  const [filter, setFilter] = useState<HomeFilter>("all");
+  const visibleGames = filter === "all" ? activeGames : activeGames.filter((game) => game.groups.includes(filter));
+
   return (
     <main className="app-shell">
       <section className="top-bar" aria-label="アプリ概要">
@@ -310,8 +389,15 @@ function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey) => void;
         </div>
       </section>
 
+      <section className="home-filter" aria-label="ゲーム絞り込み">
+        <SegmentedControl label="表示するゲーム" options={homeFilterOptions} value={filter} onChange={setFilter} />
+        <p className="soft-note">
+          {visibleGames.length}件を表示中。URL候補は記事のゲームを静的ページ向けに置き換えた個別入口です。
+        </p>
+      </section>
+
       <section className="game-grid" aria-label="遊べるゲーム">
-        {activeGames.map((game) => {
+        {visibleGames.map((game) => {
           const Icon = game.icon;
           return (
             <article className={`game-card accent-${game.accent}`} key={game.key}>
@@ -536,6 +622,556 @@ function EmptyState({ text }: { text: string }) {
   return <p className="empty-state">{text}</p>;
 }
 
+type UrlCandidateStep = "setup" | "play" | "complete";
+type UrlCandidateQuestionCount = 5 | 10 | 20 | 30 | 50 | 100 | 300;
+
+type UrlCandidateState = {
+  players: Player[];
+  includeAdultTopics: boolean;
+  questionCount: UrlCandidateQuestionCount;
+  step: UrlCandidateStep;
+  deckPromptIds: string[];
+  deckIndex: number;
+  answerVisible: boolean;
+  currentPlayerIndex: number;
+  numberValue: number;
+  positions: Record<string, number>;
+  territory: Record<string, string>;
+  drawnCount: number;
+  hazardIndex: number;
+  completedPairs: number;
+  actionLog: string[];
+};
+
+const urlCandidateQuestionCountOptions: SegmentedOption<string>[] = [
+  { value: "5", label: "5問" },
+  { value: "10", label: "10問" },
+  { value: "20", label: "20問" },
+  { value: "30", label: "30問" },
+  { value: "50", label: "50問" },
+  { value: "100", label: "100問" },
+  { value: "300", label: "300問" },
+];
+
+const initialUrlCandidateState: UrlCandidateState = {
+  players: [],
+  includeAdultTopics: false,
+  questionCount: 10,
+  step: "setup",
+  deckPromptIds: [],
+  deckIndex: 0,
+  answerVisible: false,
+  currentPlayerIndex: 0,
+  numberValue: 0,
+  positions: {},
+  territory: {},
+  drawnCount: 0,
+  hazardIndex: 4,
+  completedPairs: 0,
+  actionLog: [],
+};
+
+function createPlayerPositions(players: Player[]) {
+  return Object.fromEntries(players.map((player) => [player.id, 0]));
+}
+
+function createHazardIndex() {
+  return Math.floor(Math.random() * 8) + 1;
+}
+
+function UrlCandidateGame({
+  config,
+  onHome,
+  onResetAll,
+}: {
+  config: UrlCandidateGameConfig;
+  onHome: () => void;
+  onResetAll: () => void;
+}) {
+  const [storedState, setState] = useStoredState<UrlCandidateState>(config.key, initialUrlCandidateState);
+  const state = { ...initialUrlCandidateState, ...storedState };
+  const promptPool = useMemo(
+    () => config.prompts.filter((prompt) => state.includeAdultTopics || prompt.rating === "normal"),
+    [config.prompts, state.includeAdultTopics],
+  );
+  const selectedQuestionCount = Math.min(state.questionCount, promptPool.length);
+  const prompt = config.prompts.find((item) => item.id === state.deckPromptIds[state.deckIndex]) ?? null;
+  const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+  const canStart = state.players.length >= config.minPlayers && state.players.every((player) => player.name.trim());
+  const progressLabel = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "";
+  const normalCount = config.prompts.filter((item) => item.rating === "normal").length;
+  const adultCount = config.prompts.filter((item) => item.rating === "adult").length;
+
+  useEffect(() => {
+    if (state.step === "play" && !prompt) {
+      setState({ ...state, step: "setup", deckPromptIds: [], deckIndex: 0, answerVisible: false });
+    }
+  }, [prompt, setState, state.step]);
+
+  function startUrlCandidateGame() {
+    const deckPromptIds = shuffle([...promptPool])
+      .slice(0, selectedQuestionCount)
+      .map((item) => item.id);
+    setState({
+      ...state,
+      step: "play",
+      deckPromptIds,
+      deckIndex: 0,
+      answerVisible: false,
+      currentPlayerIndex: 0,
+      numberValue: 0,
+      positions: createPlayerPositions(state.players),
+      territory: {},
+      drawnCount: 0,
+      hazardIndex: createHazardIndex(),
+      completedPairs: 0,
+      actionLog: [],
+    });
+  }
+
+  function moveToNextUrlPrompt() {
+    const nextIndex = state.deckIndex + 1;
+    if (nextIndex >= state.deckPromptIds.length) {
+      setState({ ...state, step: "complete", answerVisible: false, actionLog: [] });
+      return;
+    }
+    setState({
+      ...state,
+      deckIndex: nextIndex,
+      answerVisible: false,
+      numberValue: 0,
+      drawnCount: 0,
+      hazardIndex: createHazardIndex(),
+      actionLog: [],
+    });
+  }
+
+  return (
+    <GameFrame title={config.title} subtitle={config.description} onHome={onHome} onResetAll={onResetAll}>
+      {state.step === "setup" && (
+        <section className="tool-surface">
+          <div className="howto-panel">
+            <h3>詳しい進め方</h3>
+            <ol className="rule-list">
+              {config.setupSteps.map((step) => (
+                <li key={step}>{step}</li>
+              ))}
+            </ol>
+          </div>
+
+          <PlayerSetup
+            players={state.players}
+            minPlayers={config.minPlayers}
+            maxPlayers={config.maxPlayers}
+            onChange={(players) => setState({ ...state, players })}
+          />
+
+          <ToggleSwitch
+            label="Hな話題"
+            description={
+              state.includeAdultTopics
+                ? "ON: 夜の話題・恋バナ寄りのお題も混ぜます。答えにくければスキップできます。"
+                : "OFF: 通常のお題だけで遊びます。"
+            }
+            checked={state.includeAdultTopics}
+            onChange={(includeAdultTopics) =>
+              setState({ ...state, includeAdultTopics, deckPromptIds: [], deckIndex: 0, answerVisible: false })
+            }
+          />
+
+          <SegmentedControl
+            label="今回の設問数"
+            options={urlCandidateQuestionCountOptions}
+            value={String(state.questionCount)}
+            onChange={(questionCount) =>
+              setState({
+                ...state,
+                questionCount: Number(questionCount) as UrlCandidateQuestionCount,
+                deckPromptIds: [],
+                deckIndex: 0,
+                answerVisible: false,
+              })
+            }
+          />
+
+          <p className="soft-note">
+            通常{normalCount}問、大人向け{adultCount}問を搭載。現在は{promptPool.length}問から
+            {selectedQuestionCount}問をランダムに使います。
+          </p>
+
+          {state.includeAdultTopics && (
+            <div className="notice-panel">
+              <strong>Hな話題がONです</strong>
+              <p>露骨すぎる話、個人情報、相手が嫌がる深掘りは避けます。答えにくい場合は迷わずスキップしてください。</p>
+            </div>
+          )}
+
+          <div className="howto-panel compact">
+            <h3>判定と安全の目安</h3>
+            <ul className="rule-list">
+              {config.judgeTips.map((tip) => (
+                <li key={tip}>{tip}</li>
+              ))}
+            </ul>
+          </div>
+
+          <div className="action-row">
+            <button className="primary-button" disabled={!canStart || selectedQuestionCount === 0} onClick={startUrlCandidateGame}>
+              <Play size={18} />
+              はじめる
+            </button>
+            <button className="secondary-button" onClick={() => setState(initialUrlCandidateState)}>
+              <RotateCcw size={18} />
+              リセット
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "play" && prompt && (
+        <section className="tool-surface">
+          <div className="prompt-panel">
+            <p className="eyebrow">
+              URL候補 {config.articleOrder} / お題 {progressLabel}
+            </p>
+            <h2>{prompt.title}</h2>
+            <p>{prompt.instruction}</p>
+            {currentPlayer && <p className="soft-note">現在の番: {currentPlayer.name}</p>}
+          </div>
+
+          {prompt.options && (
+            <div className="option-list">
+              {prompt.options.map((option, index) => (
+                <span key={option}>
+                  {String.fromCharCode(65 + index)}. {option}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {prompt.tips.length > 0 && (
+            <div className="chip-list">
+              {prompt.tips.map((tip) => (
+                <span key={tip}>{tip}</span>
+              ))}
+            </div>
+          )}
+
+          {config.answerMode === "open" && prompt.answer && (
+            <div className="answer-panel">
+              <strong>使う文・答え</strong>
+              <p>{prompt.answer}</p>
+            </div>
+          )}
+
+          {config.answerMode === "hidden" && prompt.answer && (
+            <div className="action-row">
+              <button
+                className="secondary-button"
+                onClick={() => setState({ ...state, answerVisible: !state.answerVisible })}
+              >
+                {state.answerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+                {state.answerVisible ? "答えを隠す" : "出題者だけ答えを見る"}
+              </button>
+            </div>
+          )}
+
+          {config.answerMode === "hidden" && prompt.answer && state.answerVisible && (
+            <div className="answer-panel">
+              <strong>答え</strong>
+              <p>{prompt.answer}</p>
+            </div>
+          )}
+
+          <UrlCandidateInteractionPanel config={config} prompt={prompt} state={state} setState={setState} />
+
+          <div className="howto-panel compact">
+            <h3>このゲームの進め方</h3>
+            <ol className="rule-list">
+              {config.playSteps.map((step) => (
+                <li key={step}>{step}</li>
+              ))}
+            </ol>
+          </div>
+
+          <div className="action-row">
+            <button className="primary-button" onClick={moveToNextUrlPrompt}>
+              {state.deckIndex + 1 >= state.deckPromptIds.length ? <Check size={18} /> : <ChevronRight size={18} />}
+              {state.deckIndex + 1 >= state.deckPromptIds.length ? "完了" : "次のお題"}
+            </button>
+            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", answerVisible: false })}>
+              <Users size={18} />
+              設定へ
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "complete" && (
+        <section className="tool-surface center-flow">
+          <Trophy size={32} />
+          <p className="eyebrow">終了</p>
+          <h2>{state.deckPromptIds.length}問おつかれさまでした</h2>
+          <p className="talk-cue">違う設問数やHな話題ON/OFFに変えると、同じゲームでも雰囲気を変えて遊べます。</p>
+          <div className="action-row centered">
+            <button className="primary-button" onClick={startUrlCandidateGame}>
+              <RotateCcw size={18} />
+              もう一度
+            </button>
+            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup" })}>
+              <Users size={18} />
+              設定へ
+            </button>
+          </div>
+        </section>
+      )}
+    </GameFrame>
+  );
+}
+
+function UrlCandidateInteractionPanel({
+  config,
+  prompt,
+  state,
+  setState,
+}: {
+  config: UrlCandidateGameConfig;
+  prompt: UrlCandidatePrompt;
+  state: UrlCandidateState;
+  setState: (state: UrlCandidateState) => void;
+}) {
+  const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+  const secondPlayer = state.players[(state.currentPlayerIndex + 1) % Math.max(1, state.players.length)] ?? null;
+
+  function pushLog(message: string, nextState: Partial<UrlCandidateState> = {}) {
+    setState({
+      ...state,
+      ...nextState,
+      actionLog: [message, ...state.actionLog].slice(0, 8),
+    });
+  }
+
+  function rotatePlayer(message: string) {
+    pushLog(message, { currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length) });
+  }
+
+  if (config.kind === "count-up") {
+    const target = prompt.targetNumber ?? 30;
+    return (
+      <div className="url-interaction-panel">
+        <div className="url-counter">
+          <span>現在</span>
+          <strong>{state.numberValue}</strong>
+          <span>目標 {target}</span>
+        </div>
+        <div className="action-row centered">
+          {[1, 2, 3].map((step) => (
+            <button
+              className="secondary-button"
+              key={step}
+              onClick={() => {
+                if (!currentPlayer) return;
+                const nextValue = state.numberValue + step;
+                const message =
+                  nextValue >= target
+                    ? `${currentPlayer.name}さんが${target}以上に到達。アウトとして笑って次へ。`
+                    : `${currentPlayer.name}さんが${nextValue}まで進めました。`;
+                pushLog(message, {
+                  numberValue: Math.min(nextValue, target),
+                  currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length),
+                });
+              }}
+            >
+              +{step}
+            </button>
+          ))}
+          <button className="secondary-button" onClick={() => pushLog("数字を0に戻しました。", { numberValue: 0 })}>
+            <RotateCcw size={18} />
+            数字を戻す
+          </button>
+        </div>
+        <UrlActionLog logs={state.actionLog} />
+      </div>
+    );
+  }
+
+  if (config.kind === "hazard" || config.kind === "draw") {
+    const nextDraw = state.drawnCount + 1;
+    const isHazard = nextDraw === state.hazardIndex;
+    return (
+      <div className="url-interaction-panel">
+        <div className="draw-status">
+          <strong>{state.drawnCount}/8枚</strong>
+          <span>1枚だけはずれがあります</span>
+        </div>
+        <div className="action-row centered">
+          <button
+            className={isHazard ? "danger-button" : "primary-button"}
+            disabled={state.drawnCount >= 8}
+            onClick={() => {
+              if (!currentPlayer) return;
+              const message = isHazard
+                ? `${currentPlayer.name}さんがはずれ。安全な一言お題で場を温めます。`
+                : `${currentPlayer.name}さんはセーフ。`;
+              pushLog(message, {
+                drawnCount: nextDraw,
+                currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length),
+              });
+            }}
+          >
+            <ShieldAlert size={18} />
+            1枚引く
+          </button>
+          <button
+            className="secondary-button"
+            onClick={() => pushLog("カードを混ぜ直しました。", { drawnCount: 0, hazardIndex: createHazardIndex() })}
+          >
+            <RotateCcw size={18} />
+            混ぜ直す
+          </button>
+        </div>
+        <UrlActionLog logs={state.actionLog} />
+      </div>
+    );
+  }
+
+  if (config.kind === "sugoroku") {
+    return (
+      <div className="url-interaction-panel">
+        <div className="position-list">
+          {state.players.map((player) => (
+            <span key={player.id}>
+              {player.name}: {state.positions[player.id] ?? 0}マス
+            </span>
+          ))}
+        </div>
+        <div className="action-row centered">
+          <button
+            className="primary-button"
+            onClick={() => {
+              if (!currentPlayer) return;
+              const roll = Math.floor(Math.random() * 6) + 1;
+              const nextPosition = (state.positions[currentPlayer.id] ?? 0) + roll;
+              pushLog(`${currentPlayer.name}さんが${roll}を出して${nextPosition}マスへ。`, {
+                positions: { ...state.positions, [currentPlayer.id]: nextPosition },
+                currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length),
+              });
+            }}
+          >
+            <Play size={18} />
+            サイコロを振る
+          </button>
+        </div>
+        <UrlActionLog logs={state.actionLog} />
+      </div>
+    );
+  }
+
+  if (config.kind === "territory") {
+    const cells = Array.from({ length: 25 }, (_, index) => String(index));
+    return (
+      <div className="url-interaction-panel">
+        <p className="soft-note">{currentPlayer ? `${currentPlayer.name}さんが取るマスを選びます。` : "参加者が必要です。"}</p>
+        <div className="territory-grid">
+          {cells.map((cell) => {
+            const ownerId = state.territory[cell];
+            const owner = state.players.find((player) => player.id === ownerId);
+            return (
+              <button
+                key={cell}
+                className={owner ? "owned" : ""}
+                disabled={Boolean(owner) || !currentPlayer}
+                onClick={() => {
+                  if (!currentPlayer) return;
+                  pushLog(`${currentPlayer.name}さんが${Number(cell) + 1}番のマスを取りました。`, {
+                    territory: { ...state.territory, [cell]: currentPlayer.id },
+                    currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length),
+                  });
+                }}
+              >
+                {owner ? owner.name.slice(0, 2) : Number(cell) + 1}
+              </button>
+            );
+          })}
+        </div>
+        <UrlActionLog logs={state.actionLog} />
+      </div>
+    );
+  }
+
+  if (config.kind === "tournament") {
+    return (
+      <div className="url-interaction-panel">
+        <div className="matchup-panel">
+          <span>{currentPlayer?.name ?? "参加者A"}</span>
+          <strong>VS</strong>
+          <span>{secondPlayer?.name ?? "参加者B"}</span>
+        </div>
+        <div className="action-row centered">
+          {[currentPlayer, secondPlayer].filter(Boolean).map((player) => (
+            <button
+              className="primary-button"
+              key={player!.id}
+              onClick={() =>
+                pushLog(`${player!.name}さんが勝ち。無理なく拍手で次の対戦へ。`, {
+                  currentPlayerIndex: (state.currentPlayerIndex + 2) % Math.max(1, state.players.length),
+                  completedPairs: state.completedPairs + 1,
+                })
+              }
+            >
+              {player!.name}が勝ち
+            </button>
+          ))}
+        </div>
+        <UrlActionLog logs={state.actionLog} />
+      </div>
+    );
+  }
+
+  const actionLabelByKind: Partial<Record<UrlCandidateGameKind, string>> = {
+    drawing: "描き終わった",
+    typing: "入力できた",
+    value: "並べ終わった",
+    acting: "演じ終わった",
+  };
+  const label = actionLabelByKind[config.kind] ?? "成功で次の人";
+
+  return (
+    <div className="url-interaction-panel">
+      <div className="action-row centered">
+        <button
+          className="primary-button"
+          onClick={() => currentPlayer && rotatePlayer(`${currentPlayer.name}さん: ${label}`)}
+        >
+          <Check size={18} />
+          {label}
+        </button>
+        <button
+          className="secondary-button"
+          onClick={() => currentPlayer && rotatePlayer(`${currentPlayer.name}さんはスキップしました。`)}
+        >
+          <ChevronRight size={18} />
+          スキップ
+        </button>
+      </div>
+      <UrlActionLog logs={state.actionLog} />
+    </div>
+  );
+}
+
+function UrlActionLog({ logs }: { logs: readonly string[] }) {
+  if (logs.length === 0) {
+    return <EmptyState text="まだ記録はありません" />;
+  }
+  return (
+    <div className="url-action-log">
+      {logs.map((log, index) => (
+        <span key={`${log}-${index}`}>{log}</span>
+      ))}
+    </div>
+  );
+}
+
 type YamanoteStep = "setup" | "play" | "complete";
 type YamanoteThemeCount = 5 | 10 | 20 | 30 | 50 | 100 | 300;
 type YamanoteSeconds = 3 | 5 | 10;
@@ -550,6 +1186,7 @@ type YamanoteAnswerLog = {
 type YamanoteState = {
   players: Player[];
   category: YamanoteCategory;
+  includeAdultTopics: boolean;
   themeCount: YamanoteThemeCount;
   secondsPerTurn: YamanoteSeconds;
   step: YamanoteStep;
@@ -579,6 +1216,7 @@ const yamanoteSecondsOptions: SegmentedOption<string>[] = [
 const initialYamanoteState: YamanoteState = {
   players: [],
   category: "all",
+  includeAdultTopics: false,
   themeCount: 10,
   secondsPerTurn: 3,
   step: "setup",
@@ -593,9 +1231,16 @@ function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
   const [storedState, setState] = useStoredState<YamanoteState>("yamanote", initialYamanoteState);
   const [draftAnswer, setDraftAnswer] = useState("");
   const state = { ...initialYamanoteState, ...storedState };
+  const activeYamanoteCategory = !state.includeAdultTopics && state.category === "adult" ? "all" : state.category;
+  const availableYamanoteCategories = state.includeAdultTopics ? yamanoteCategories : normalYamanoteCategories;
   const themePool = useMemo(
-    () => (state.category === "all" ? yamanoteThemes : yamanoteThemes.filter((theme) => theme.category === state.category)),
-    [state.category],
+    () =>
+      activeYamanoteCategory === "all"
+        ? state.includeAdultTopics
+          ? yamanoteThemes
+          : normalYamanoteThemes
+        : yamanoteThemes.filter((theme) => theme.category === activeYamanoteCategory),
+    [activeYamanoteCategory, state.includeAdultTopics],
   );
   const selectedThemeCount = Math.min(state.themeCount, themePool.length);
   const activeTheme = yamanoteThemes.find((theme) => theme.id === state.deckThemeIds[state.deckIndex]) ?? null;
@@ -694,10 +1339,29 @@ function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
             maxPlayers={20}
             onChange={(players) => setState({ ...state, players })}
           />
+          <ToggleSwitch
+            label="Hな話題"
+            description={
+              state.includeAdultTopics
+                ? "ON: 夜の話題・恋バナ寄りのお題も混ぜます。答えにくければスキップできます。"
+                : "OFF: 通常のお題だけで遊びます。"
+            }
+            checked={state.includeAdultTopics}
+            onChange={(includeAdultTopics) =>
+              setState({
+                ...state,
+                includeAdultTopics,
+                category: state.category === "adult" ? "all" : state.category,
+                deckThemeIds: [],
+                deckIndex: 0,
+                answerLog: [],
+              })
+            }
+          />
           <SegmentedControl
             label="カテゴリ"
-            options={yamanoteCategories}
-            value={state.category}
+            options={availableYamanoteCategories}
+            value={activeYamanoteCategory}
             onChange={(category) => setState({ ...state, category, deckThemeIds: [], deckIndex: 0, answerLog: [] })}
           />
           <SegmentedControl
@@ -723,8 +1387,14 @@ function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
             }
           />
           <p className="soft-note">
-            この条件では{themePool.length}問から、今回は{selectedThemeCount}問をランダムに使います。全体のお題は300問です。
+            この条件では{themePool.length}問から、今回は{selectedThemeCount}問をランダムに使います。通常300問、大人向け30問です。
           </p>
+          {state.includeAdultTopics && (
+            <div className="notice-panel">
+              <strong>Hな話題がONです</strong>
+              <p>露骨すぎる話や答えにくい話は避け、場に合わなければすぐスキップしてください。</p>
+            </div>
+          )}
           <div className="notice-panel calm">
             <strong>今年流の遊び方</strong>
             <p>
@@ -2084,6 +2754,7 @@ type ImpressionQuestionCount = 5 | 10 | 20 | 30 | 50 | 100 | 300;
 type ImpressionState = {
   players: Player[];
   category: ImpressionCategory;
+  includeAdultTopics: boolean;
   questionCount: ImpressionQuestionCount;
   allowSelfVote: boolean;
   step: ImpressionStep;
@@ -2106,6 +2777,7 @@ const impressionQuestionCountOptions: SegmentedOption<string>[] = [
 const initialImpressionState: ImpressionState = {
   players: [],
   category: "all",
+  includeAdultTopics: false,
   questionCount: 10,
   allowSelfVote: false,
   step: "setup",
@@ -2120,12 +2792,16 @@ function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onR
   const state = { ...initialImpressionState, ...storedState };
   const prompt = impressionPrompts.find((item) => item.id === state.promptId) ?? null;
   const canStart = state.players.length >= 3 && state.players.every((player) => player.name.trim());
+  const activeImpressionCategory = !state.includeAdultTopics && state.category === "adult" ? "all" : state.category;
+  const availableImpressionCategories = state.includeAdultTopics ? impressionCategories : normalImpressionCategories;
   const promptPool = useMemo(
     () =>
-      state.category === "all"
-        ? impressionPrompts
-        : impressionPrompts.filter((item) => item.category === state.category),
-    [state.category],
+      activeImpressionCategory === "all"
+        ? state.includeAdultTopics
+          ? impressionPrompts
+          : normalImpressionPrompts
+        : impressionPrompts.filter((item) => item.category === activeImpressionCategory),
+    [activeImpressionCategory, state.includeAdultTopics],
   );
   const selectedQuestionCount = Math.min(state.questionCount, promptPool.length);
   const progressLabel = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "";
@@ -2194,7 +2870,7 @@ function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onR
             <h3>進め方</h3>
             <ol className="rule-list">
               <li>参加者を3人以上登録します。</li>
-              <li>カテゴリ、今回使う設問数、自分への投票の有無を選びます。</li>
+              <li>カテゴリ、Hな話題のON/OFF、今回使う設問数、自分への投票の有無を選びます。</li>
               <li>お題が出たら、全員が「一番当てはまりそうな人」を1人選びます。迷う人はパスできます。</li>
               <li>結果が出たら、1位の人に短く明るい理由を聞きます。同票なら全員を1位として扱います。</li>
               <li>選ばれた人が嬉しくなる言い方を優先します。からかいすぎや暴露は避けて遊びます。</li>
@@ -2208,9 +2884,29 @@ function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onR
           />
           <SegmentedControl
             label="カテゴリ"
-            options={impressionCategories}
-            value={state.category}
+            options={availableImpressionCategories}
+            value={activeImpressionCategory}
             onChange={(category) => setState({ ...state, category, deckPromptIds: [], deckIndex: 0, promptId: null })}
+          />
+          <ToggleSwitch
+            label="Hな話題"
+            description={
+              state.includeAdultTopics
+                ? "ON: 夜の話題・恋バナ寄りの第一印象お題も混ぜます。"
+                : "OFF: 通常の第一印象お題だけで遊びます。"
+            }
+            checked={state.includeAdultTopics}
+            onChange={(includeAdultTopics) =>
+              setState({
+                ...state,
+                includeAdultTopics,
+                category: state.category === "adult" ? "all" : state.category,
+                deckPromptIds: [],
+                deckIndex: 0,
+                promptId: null,
+                votes: {},
+              })
+            }
           />
           <SegmentedControl
             label="今回の設問数"
@@ -2233,8 +2929,14 @@ function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onR
             onChange={(allowSelfVote) => setState({ ...state, allowSelfVote, votes: {} })}
           />
           <p className="soft-note">
-            この条件では{promptPool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。
+            この条件では{promptPool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。通常300問、大人向け30問です。
           </p>
+          {state.includeAdultTopics && (
+            <div className="notice-panel">
+              <strong>Hな話題がONです</strong>
+              <p>恋バナ寄りの印象お題を含みます。相手が答えにくそうなら、パスや次のお題へ切り替えてください。</p>
+            </div>
+          )}
           <div className="notice-panel calm">
             <strong>明るいランキング専用です</strong>
             <p>このゲームは印象を褒め合うためのものです。選んだ理由は短く、本人が受け取りやすい言い方にします。</p>
