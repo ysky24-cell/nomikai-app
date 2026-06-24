@@ -19,6 +19,7 @@
   --indigo: #4657a8;
   --indigo-soft: #e1e6ff;
   --gold: #b7791f;
+  --gold-soft: #f7e8bd;
   --danger: #b42318;
   --shadow: 0 18px 45px rgba(32, 33, 36, 0.08);
 }
@@ -132,7 +133,7 @@ h3 {
 
 .game-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
   gap: 14px;
 }
 
@@ -156,6 +157,10 @@ h3 {
 
 .game-card.accent-indigo {
   border-top-color: var(--indigo);
+}
+
+.game-card.accent-gold {
+  border-top-color: var(--gold);
 }
 
 .game-card-main {
@@ -189,6 +194,11 @@ h3 {
 .accent-indigo .game-icon {
   background: var(--indigo-soft);
   color: var(--indigo);
+}
+
+.accent-gold .game-icon {
+  background: var(--gold-soft);
+  color: var(--gold);
 }
 
 .meta-row {
@@ -425,7 +435,8 @@ input:focus {
 
 .segmented button,
 .candidate-grid button,
-.vote-buttons button {
+.vote-buttons button,
+.ranking-vote-buttons button {
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #ffffff;
@@ -435,13 +446,15 @@ input:focus {
 
 .segmented button.selected,
 .vote-buttons button.selected-choice,
+.ranking-vote-buttons button.selected-choice,
 .candidate-grid button:hover {
   border-color: var(--teal);
   background: var(--teal-soft);
   color: var(--teal);
 }
 
-.vote-buttons button.selected-choice.muted {
+.vote-buttons button.selected-choice.muted,
+.ranking-vote-buttons button.selected-choice.muted {
   border-color: var(--muted);
   background: var(--soft);
   color: var(--muted);
@@ -550,10 +563,19 @@ input:focus {
   background: var(--coral-soft);
 }
 
+.notice-panel.calm {
+  border-color: #b9d9ca;
+  background: #eff8f3;
+}
+
 .notice-panel p {
   margin: 7px 0 0;
   color: #693124;
   line-height: 1.6;
+}
+
+.notice-panel.calm p {
+  color: #315a46;
 }
 
 .rule-list {
@@ -603,8 +625,22 @@ input:focus {
   gap: 7px;
 }
 
+.ranking-vote-row {
+  grid-template-columns: minmax(96px, 0.35fr) minmax(0, 1.65fr);
+}
+
+.ranking-vote-buttons {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+  gap: 7px;
+}
+
 .choice-bar {
   margin-top: 16px;
+}
+
+.ranking-bars {
+  margin-top: 14px;
 }
 
 .choice-bar-label {

@@ -13,12 +13,18 @@ import {
   Plus,
   RotateCcw,
   ShieldAlert,
+  Sparkles,
   Timer,
   Trash2,
   Trophy,
   Users,
   Vote,
 } from "lucide-react";
+import {
+  impressionCategories,
+  impressionPrompts,
+  type ImpressionCategory,
+} from "./data/impressionPrompts";
 import {
   normalTwoChoiceCategories,
   normalTwoChoicePrompts,
@@ -34,7 +40,7 @@ import {
   type WordWolfCategory,
 } from "./data/wordWolfTopics";
 
-type GameKey = "two-choice" | "word-wolf" | "ng-word";
+type GameKey = "two-choice" | "word-wolf" | "ng-word" | "impression-ranking";
 
 type Player = {
   id: string;
@@ -47,12 +53,12 @@ type GameMeta = {
   description: string;
   people: string;
   minutes: string;
-  accent: "teal" | "coral" | "indigo";
+  accent: "teal" | "coral" | "indigo" | "gold";
   icon: LucideIcon;
 };
 
 const STORAGE_PREFIX = "nomikai-app:v1:";
-const STORED_GAME_KEYS: readonly GameKey[] = ["two-choice", "word-wolf", "ng-word"];
+const STORED_GAME_KEYS: readonly GameKey[] = ["two-choice", "word-wolf", "ng-word", "impression-ranking"];
 
 const activeGames: GameMeta[] = [
   {
@@ -82,12 +88,20 @@ const activeGames: GameMeta[] = [
     accent: "indigo",
     icon: ShieldAlert,
   },
+  {
+    key: "impression-ranking",
+    title: "第一印象ランキング",
+    description: "お題に一番当てはまりそうな人へ投票する",
+    people: "3人から",
+    minutes: "5分から",
+    accent: "gold",
+    icon: Sparkles,
+  },
 ];
 
 const futureGames = [
   "ジョハリの窓",
   "ウミガメのスープ",
-  "第一印象ランキング",
   "匿名質問箱",
 ];
 
@@ -159,6 +173,10 @@ function App() {
 
   if (activeGame === "ng-word") {
     return <NgWordGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+  }
+
+  if (activeGame === "impression-ranking") {
+    return <ImpressionRankingGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
   }
 
   return <HomeScreen onStart={setActiveGame} onResetAll={resetAllGames} />;
@@ -735,6 +753,298 @@ function NameCluster({ title, players }: { title: string; players: Player[] }) {
       <h3>{title}</h3>
       {players.length === 0 ? <EmptyState text="なし" /> : <p>{players.map((player) => player.name).join("、")}</p>}
     </div>
+  );
+}
+
+type ImpressionVoteChoice = string | "skip";
+type ImpressionStep = "setup" | "vote" | "result" | "complete";
+type ImpressionQuestionCount = 5 | 10 | 20 | 30 | 50 | 100 | 300;
+
+type ImpressionState = {
+  players: Player[];
+  category: ImpressionCategory;
+  questionCount: ImpressionQuestionCount;
+  allowSelfVote: boolean;
+  step: ImpressionStep;
+  promptId: string | null;
+  votes: Record<string, ImpressionVoteChoice>;
+  deckPromptIds: string[];
+  deckIndex: number;
+};
+
+const impressionQuestionCountOptions: SegmentedOption<string>[] = [
+  { value: "5", label: "5問" },
+  { value: "10", label: "10問" },
+  { value: "20", label: "20問" },
+  { value: "30", label: "30問" },
+  { value: "50", label: "50問" },
+  { value: "100", label: "100問" },
+  { value: "300", label: "300問" },
+];
+
+const initialImpressionState: ImpressionState = {
+  players: [],
+  category: "all",
+  questionCount: 10,
+  allowSelfVote: false,
+  step: "setup",
+  promptId: null,
+  votes: {},
+  deckPromptIds: [],
+  deckIndex: 0,
+};
+
+function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
+  const [storedState, setState] = useStoredState<ImpressionState>("impression-ranking", initialImpressionState);
+  const state = { ...initialImpressionState, ...storedState };
+  const prompt = impressionPrompts.find((item) => item.id === state.promptId) ?? null;
+  const canStart = state.players.length >= 3 && state.players.every((player) => player.name.trim());
+  const promptPool = useMemo(
+    () =>
+      state.category === "all"
+        ? impressionPrompts
+        : impressionPrompts.filter((item) => item.category === state.category),
+    [state.category],
+  );
+  const selectedQuestionCount = Math.min(state.questionCount, promptPool.length);
+  const progressLabel = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "";
+
+  useEffect(() => {
+    if ((state.step === "vote" || state.step === "result") && !prompt) {
+      setState({ ...state, step: "setup", promptId: null, votes: {}, deckPromptIds: [], deckIndex: 0 });
+    }
+  }, [prompt, setState, state.step]);
+
+  const result = useMemo(() => {
+    const rows = state.players
+      .map((player) => ({
+        player,
+        count: Object.values(state.votes).filter((targetId) => targetId === player.id).length,
+      }))
+      .sort((a, b) => b.count - a.count || a.player.name.localeCompare(b.player.name, "ja"));
+    const total = rows.reduce((sum, row) => sum + row.count, 0);
+    const topCount = rows[0]?.count ?? 0;
+    const winners = topCount === 0 ? [] : rows.filter((row) => row.count === topCount).map((row) => row.player);
+    const skipped = state.players.filter((player) => state.votes[player.id] === "skip");
+    return { rows, total, topCount, winners, skipped };
+  }, [state.players, state.votes]);
+
+  function startImpressionRound() {
+    const deckPromptIds = shuffle(promptPool)
+      .slice(0, selectedQuestionCount)
+      .map((item) => item.id);
+    setState({
+      ...state,
+      step: "vote",
+      promptId: deckPromptIds[0] ?? null,
+      votes: {},
+      deckPromptIds,
+      deckIndex: 0,
+    });
+  }
+
+  function updateImpressionVote(playerId: string, targetId: ImpressionVoteChoice) {
+    setState({ ...state, votes: { ...state.votes, [playerId]: targetId } });
+  }
+
+  function moveToNextImpressionPrompt() {
+    const nextIndex = state.deckIndex + 1;
+    const nextPromptId = state.deckPromptIds[nextIndex];
+    if (!nextPromptId) {
+      setState({ ...state, step: "complete", votes: {}, promptId: null });
+      return;
+    }
+    setState({ ...state, step: "vote", promptId: nextPromptId, deckIndex: nextIndex, votes: {} });
+  }
+
+  const votedCount = state.players.filter((player) => state.votes[player.id]).length;
+  const allVoted = votedCount === state.players.length && state.players.length > 0;
+
+  return (
+    <GameFrame
+      title="第一印象ランキング"
+      subtitle="一番当てはまりそうな人を選んで、明るい印象を共有するゲームです。"
+      onHome={onHome}
+      onResetAll={onResetAll}
+    >
+      {state.step === "setup" && (
+        <section className="tool-surface">
+          <div className="howto-panel">
+            <h3>進め方</h3>
+            <ol className="rule-list">
+              <li>参加者を3人以上登録します。</li>
+              <li>カテゴリ、今回使う設問数、自分への投票の有無を選びます。</li>
+              <li>お題が出たら、全員が「一番当てはまりそうな人」を1人選びます。迷う人はパスできます。</li>
+              <li>結果が出たら、1位の人に短く明るい理由を聞きます。同票なら全員を1位として扱います。</li>
+              <li>選ばれた人が嬉しくなる言い方を優先します。からかいすぎや暴露は避けて遊びます。</li>
+            </ol>
+          </div>
+          <PlayerSetup
+            players={state.players}
+            minPlayers={3}
+            maxPlayers={12}
+            onChange={(players) => setState({ ...state, players })}
+          />
+          <SegmentedControl
+            label="カテゴリ"
+            options={impressionCategories}
+            value={state.category}
+            onChange={(category) => setState({ ...state, category, deckPromptIds: [], deckIndex: 0, promptId: null })}
+          />
+          <SegmentedControl
+            label="今回の設問数"
+            options={impressionQuestionCountOptions}
+            value={String(state.questionCount)}
+            onChange={(questionCount) =>
+              setState({
+                ...state,
+                questionCount: Number(questionCount) as ImpressionQuestionCount,
+                deckPromptIds: [],
+                deckIndex: 0,
+                promptId: null,
+              })
+            }
+          />
+          <ToggleSwitch
+            label="自分への投票"
+            description={state.allowSelfVote ? "ON: 自分も候補に入ります。" : "OFF: 自分以外の人から選びます。"}
+            checked={state.allowSelfVote}
+            onChange={(allowSelfVote) => setState({ ...state, allowSelfVote, votes: {} })}
+          />
+          <p className="soft-note">
+            この条件では{promptPool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。
+          </p>
+          <div className="notice-panel calm">
+            <strong>明るいランキング専用です</strong>
+            <p>このゲームは印象を褒め合うためのものです。選んだ理由は短く、本人が受け取りやすい言い方にします。</p>
+          </div>
+          <div className="action-row">
+            <button className="primary-button" disabled={!canStart || selectedQuestionCount === 0} onClick={startImpressionRound}>
+              <Play size={18} />
+              はじめる
+            </button>
+            <button className="secondary-button" onClick={() => setState(initialImpressionState)}>
+              <RotateCcw size={18} />
+              リセット
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "vote" && prompt && (
+        <section className="tool-surface">
+          <div className="prompt-panel">
+            <p className="eyebrow">お題 {progressLabel}</p>
+            <h2>{prompt.question}</h2>
+            <p>直感で1人選びます。理由は結果を見るまで話さないと、投票がきれいに出ます。</p>
+          </div>
+          <div className="howto-panel compact">
+            <h3>投票のしかた</h3>
+            <ul className="rule-list">
+              <li>「一番そう見える」で気軽に選びます。</li>
+              <li>いじりやすさではなく、良い印象や楽しいイメージを優先します。</li>
+              <li>決めきれない時や本人が困りそうな時はパスできます。</li>
+            </ul>
+          </div>
+
+          <div className="vote-list">
+            {state.players.map((voter) => {
+              const candidates = state.allowSelfVote ? state.players : state.players.filter((player) => player.id !== voter.id);
+              return (
+                <div className="vote-row ranking-vote-row" key={voter.id}>
+                  <strong>{voter.name || "名前なし"}</strong>
+                  <div className="ranking-vote-buttons">
+                    {candidates.map((candidate) => (
+                      <button
+                        className={state.votes[voter.id] === candidate.id ? "selected-choice" : ""}
+                        key={candidate.id}
+                        onClick={() => updateImpressionVote(voter.id, candidate.id)}
+                      >
+                        {candidate.name}
+                      </button>
+                    ))}
+                    <button
+                      className={state.votes[voter.id] === "skip" ? "selected-choice muted" : ""}
+                      onClick={() => updateImpressionVote(voter.id, "skip")}
+                    >
+                      パス
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="action-row">
+            <button className="primary-button" disabled={!allVoted} onClick={() => setState({ ...state, step: "result" })}>
+              <ChevronRight size={18} />
+              結果を見る
+            </button>
+            <span className="inline-status">{votedCount}/{state.players.length} 投票済み</span>
+          </div>
+        </section>
+      )}
+
+      {state.step === "result" && prompt && (
+        <section className="tool-surface">
+          <div className="result-heading">
+            <Trophy size={24} />
+            <div>
+              <p className="eyebrow">結果</p>
+              <h2>{prompt.question}</h2>
+            </div>
+          </div>
+          <p className="talk-cue">
+            {result.winners.length > 0
+              ? `今回の1位: ${result.winners.map((player) => player.name).join("、")}さん`
+              : "今回は票が入りませんでした。次のお題へ進みましょう。"}
+          </p>
+          <div className="ranking-bars">
+            {result.rows.map(({ player, count }) => (
+              <ChoiceBar key={player.id} label={player.name} count={count} total={result.total} />
+            ))}
+          </div>
+          {result.skipped.length > 0 && <p className="soft-note">パス: {result.skipped.map((player) => player.name).join("、")}</p>}
+          <div className="howto-panel compact">
+            <h3>結果後の声かけ</h3>
+            <ul className="rule-list">
+              <li>1位の人に「どのあたりがそう見えた？」と明るく聞きます。</li>
+              <li>同票なら、それぞれ1人ずつ軽く理由を聞きます。</li>
+              <li>本人が照れていたら深掘りしすぎず、次のお題へ進みます。</li>
+            </ul>
+          </div>
+          <div className="action-row">
+            <button className="primary-button" onClick={moveToNextImpressionPrompt}>
+              {state.deckIndex + 1 >= state.deckPromptIds.length ? <Check size={18} /> : <ChevronRight size={18} />}
+              {state.deckIndex + 1 >= state.deckPromptIds.length ? "完了" : "次のお題"}
+            </button>
+            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", votes: {} })}>
+              <Users size={18} />
+              参加者を変える
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "complete" && (
+        <section className="tool-surface center-flow">
+          <Sparkles size={32} />
+          <p className="eyebrow">終了</p>
+          <h2>{state.deckPromptIds.length}問おつかれさまでした</h2>
+          <p className="talk-cue">雰囲気がよければ、カテゴリを変えてもう一度遊べます。</p>
+          <div className="action-row centered">
+            <button className="primary-button" onClick={startImpressionRound}>
+              <RotateCcw size={18} />
+              もう一度
+            </button>
+            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", votes: {}, promptId: null })}>
+              <Users size={18} />
+              設定へ
+            </button>
+          </div>
+        </section>
+      )}
+    </GameFrame>
   );
 }
 
