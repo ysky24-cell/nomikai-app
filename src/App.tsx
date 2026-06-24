@@ -101,6 +101,11 @@ type Player = {
   name: string;
 };
 
+type GameCardImage = {
+  src: string;
+  alt: string;
+};
+
 type GameMeta = {
   key: GameKey;
   title: string;
@@ -110,9 +115,11 @@ type GameMeta = {
   accent: "teal" | "coral" | "indigo" | "gold";
   icon: LucideIcon;
   groups: readonly HomeFilter[];
+  image?: GameCardImage;
 };
 
 const STORAGE_PREFIX = "nomikai-app:v1:";
+const publicAsset = (path: string) => `${import.meta.env.BASE_URL}${path}`;
 const STORED_GAME_KEYS: readonly GameKey[] = [
   "yamanote",
   "two-choice",
@@ -147,6 +154,33 @@ const urlCandidateIconMap: Record<UrlCandidateIconName, LucideIcon> = {
   list: ListChecks,
 };
 
+const gameCardImages: Partial<Record<BuiltInGameKey, GameCardImage>> = {
+  "two-choice": {
+    src: publicAsset("game-cards/two-choice.jpg"),
+    alt: "二択トークを楽しむ飲み会の様子",
+  },
+  "word-wolf": {
+    src: publicAsset("game-cards/word-wolf.jpg"),
+    alt: "ワードウルフで会話している飲み会の様子",
+  },
+  "ng-word": {
+    src: publicAsset("game-cards/ng-word-game.jpg"),
+    alt: "NGワードゲームで盛り上がる飲み会の様子",
+  },
+  "impression-ranking": {
+    src: publicAsset("game-cards/impression-ranking.jpg"),
+    alt: "第一印象ランキングの投票ボード",
+  },
+  "party-pack": {
+    src: publicAsset("game-cards/party-pack.jpg"),
+    alt: "定番ゲームパックのパッケージ写真",
+  },
+  "johari-window": {
+    src: publicAsset("game-cards/johari-window.jpg"),
+    alt: "ジョハリの窓の説明ボード",
+  },
+};
+
 const urlCandidateGameMeta: GameMeta[] = urlCandidateGameConfigs.map((game) => ({
   key: game.key,
   title: game.title,
@@ -178,6 +212,7 @@ const activeGames: GameMeta[] = [
     accent: "teal",
     icon: Vote,
     groups: ["talk"],
+    image: gameCardImages["two-choice"],
   },
   {
     key: "word-wolf",
@@ -188,6 +223,7 @@ const activeGames: GameMeta[] = [
     accent: "coral",
     icon: MessageCircleQuestion,
     groups: ["talk"],
+    image: gameCardImages["word-wolf"],
   },
   {
     key: "ng-word",
@@ -198,6 +234,7 @@ const activeGames: GameMeta[] = [
     accent: "indigo",
     icon: ShieldAlert,
     groups: ["talk"],
+    image: gameCardImages["ng-word"],
   },
   {
     key: "impression-ranking",
@@ -208,6 +245,7 @@ const activeGames: GameMeta[] = [
     accent: "gold",
     icon: Sparkles,
     groups: ["url", "talk", "large"],
+    image: gameCardImages["impression-ranking"],
   },
   {
     key: "party-pack",
@@ -218,6 +256,7 @@ const activeGames: GameMeta[] = [
     accent: "indigo",
     icon: ListChecks,
     groups: ["reaction", "talk", "drawing"],
+    image: gameCardImages["party-pack"],
   },
   {
     key: "johari-window",
@@ -228,6 +267,7 @@ const activeGames: GameMeta[] = [
     accent: "teal",
     icon: Eye,
     groups: ["talk"],
+    image: gameCardImages["johari-window"],
   },
   {
     key: "turtle-soup",
@@ -400,7 +440,12 @@ function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey) => void;
         {visibleGames.map((game) => {
           const Icon = game.icon;
           return (
-            <article className={`game-card accent-${game.accent}`} key={game.key}>
+            <article className={`game-card accent-${game.accent}${game.image ? " has-image" : ""}`} key={game.key}>
+              {game.image && (
+                <div className="game-card-media">
+                  <img src={game.image.src} alt={game.image.alt} loading="lazy" />
+                </div>
+              )}
               <div className="game-card-main">
                 <div className="game-icon">
                   <Icon size={28} />
