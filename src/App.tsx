@@ -183,6 +183,10 @@ const gameCardImages: Partial<Record<GameKey, GameCardImage>> = {
     src: publicAsset("game-cards/johari-window.jpg"),
     alt: "ジョハリの窓の説明ボード",
   },
+  "turtle-soup": {
+    src: publicAsset("game-cards/turtle-soup.jpg"),
+    alt: "ウミガメのスープの問題と質問例ボード",
+  },
   "anonymous-box": {
     src: publicAsset("game-cards/anonymous-box.jpg"),
     alt: "匿名質問箱の投函ボックス",
@@ -202,6 +206,30 @@ const gameCardImages: Partial<Record<GameKey, GameCardImage>> = {
   "reverse-word-game": {
     src: publicAsset("game-cards/reverse-word-game.jpg"),
     alt: "逆さ言葉ゲームのカードセット",
+  },
+  "song-association-quiz": {
+    src: publicAsset("game-cards/song-association-quiz.jpg"),
+    alt: "曲名連想クイズのヒントカード",
+  },
+  "drawing-quiz": {
+    src: publicAsset("game-cards/drawing-quiz.jpg"),
+    alt: "お絵描きクイズのボードとお題カード",
+  },
+  "hazard-card-game": {
+    src: publicAsset("game-cards/hazard-card-game.jpg"),
+    alt: "ドキドキはずれカードのカードセット",
+  },
+  "typing-speed-game": {
+    src: publicAsset("game-cards/typing-speed-game.jpg"),
+    alt: "スマホ早打ちゲームのカードとスマホ画面",
+  },
+  "memory-logo-drawing": {
+    src: publicAsset("game-cards/memory-logo-drawing.jpg"),
+    alt: "記憶だけでロゴを書くゲームのスケッチボード",
+  },
+  "value-meter-game": {
+    src: publicAsset("game-cards/value-meter-game.jpg"),
+    alt: "価値観メーターのメーターボードとカード",
   },
 };
 
@@ -304,6 +332,7 @@ const activeGames: GameMeta[] = [
     accent: "coral",
     icon: MessageCircleQuestion,
     groups: ["talk"],
+    image: gameCardImages["turtle-soup"],
   },
   {
     key: "anonymous-box",
