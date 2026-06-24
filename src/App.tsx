@@ -154,7 +154,11 @@ const urlCandidateIconMap: Record<UrlCandidateIconName, LucideIcon> = {
   list: ListChecks,
 };
 
-const gameCardImages: Partial<Record<BuiltInGameKey, GameCardImage>> = {
+const gameCardImages: Partial<Record<GameKey, GameCardImage>> = {
+  yamanote: {
+    src: publicAsset("game-cards/yamanote.jpg"),
+    alt: "山手線ゲームのルール説明ボード",
+  },
   "two-choice": {
     src: publicAsset("game-cards/two-choice.jpg"),
     alt: "二択トークを楽しむ飲み会の様子",
@@ -179,6 +183,26 @@ const gameCardImages: Partial<Record<BuiltInGameKey, GameCardImage>> = {
     src: publicAsset("game-cards/johari-window.jpg"),
     alt: "ジョハリの窓の説明ボード",
   },
+  "anonymous-box": {
+    src: publicAsset("game-cards/anonymous-box.jpg"),
+    alt: "匿名質問箱の投函ボックス",
+  },
+  "majority-game": {
+    src: publicAsset("game-cards/majority-game.jpg"),
+    alt: "マジョリティゲームの説明ボード",
+  },
+  "truth-lie-game": {
+    src: publicAsset("game-cards/truth-lie-game.jpg"),
+    alt: "2つの真実と1つの嘘のカードセット",
+  },
+  "count-up-game": {
+    src: publicAsset("game-cards/count-up-game.jpg"),
+    alt: "カウントアップゲームの説明ボード",
+  },
+  "reverse-word-game": {
+    src: publicAsset("game-cards/reverse-word-game.jpg"),
+    alt: "逆さ言葉ゲームのカードセット",
+  },
 };
 
 const urlCandidateGameMeta: GameMeta[] = urlCandidateGameConfigs.map((game) => ({
@@ -190,6 +214,7 @@ const urlCandidateGameMeta: GameMeta[] = urlCandidateGameConfigs.map((game) => (
   accent: game.accent,
   icon: urlCandidateIconMap[game.icon],
   groups: ["url", ...game.groups],
+  image: gameCardImages[game.key],
 }));
 
 const activeGames: GameMeta[] = [
@@ -202,6 +227,7 @@ const activeGames: GameMeta[] = [
     accent: "teal",
     icon: Timer,
     groups: ["url", "reaction"],
+    image: gameCardImages.yamanote,
   },
   {
     key: "two-choice",
@@ -288,6 +314,7 @@ const activeGames: GameMeta[] = [
     accent: "gold",
     icon: ListChecks,
     groups: ["talk"],
+    image: gameCardImages["anonymous-box"],
   },
   ...urlCandidateGameMeta,
 ];
