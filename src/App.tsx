@@ -21,10 +21,20 @@ import {
   Vote,
 } from "lucide-react";
 import {
+  anonymousQuestionCategories,
+  anonymousQuestionPrompts,
+  type AnonymousQuestionFilter,
+} from "./data/anonymousQuestionPrompts";
+import {
   impressionCategories,
   impressionPrompts,
   type ImpressionCategory,
 } from "./data/impressionPrompts";
+import {
+  johariCategories,
+  johariWords,
+  type JohariCategory,
+} from "./data/johariWords";
 import {
   partyPackModeGuides,
   partyPackModes,
@@ -46,8 +56,21 @@ import {
   wordWolfTopics,
   type WordWolfCategory,
 } from "./data/wordWolfTopics";
+import {
+  turtleSoupCases,
+  turtleSoupCategories,
+  type TurtleSoupFilter,
+} from "./data/turtleSoupCases";
 
-type GameKey = "two-choice" | "word-wolf" | "ng-word" | "impression-ranking" | "party-pack";
+type GameKey =
+  | "two-choice"
+  | "word-wolf"
+  | "ng-word"
+  | "impression-ranking"
+  | "party-pack"
+  | "johari-window"
+  | "turtle-soup"
+  | "anonymous-box";
 
 type Player = {
   id: string;
@@ -65,7 +88,16 @@ type GameMeta = {
 };
 
 const STORAGE_PREFIX = "nomikai-app:v1:";
-const STORED_GAME_KEYS: readonly GameKey[] = ["two-choice", "word-wolf", "ng-word", "impression-ranking", "party-pack"];
+const STORED_GAME_KEYS: readonly GameKey[] = [
+  "two-choice",
+  "word-wolf",
+  "ng-word",
+  "impression-ranking",
+  "party-pack",
+  "johari-window",
+  "turtle-soup",
+  "anonymous-box",
+];
 
 const activeGames: GameMeta[] = [
   {
@@ -113,13 +145,36 @@ const activeGames: GameMeta[] = [
     accent: "indigo",
     icon: ListChecks,
   },
+  {
+    key: "johari-window",
+    title: "ジョハリの窓",
+    description: "自分と周りが選ぶ特徴ワードを4つの窓で見比べる",
+    people: "3人から",
+    minutes: "10分から",
+    accent: "teal",
+    icon: Eye,
+  },
+  {
+    key: "turtle-soup",
+    title: "ウミガメのスープ",
+    description: "はい・いいえで質問して短い謎の真相を当てる",
+    people: "2人から",
+    minutes: "5分から",
+    accent: "coral",
+    icon: MessageCircleQuestion,
+  },
+  {
+    key: "anonymous-box",
+    title: "匿名質問箱",
+    description: "答えやすい質問をランダムに引いて会話を広げる",
+    people: "2人から",
+    minutes: "5分から",
+    accent: "gold",
+    icon: ListChecks,
+  },
 ];
 
-const futureGames = [
-  "ジョハリの窓",
-  "ウミガメのスープ",
-  "匿名質問箱",
-];
+const futureGames: string[] = [];
 
 function createId(prefix: string) {
   if ("crypto" in window && "randomUUID" in window.crypto) {
@@ -199,6 +254,18 @@ function App() {
     return <PartyPackGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
   }
 
+  if (activeGame === "johari-window") {
+    return <JohariWindowGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+  }
+
+  if (activeGame === "turtle-soup") {
+    return <TurtleSoupGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+  }
+
+  if (activeGame === "anonymous-box") {
+    return <AnonymousQuestionBoxGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+  }
+
   return <HomeScreen onStart={setActiveGame} onResetAll={resetAllGames} />;
 }
 
@@ -256,17 +323,19 @@ function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey) => void;
         })}
       </section>
 
-      <section className="future-section" aria-label="追加予定ゲーム">
-        <div className="section-heading">
-          <ListChecks size={20} />
-          <h2>追加予定</h2>
-        </div>
-        <div className="future-list">
-          {futureGames.map((game) => (
-            <span key={game}>{game}</span>
-          ))}
-        </div>
-      </section>
+      {futureGames.length > 0 && (
+        <section className="future-section" aria-label="追加予定ゲーム">
+          <div className="section-heading">
+            <ListChecks size={20} />
+            <h2>追加予定</h2>
+          </div>
+          <div className="future-list">
+            {futureGames.map((game) => (
+              <span key={game}>{game}</span>
+            ))}
+          </div>
+        </section>
+      )}
     </main>
   );
 }
@@ -445,6 +514,893 @@ function GameFrame({
 
 function EmptyState({ text }: { text: string }) {
   return <p className="empty-state">{text}</p>;
+}
+
+type JohariStep = "setup" | "self" | "peer" | "result" | "complete";
+type JohariWordCount = 10 | 15 | 20 | 30 | 50 | 100 | 300;
+
+type JohariState = {
+  players: Player[];
+  category: JohariCategory;
+  wordCount: JohariWordCount;
+  step: JohariStep;
+  targetIndex: number;
+  peerIndex: number;
+  deckWordIds: string[];
+  selfWordIds: string[];
+  peerSelections: Record<string, string[]>;
+};
+
+const johariWordCountOptions: SegmentedOption<string>[] = [
+  { value: "10", label: "10語" },
+  { value: "15", label: "15語" },
+  { value: "20", label: "20語" },
+  { value: "30", label: "30語" },
+  { value: "50", label: "50語" },
+  { value: "100", label: "100語" },
+  { value: "300", label: "300語" },
+];
+
+const initialJohariState: JohariState = {
+  players: [],
+  category: "all",
+  wordCount: 20,
+  step: "setup",
+  targetIndex: 0,
+  peerIndex: 0,
+  deckWordIds: [],
+  selfWordIds: [],
+  peerSelections: {},
+};
+
+function ToggleWordGrid({
+  words,
+  selectedIds,
+  onToggle,
+}: {
+  words: { id: string; label: string }[];
+  selectedIds: string[];
+  onToggle: (id: string) => void;
+}) {
+  const selectedSet = new Set(selectedIds);
+  return (
+    <div className="word-choice-grid">
+      {words.map((word) => (
+        <button
+          className={selectedSet.has(word.id) ? "selected-choice" : ""}
+          key={word.id}
+          onClick={() => onToggle(word.id)}
+          type="button"
+        >
+          {word.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function WordList({ words }: { words: string[] }) {
+  return words.length === 0 ? (
+    <EmptyState text="今回は該当なし" />
+  ) : (
+    <div className="tag-list">
+      {words.map((word) => (
+        <span key={word}>{word}</span>
+      ))}
+    </div>
+  );
+}
+
+function JohariWindowGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
+  const [storedState, setState] = useStoredState<JohariState>("johari-window", initialJohariState);
+  const state = { ...initialJohariState, ...storedState };
+  const wordPool = useMemo(
+    () => (state.category === "all" ? johariWords : johariWords.filter((word) => word.category === state.category)),
+    [state.category],
+  );
+  const selectedWordCount = Math.min(state.wordCount, wordPool.length);
+  const deckWords = state.deckWordIds
+    .map((id) => johariWords.find((word) => word.id === id))
+    .filter((word): word is (typeof johariWords)[number] => Boolean(word));
+  const target = state.players[state.targetIndex] ?? null;
+  const peers = target ? state.players.filter((player) => player.id !== target.id) : [];
+  const currentPeer = peers[state.peerIndex] ?? null;
+  const canStart = state.players.length >= 3 && state.players.every((player) => player.name.trim());
+
+  function startJohari() {
+    const deckWordIds = shuffle(wordPool)
+      .slice(0, selectedWordCount)
+      .map((word) => word.id);
+    setState({
+      ...state,
+      step: "self",
+      targetIndex: 0,
+      peerIndex: 0,
+      deckWordIds,
+      selfWordIds: [],
+      peerSelections: {},
+    });
+  }
+
+  function toggleSelfWord(id: string) {
+    const selected = state.selfWordIds.includes(id)
+      ? state.selfWordIds.filter((wordId) => wordId !== id)
+      : [...state.selfWordIds, id];
+    setState({ ...state, selfWordIds: selected });
+  }
+
+  function togglePeerWord(peerId: string, id: string) {
+    const current = state.peerSelections[peerId] ?? [];
+    const selected = current.includes(id) ? current.filter((wordId) => wordId !== id) : [...current, id];
+    setState({ ...state, peerSelections: { ...state.peerSelections, [peerId]: selected } });
+  }
+
+  function moveToNextPeer() {
+    if (state.peerIndex + 1 >= peers.length) {
+      setState({ ...state, step: "result" });
+      return;
+    }
+    setState({ ...state, peerIndex: state.peerIndex + 1 });
+  }
+
+  function moveToNextTarget() {
+    if (state.targetIndex + 1 >= state.players.length) {
+      setState({ ...state, step: "complete" });
+      return;
+    }
+    setState({
+      ...state,
+      step: "self",
+      targetIndex: state.targetIndex + 1,
+      peerIndex: 0,
+      selfWordIds: [],
+      peerSelections: {},
+    });
+  }
+
+  const johariResult = useMemo(() => {
+    const selfSet = new Set(state.selfWordIds);
+    const otherCounts = new Map<string, number>();
+    Object.values(state.peerSelections).forEach((selection) => {
+      selection.forEach((wordId) => otherCounts.set(wordId, (otherCounts.get(wordId) ?? 0) + 1));
+    });
+    const otherSet = new Set(otherCounts.keys());
+    const labelOf = (id: string) => johariWords.find((word) => word.id === id)?.label ?? id;
+    const deckIds = deckWords.map((word) => word.id);
+    return {
+      open: deckIds.filter((id) => selfSet.has(id) && otherSet.has(id)).map(labelOf),
+      blind: deckIds.filter((id) => !selfSet.has(id) && otherSet.has(id)).map(labelOf),
+      hidden: deckIds.filter((id) => selfSet.has(id) && !otherSet.has(id)).map(labelOf),
+      unknown: deckIds.filter((id) => !selfSet.has(id) && !otherSet.has(id)).map(labelOf),
+    };
+  }, [deckWords, state.peerSelections, state.selfWordIds]);
+
+  return (
+    <GameFrame
+      title="ジョハリの窓"
+      subtitle="自分が選ぶ特徴と、周りが選ぶ特徴を見比べて、相互理解を深めます。"
+      onHome={onHome}
+      onResetAll={onResetAll}
+    >
+      {state.step === "setup" && (
+        <section className="tool-surface">
+          <div className="howto-panel">
+            <h3>進め方</h3>
+            <ol className="rule-list">
+              <li>参加者を3人以上登録します。</li>
+              <li>対象者を1人ずつ回し、まず本人が自分に当てはまる特徴ワードを選びます。</li>
+              <li>次に、他の参加者が対象者に当てはまりそうな特徴ワードを選びます。</li>
+              <li>結果は「開放」「盲点」「秘密」「未知」の4つの窓に分かれて表示されます。</li>
+              <li>欠点探しではなく、選ばれた言葉から「そう見えているんだ」と会話するゲームです。</li>
+            </ol>
+          </div>
+          <PlayerSetup
+            players={state.players}
+            minPlayers={3}
+            maxPlayers={12}
+            onChange={(players) => setState({ ...state, players })}
+          />
+          <SegmentedControl
+            label="特徴ワード"
+            options={johariCategories}
+            value={state.category}
+            onChange={(category) => setState({ ...state, category, deckWordIds: [], selfWordIds: [], peerSelections: {} })}
+          />
+          <SegmentedControl
+            label="今回使う語数"
+            options={johariWordCountOptions}
+            value={String(state.wordCount)}
+            onChange={(wordCount) =>
+              setState({
+                ...state,
+                wordCount: Number(wordCount) as JohariWordCount,
+                deckWordIds: [],
+                selfWordIds: [],
+                peerSelections: {},
+              })
+            }
+          />
+          <p className="soft-note">
+            この条件では{wordPool.length}語から、今回は{selectedWordCount}語をランダムに使います。全体の特徴ワードは300語です。
+          </p>
+          <div className="notice-panel calm">
+            <strong>心理的安全性を優先します</strong>
+            <p>容姿や年齢をいじるゲームではありません。良い特徴、役割、見え方を共有する時間として進めます。</p>
+          </div>
+          <div className="action-row">
+            <button className="primary-button" disabled={!canStart || selectedWordCount === 0} onClick={startJohari}>
+              <Play size={18} />
+              はじめる
+            </button>
+            <button className="secondary-button" onClick={() => setState(initialJohariState)}>
+              <RotateCcw size={18} />
+              リセット
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "self" && target && (
+        <section className="tool-surface">
+          <div className="prompt-panel">
+            <p className="eyebrow">
+              対象者 {state.targetIndex + 1}/{state.players.length}
+            </p>
+            <h2>{target.name}さん本人の選択</h2>
+            <p>自分に当てはまると思う特徴を選びます。多くても少なくても大丈夫です。</p>
+          </div>
+          <ToggleWordGrid words={deckWords} selectedIds={state.selfWordIds} onToggle={toggleSelfWord} />
+          <div className="action-row">
+            <button className="primary-button" onClick={() => setState({ ...state, step: "peer", peerIndex: 0 })}>
+              <ChevronRight size={18} />
+              周りの選択へ
+            </button>
+            <span className="inline-status">{state.selfWordIds.length}語選択中</span>
+          </div>
+        </section>
+      )}
+
+      {state.step === "peer" && target && currentPeer && (
+        <section className="tool-surface">
+          <div className="prompt-panel">
+            <p className="eyebrow">
+              周りの選択 {state.peerIndex + 1}/{peers.length}
+            </p>
+            <h2>
+              {currentPeer.name}さんから見た{target.name}さん
+            </h2>
+            <p>対象者に当てはまりそうな特徴を選びます。本人が見ないように、スマホを少し隠して進めます。</p>
+          </div>
+          <ToggleWordGrid
+            words={deckWords}
+            selectedIds={state.peerSelections[currentPeer.id] ?? []}
+            onToggle={(id) => togglePeerWord(currentPeer.id, id)}
+          />
+          <div className="action-row">
+            <button className="primary-button" onClick={moveToNextPeer}>
+              <ChevronRight size={18} />
+              {state.peerIndex + 1 >= peers.length ? "結果を見る" : "次の人へ"}
+            </button>
+            <span className="inline-status">{(state.peerSelections[currentPeer.id] ?? []).length}語選択中</span>
+          </div>
+        </section>
+      )}
+
+      {state.step === "result" && target && (
+        <section className="tool-surface">
+          <div className="result-heading">
+            <Eye size={24} />
+            <div>
+              <p className="eyebrow">4つの窓</p>
+              <h2>{target.name}さんのジョハリの窓</h2>
+            </div>
+          </div>
+          <div className="quadrant-grid">
+            <div className="quadrant-card">
+              <h3>開放の窓</h3>
+              <p>自分も周りも選んだ特徴</p>
+              <WordList words={johariResult.open} />
+            </div>
+            <div className="quadrant-card">
+              <h3>盲点の窓</h3>
+              <p>周りだけが選んだ特徴</p>
+              <WordList words={johariResult.blind} />
+            </div>
+            <div className="quadrant-card">
+              <h3>秘密の窓</h3>
+              <p>自分だけが選んだ特徴</p>
+              <WordList words={johariResult.hidden} />
+            </div>
+            <div className="quadrant-card">
+              <h3>未知の窓</h3>
+              <p>今回は誰も選ばなかった特徴</p>
+              <WordList words={johariResult.unknown} />
+            </div>
+          </div>
+          <div className="howto-panel compact">
+            <h3>結果後の話し方</h3>
+            <ul className="rule-list">
+              <li>「意外だった言葉」を1つ選び、理由を明るく聞きます。</li>
+              <li>盲点の窓は、本人を責める材料ではなく、周りから見た良い印象として扱います。</li>
+              <li>深掘りしすぎず、本人が照れたら次の対象者へ進みます。</li>
+            </ul>
+          </div>
+          <div className="action-row">
+            <button className="primary-button" onClick={moveToNextTarget}>
+              {state.targetIndex + 1 >= state.players.length ? <Check size={18} /> : <ChevronRight size={18} />}
+              {state.targetIndex + 1 >= state.players.length ? "完了" : "次の対象者"}
+            </button>
+            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup" })}>
+              <Users size={18} />
+              設定へ
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "complete" && (
+        <section className="tool-surface center-flow">
+          <Eye size={32} />
+          <p className="eyebrow">終了</p>
+          <h2>全員分の窓を見ました</h2>
+          <p className="talk-cue">印象に残った良い言葉を1つずつ持ち帰ると、気持ちよく終われます。</p>
+          <div className="action-row centered">
+            <button className="primary-button" onClick={startJohari}>
+              <RotateCcw size={18} />
+              もう一度
+            </button>
+            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup" })}>
+              <Users size={18} />
+              設定へ
+            </button>
+          </div>
+        </section>
+      )}
+    </GameFrame>
+  );
+}
+
+type TurtleSoupStep = "setup" | "play" | "complete";
+type TurtleSoupQuestionCount = 5 | 10 | 20 | 30 | 50 | 100 | 300;
+
+type TurtleSoupState = {
+  players: Player[];
+  category: TurtleSoupFilter;
+  questionCount: TurtleSoupQuestionCount;
+  step: TurtleSoupStep;
+  caseId: string | null;
+  deckCaseIds: string[];
+  deckIndex: number;
+  hintLevel: number;
+  answerVisible: boolean;
+  solvedCount: number;
+  questionLog: { id: string; text: string; answer: "はい" | "いいえ" | "関係ありません" | "補足あり" }[];
+};
+
+const turtleSoupQuestionCountOptions: SegmentedOption<string>[] = [
+  { value: "5", label: "5問" },
+  { value: "10", label: "10問" },
+  { value: "20", label: "20問" },
+  { value: "30", label: "30問" },
+  { value: "50", label: "50問" },
+  { value: "100", label: "100問" },
+  { value: "300", label: "300問" },
+];
+
+const initialTurtleSoupState: TurtleSoupState = {
+  players: [],
+  category: "all",
+  questionCount: 10,
+  step: "setup",
+  caseId: null,
+  deckCaseIds: [],
+  deckIndex: 0,
+  hintLevel: 0,
+  answerVisible: false,
+  solvedCount: 0,
+  questionLog: [],
+};
+
+function TurtleSoupGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
+  const [storedState, setState] = useStoredState<TurtleSoupState>("turtle-soup", initialTurtleSoupState);
+  const [draftQuestion, setDraftQuestion] = useState("");
+  const [draftAnswer, setDraftAnswer] = useState<"はい" | "いいえ" | "関係ありません" | "補足あり">("はい");
+  const state = { ...initialTurtleSoupState, ...storedState };
+  const casePool = useMemo(
+    () => (state.category === "all" ? turtleSoupCases : turtleSoupCases.filter((item) => item.category === state.category)),
+    [state.category],
+  );
+  const selectedQuestionCount = Math.min(state.questionCount, casePool.length);
+  const activeCase = turtleSoupCases.find((item) => item.id === state.caseId) ?? null;
+  const facilitator = state.players.length > 0 ? state.players[state.deckIndex % state.players.length] : null;
+  const canStart = state.players.length >= 2 && state.players.every((player) => player.name.trim());
+  const progressLabel = state.deckCaseIds.length > 0 ? `${state.deckIndex + 1}/${state.deckCaseIds.length}` : "";
+
+  useEffect(() => {
+    if (state.step === "play" && !activeCase) {
+      setState({ ...state, step: "setup", caseId: null, deckCaseIds: [], deckIndex: 0, hintLevel: 0, answerVisible: false });
+    }
+  }, [activeCase, setState, state.step]);
+
+  function startTurtleSoup() {
+    const deckCaseIds = shuffle(casePool)
+      .slice(0, selectedQuestionCount)
+      .map((item) => item.id);
+    setState({
+      ...state,
+      step: "play",
+      caseId: deckCaseIds[0] ?? null,
+      deckCaseIds,
+      deckIndex: 0,
+      hintLevel: 0,
+      answerVisible: false,
+      solvedCount: 0,
+      questionLog: [],
+    });
+  }
+
+  function addTurtleQuestionLog() {
+    const text = draftQuestion.trim();
+    if (!text) return;
+    setState({
+      ...state,
+      questionLog: [...state.questionLog, { id: createId("question-log"), text, answer: draftAnswer }],
+    });
+    setDraftQuestion("");
+    setDraftAnswer("はい");
+  }
+
+  function moveToNextTurtleCase(solved: boolean) {
+    const nextIndex = state.deckIndex + 1;
+    const nextCaseId = state.deckCaseIds[nextIndex];
+    const solvedCount = state.solvedCount + (solved ? 1 : 0);
+    if (!nextCaseId) {
+      setState({ ...state, step: "complete", caseId: null, hintLevel: 0, answerVisible: false, solvedCount });
+      return;
+    }
+    setState({
+      ...state,
+      step: "play",
+      caseId: nextCaseId,
+      deckIndex: nextIndex,
+      hintLevel: 0,
+      answerVisible: false,
+      solvedCount,
+      questionLog: [],
+    });
+  }
+
+  return (
+    <GameFrame
+      title="ウミガメのスープ"
+      subtitle="はい・いいえ・関係ありませんで質問し、短い謎の真相を当てる水平思考ゲームです。"
+      onHome={onHome}
+      onResetAll={onResetAll}
+    >
+      {state.step === "setup" && (
+        <section className="tool-surface">
+          <div className="howto-panel">
+            <h3>進め方</h3>
+            <ol className="rule-list">
+              <li>出題者を1人決めます。出題者だけが真相を見ます。</li>
+              <li>他の参加者は「はい」「いいえ」「関係ありません」で答えられる質問をします。</li>
+              <li>出題者は答えを見ながら、質問に短く返します。</li>
+              <li>詰まったらヒントを1つずつ出します。真相に近づく会話を楽しみます。</li>
+              <li>正解が出たら真相を読み上げ、すぐ次の問題へ進めます。</li>
+            </ol>
+          </div>
+          <PlayerSetup
+            players={state.players}
+            minPlayers={2}
+            maxPlayers={12}
+            onChange={(players) => setState({ ...state, players })}
+          />
+          <SegmentedControl
+            label="カテゴリ"
+            options={turtleSoupCategories}
+            value={state.category}
+            onChange={(category) => setState({ ...state, category, deckCaseIds: [], deckIndex: 0, caseId: null })}
+          />
+          <SegmentedControl
+            label="今回の問題数"
+            options={turtleSoupQuestionCountOptions}
+            value={String(state.questionCount)}
+            onChange={(questionCount) =>
+              setState({
+                ...state,
+                questionCount: Number(questionCount) as TurtleSoupQuestionCount,
+                deckCaseIds: [],
+                deckIndex: 0,
+                caseId: null,
+              })
+            }
+          />
+          <p className="soft-note">
+            この条件では{casePool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。全体の問題は300問です。
+          </p>
+          <div className="notice-panel calm">
+            <strong>質問のコツ</strong>
+            <p>「誰が」「いつ」「場所は」「見えているものは本物か」など、前提をほどく質問から始めると進みやすいです。</p>
+          </div>
+          <div className="action-row">
+            <button className="primary-button" disabled={!canStart || selectedQuestionCount === 0} onClick={startTurtleSoup}>
+              <Play size={18} />
+              はじめる
+            </button>
+            <button className="secondary-button" onClick={() => setState(initialTurtleSoupState)}>
+              <RotateCcw size={18} />
+              リセット
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "play" && activeCase && (
+        <section className="tool-surface">
+          <div className="prompt-panel">
+            <p className="eyebrow">
+              問題 {progressLabel} / {activeCase.difficulty}
+            </p>
+            <h2>{activeCase.title}</h2>
+            <p className="party-prompt-copy">{activeCase.story}</p>
+            <p>{activeCase.question}</p>
+            {facilitator && <p className="soft-note">今回の出題者: {facilitator.name}</p>}
+          </div>
+          <div className="howto-panel compact">
+            <h3>出題者の返し方</h3>
+            <ul className="rule-list">
+              <li>答えられる質問には「はい」「いいえ」「関係ありません」で返します。</li>
+              <li>近い質問には「かなり近い」「半分正解」など、少しだけ補足してもOKです。</li>
+              <li>質問が止まったら、ヒントを1つだけ開きます。</li>
+            </ul>
+          </div>
+          {state.hintLevel > 0 && (
+            <div className="hint-list">
+              {activeCase.hints.slice(0, state.hintLevel).map((hint, index) => (
+                <p key={hint}>
+                  ヒント{index + 1}: {hint}
+                </p>
+              ))}
+            </div>
+          )}
+          <div className="question-log-panel">
+            <h3>質問メモ</h3>
+            <p>出題者が必要な時だけ記録します。記録しなくても遊べます。</p>
+            <form
+              className="question-log-form"
+              onSubmit={(event) => {
+                event.preventDefault();
+                addTurtleQuestionLog();
+              }}
+            >
+              <input
+                value={draftQuestion}
+                onChange={(event) => setDraftQuestion(event.target.value)}
+                placeholder="例: それは人間ですか？"
+                maxLength={80}
+              />
+              <select value={draftAnswer} onChange={(event) => setDraftAnswer(event.target.value as typeof draftAnswer)}>
+                <option value="はい">はい</option>
+                <option value="いいえ">いいえ</option>
+                <option value="関係ありません">関係ありません</option>
+                <option value="補足あり">補足あり</option>
+              </select>
+              <button className="secondary-button" disabled={!draftQuestion.trim()} type="submit">
+                <Plus size={18} />
+                記録
+              </button>
+            </form>
+            {state.questionLog.length > 0 && (
+              <div className="question-log-list">
+                {state.questionLog.map((item) => (
+                  <div className="question-log-row" key={item.id}>
+                    <span>{item.text}</span>
+                    <strong>{item.answer}</strong>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="action-row">
+            <button
+              className="secondary-button"
+              disabled={state.hintLevel >= activeCase.hints.length}
+              onClick={() => setState({ ...state, hintLevel: Math.min(activeCase.hints.length, state.hintLevel + 1) })}
+            >
+              <MessageCircleQuestion size={18} />
+              ヒントを出す
+            </button>
+            <button className="secondary-button" onClick={() => setState({ ...state, answerVisible: !state.answerVisible })}>
+              {state.answerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+              {state.answerVisible ? "真相を隠す" : "出題者だけ真相を見る"}
+            </button>
+          </div>
+          {state.answerVisible && (
+            <div className="answer-panel wide">
+              <strong>真相</strong>
+              <p>{activeCase.truth}</p>
+            </div>
+          )}
+          <div className="action-row">
+            <button className="primary-button" onClick={() => moveToNextTurtleCase(true)}>
+              <Check size={18} />
+              解けた
+            </button>
+            <button className="secondary-button" onClick={() => moveToNextTurtleCase(false)}>
+              <ChevronRight size={18} />
+              次の問題
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "complete" && (
+        <section className="tool-surface center-flow">
+          <MessageCircleQuestion size={32} />
+          <p className="eyebrow">終了</p>
+          <h2>
+            {state.solvedCount}/{state.deckCaseIds.length}問 解けました
+          </h2>
+          <p className="talk-cue">解けなかった問題も、真相を読んで「そういうことか」と笑えたら成功です。</p>
+          <div className="action-row centered">
+            <button className="primary-button" onClick={startTurtleSoup}>
+              <RotateCcw size={18} />
+              もう一度
+            </button>
+            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", caseId: null })}>
+              <Users size={18} />
+              設定へ
+            </button>
+          </div>
+        </section>
+      )}
+    </GameFrame>
+  );
+}
+
+type AnonymousQuestionStep = "setup" | "question" | "complete";
+type AnonymousQuestionCount = 5 | 10 | 20 | 30 | 50 | 100 | 300;
+
+type CustomAnonymousQuestion = {
+  id: string;
+  text: string;
+};
+
+type AnonymousQuestionState = {
+  players: Player[];
+  category: AnonymousQuestionFilter;
+  questionCount: AnonymousQuestionCount;
+  step: AnonymousQuestionStep;
+  customQuestions: CustomAnonymousQuestion[];
+  deckQuestionIds: string[];
+  deckIndex: number;
+};
+
+const anonymousQuestionCountOptions: SegmentedOption<string>[] = [
+  { value: "5", label: "5問" },
+  { value: "10", label: "10問" },
+  { value: "20", label: "20問" },
+  { value: "30", label: "30問" },
+  { value: "50", label: "50問" },
+  { value: "100", label: "100問" },
+  { value: "300", label: "300問" },
+];
+
+const initialAnonymousQuestionState: AnonymousQuestionState = {
+  players: [],
+  category: "all",
+  questionCount: 10,
+  step: "setup",
+  customQuestions: [],
+  deckQuestionIds: [],
+  deckIndex: 0,
+};
+
+function AnonymousQuestionBoxGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
+  const [storedState, setState] = useStoredState<AnonymousQuestionState>("anonymous-box", initialAnonymousQuestionState);
+  const [draftQuestion, setDraftQuestion] = useState("");
+  const state = { ...initialAnonymousQuestionState, ...storedState };
+  const questionPool = useMemo(
+    () =>
+      state.category === "all"
+        ? anonymousQuestionPrompts
+        : anonymousQuestionPrompts.filter((item) => item.category === state.category),
+    [state.category],
+  );
+  const selectedQuestionCount = Math.min(state.questionCount, questionPool.length + state.customQuestions.length);
+  const canStart = state.players.length >= 2 && state.players.every((player) => player.name.trim()) && selectedQuestionCount > 0;
+  const currentQuestionId = state.deckQuestionIds[state.deckIndex] ?? null;
+  const currentQuestion = currentQuestionId?.startsWith("custom:")
+    ? state.customQuestions.find((item) => `custom:${item.id}` === currentQuestionId)?.text
+    : anonymousQuestionPrompts.find((item) => `template:${item.id}` === currentQuestionId)?.question;
+  const progressLabel = state.deckQuestionIds.length > 0 ? `${state.deckIndex + 1}/${state.deckQuestionIds.length}` : "";
+
+  function addCustomQuestion() {
+    const text = draftQuestion.trim();
+    if (!text) return;
+    setState({
+      ...state,
+      customQuestions: [...state.customQuestions, { id: createId("question"), text }],
+    });
+    setDraftQuestion("");
+  }
+
+  function removeCustomQuestion(id: string) {
+    setState({ ...state, customQuestions: state.customQuestions.filter((question) => question.id !== id) });
+  }
+
+  function startAnonymousBox() {
+    const customIds = state.customQuestions.map((question) => `custom:${question.id}`);
+    const templateLimit = Math.max(0, selectedQuestionCount - customIds.length);
+    const templateIds = shuffle(questionPool)
+      .slice(0, templateLimit)
+      .map((question) => `template:${question.id}`);
+    const deckQuestionIds = shuffle([...customIds, ...templateIds]).slice(0, selectedQuestionCount);
+    setState({ ...state, step: "question", deckQuestionIds, deckIndex: 0 });
+  }
+
+  function moveToNextAnonymousQuestion() {
+    const nextIndex = state.deckIndex + 1;
+    if (nextIndex >= state.deckQuestionIds.length) {
+      setState({ ...state, step: "complete" });
+      return;
+    }
+    setState({ ...state, deckIndex: nextIndex });
+  }
+
+  return (
+    <GameFrame
+      title="匿名質問箱"
+      subtitle="誰が書いたかを追わずに、答えやすい質問を引いて会話を広げます。"
+      onHome={onHome}
+      onResetAll={onResetAll}
+    >
+      {state.step === "setup" && (
+        <section className="tool-surface">
+          <div className="howto-panel">
+            <h3>進め方</h3>
+            <ol className="rule-list">
+              <li>参加者を2人以上登録します。</li>
+              <li>テンプレート質問のカテゴリと、今回使う質問数を選びます。</li>
+              <li>追加したい質問があれば、スマホを回して匿名で投稿します。</li>
+              <li>質問を1つずつ引き、答えたい人から答えます。答えたくない人はパスできます。</li>
+              <li>投稿者探しはせず、答えやすい範囲で会話を楽しみます。</li>
+            </ol>
+          </div>
+          <PlayerSetup
+            players={state.players}
+            minPlayers={2}
+            maxPlayers={20}
+            onChange={(players) => setState({ ...state, players })}
+          />
+          <SegmentedControl
+            label="テンプレートカテゴリ"
+            options={anonymousQuestionCategories}
+            value={state.category}
+            onChange={(category) => setState({ ...state, category, deckQuestionIds: [], deckIndex: 0 })}
+          />
+          <SegmentedControl
+            label="今回の質問数"
+            options={anonymousQuestionCountOptions}
+            value={String(state.questionCount)}
+            onChange={(questionCount) =>
+              setState({
+                ...state,
+                questionCount: Number(questionCount) as AnonymousQuestionCount,
+                deckQuestionIds: [],
+                deckIndex: 0,
+              })
+            }
+          />
+          <div className="setup-block">
+            <div className="setup-heading">
+              <div>
+                <h3>匿名で質問を追加</h3>
+                <p>投稿者が分からないよう、入力後はすぐ追加します。</p>
+              </div>
+              <span className="count-badge">{state.customQuestions.length}件</span>
+            </div>
+            <form
+              className="question-submit-row"
+              onSubmit={(event) => {
+                event.preventDefault();
+                addCustomQuestion();
+              }}
+            >
+              <input
+                value={draftQuestion}
+                onChange={(event) => setDraftQuestion(event.target.value)}
+                placeholder="答えやすい質問を書く"
+                maxLength={80}
+              />
+              <button className="primary-button" disabled={!draftQuestion.trim()} type="submit">
+                <Plus size={18} />
+                追加
+              </button>
+            </form>
+            {state.customQuestions.length > 0 && (
+              <div className="custom-question-list">
+                {state.customQuestions.map((question) => (
+                  <div className="custom-question-row" key={question.id}>
+                    <span>{question.text}</span>
+                    <button className="ghost-icon-button" onClick={() => removeCustomQuestion(question.id)} type="button">
+                      <Trash2 size={18} />
+                      <span className="sr-only">削除</span>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <p className="soft-note">
+            テンプレートは{questionPool.length}問、追加質問は{state.customQuestions.length}問です。今回は最大
+            {selectedQuestionCount}問を使います。テンプレート全体は300問です。
+          </p>
+          <div className="notice-panel">
+            <strong>投稿前の約束</strong>
+            <p>個人攻撃、暴露、容姿いじり、答えにくい恋愛・収入・家族事情は避けます。困る質問は読まずにスキップできます。</p>
+          </div>
+          <div className="action-row">
+            <button className="primary-button" disabled={!canStart} onClick={startAnonymousBox}>
+              <Play size={18} />
+              はじめる
+            </button>
+            <button className="secondary-button" onClick={() => setState(initialAnonymousQuestionState)}>
+              <RotateCcw size={18} />
+              リセット
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "question" && currentQuestion && (
+        <section className="tool-surface">
+          <div className="prompt-panel question-card">
+            <p className="eyebrow">質問 {progressLabel}</p>
+            <h2>{currentQuestion}</h2>
+            <p>答えたい人から話します。全員回答にしなくても大丈夫です。</p>
+          </div>
+          <div className="howto-panel compact">
+            <h3>話し方</h3>
+            <ul className="rule-list">
+              <li>答えたくない人は「パス」でOKです。</li>
+              <li>深掘りは、本人が楽しそうな時だけにします。</li>
+              <li>投稿者を当てにいく流れになったら、次の質問へ進みます。</li>
+            </ul>
+          </div>
+          <div className="action-row">
+            <button className="primary-button" onClick={moveToNextAnonymousQuestion}>
+              {state.deckIndex + 1 >= state.deckQuestionIds.length ? <Check size={18} /> : <ChevronRight size={18} />}
+              {state.deckIndex + 1 >= state.deckQuestionIds.length ? "完了" : "次の質問"}
+            </button>
+            <button className="secondary-button" onClick={moveToNextAnonymousQuestion}>
+              <ChevronRight size={18} />
+              スキップ
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "complete" && (
+        <section className="tool-surface center-flow">
+          <ListChecks size={32} />
+          <p className="eyebrow">終了</p>
+          <h2>{state.deckQuestionIds.length}問おつかれさまでした</h2>
+          <p className="talk-cue">答えやすかった質問をもう少し深掘りするか、カテゴリを変えて続けられます。</p>
+          <div className="action-row centered">
+            <button className="primary-button" onClick={startAnonymousBox}>
+              <RotateCcw size={18} />
+              もう一度
+            </button>
+            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup" })}>
+              <Users size={18} />
+              設定へ
+            </button>
+          </div>
+        </section>
+      )}
+    </GameFrame>
+  );
 }
 
 type TwoChoiceChoice = "A" | "B" | "skip";
