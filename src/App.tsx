@@ -20,6 +20,12 @@ import {
   Vote,
 } from "lucide-react";
 import { twoChoiceCategories, twoChoicePrompts, type TwoChoiceCategory } from "./data/twoChoicePrompts";
+import {
+  normalWordWolfTopics,
+  wordWolfCategories,
+  wordWolfTopics,
+  type WordWolfCategory,
+} from "./data/wordWolfTopics";
 
 type GameKey = "two-choice" | "word-wolf" | "ng-word";
 
@@ -616,15 +622,7 @@ function NameCluster({ title, players }: { title: string; players: Player[] }) {
   );
 }
 
-type WordWolfCategory = "all" | "food" | "daily" | "outing";
 type WordWolfStep = "setup" | "reveal" | "discussion" | "vote" | "result";
-
-type WordWolfTopicPair = {
-  id: string;
-  majorityWord: string;
-  minorityWord: string;
-  category: Exclude<WordWolfCategory, "all">;
-};
 
 type WordWolfAssignment = {
   playerId: string;
@@ -647,30 +645,10 @@ type WordWolfState = {
   voteIndex: number;
 };
 
-const wordWolfCategoryOptions: SegmentedOption<WordWolfCategory>[] = [
-  { value: "all", label: "全部" },
-  { value: "food", label: "食べ物" },
-  { value: "daily", label: "日常" },
-  { value: "outing", label: "おでかけ" },
-];
-
 const wordWolfTimeOptions: SegmentedOption<"180" | "300" | "420">[] = [
   { value: "180", label: "3分" },
   { value: "300", label: "5分" },
   { value: "420", label: "7分" },
-];
-
-const wordWolfTopics: WordWolfTopicPair[] = [
-  { id: "ramen-udon", majorityWord: "ラーメン", minorityWord: "うどん", category: "food" },
-  { id: "coffee-tea", majorityWord: "コーヒー", minorityWord: "紅茶", category: "food" },
-  { id: "yakiniku-shabu", majorityWord: "焼肉", minorityWord: "しゃぶしゃぶ", category: "food" },
-  { id: "curry-stew", majorityWord: "カレー", minorityWord: "シチュー", category: "food" },
-  { id: "convenience-super", majorityWord: "コンビニ", minorityWord: "スーパー", category: "daily" },
-  { id: "bike-train", majorityWord: "自転車", minorityWord: "電車", category: "daily" },
-  { id: "movie-karaoke", majorityWord: "映画館", minorityWord: "カラオケ", category: "outing" },
-  { id: "sea-pool", majorityWord: "海", minorityWord: "プール", category: "outing" },
-  { id: "fireworks-light", majorityWord: "花火", minorityWord: "イルミネーション", category: "outing" },
-  { id: "onsen-sauna", majorityWord: "温泉", minorityWord: "サウナ", category: "outing" },
 ];
 
 const initialWordWolfState: WordWolfState = {
@@ -691,6 +669,12 @@ const initialWordWolfState: WordWolfState = {
 function WordWolfGame({ onHome }: { onHome: () => void }) {
   const [state, setState] = useStoredState<WordWolfState>("word-wolf", initialWordWolfState);
   const canStart = state.players.length >= 4 && state.players.every((player) => player.name.trim());
+  const topicPool = useMemo(
+    () => (state.category === "all" ? normalWordWolfTopics : wordWolfTopics.filter((topic) => topic.category === state.category)),
+    [state.category],
+  );
+  const isAdultCategory = state.category === "adult";
+  const selectedWordWolfCategory = wordWolfCategories.find((category) => category.value === state.category);
 
   useEffect(() => {
     if (state.step !== "discussion" || !state.timerRunning) return;
@@ -709,8 +693,7 @@ function WordWolfGame({ onHome }: { onHome: () => void }) {
   }, [setState, state.step, state.timerRunning]);
 
   function startRound() {
-    const pool = state.category === "all" ? wordWolfTopics : wordWolfTopics.filter((topic) => topic.category === state.category);
-    const topic = pickOne(pool);
+    const topic = pickOne(topicPool);
     const minorityPlayerId = pickOne(state.players).id;
     const assignments = state.players.map((player) => ({
       playerId: player.id,
@@ -751,9 +734,19 @@ function WordWolfGame({ onHome }: { onHome: () => void }) {
   }, [state.assignments, state.players, state.votes]);
 
   return (
-    <GameFrame title="ワードウルフ" subtitle="会話から少数派を見つける推理ゲームです。" onHome={onHome}>
+    <GameFrame title="ワードウルフ" subtitle="似ているけど少し違うお題を、会話と投票で見破るゲームです。" onHome={onHome}>
       {state.step === "setup" && (
         <section className="tool-surface">
+          <div className="howto-panel">
+            <h3>進め方</h3>
+            <ol className="rule-list">
+              <li>参加者を4人以上登録します。</li>
+              <li>アプリが多数派のお題と、1人だけ違う少数派のお題を配ります。</li>
+              <li>スマホを順番に回し、自分のお題だけを確認します。</li>
+              <li>会話タイムでは、お題そのものを言わずに特徴や経験を話します。</li>
+              <li>最後に「少数派だと思う人」へ投票します。最多票が少数派なら多数派の勝ち、外したら少数派の勝ちです。</li>
+            </ol>
+          </div>
           <PlayerSetup
             players={state.players}
             minPlayers={4}
@@ -762,10 +755,20 @@ function WordWolfGame({ onHome }: { onHome: () => void }) {
           />
           <SegmentedControl
             label="お題"
-            options={wordWolfCategoryOptions}
+            options={wordWolfCategories}
             value={state.category}
             onChange={(category) => setState({ ...state, category })}
           />
+          <p className="soft-note">
+            {selectedWordWolfCategory?.label ?? "選択中"}: {topicPool.length}ペアからランダムに1つ配ります。
+            「通常全部」には大人向けカテゴリを含めていません。
+          </p>
+          {isAdultCategory && (
+            <div className="notice-panel">
+              <strong>大人向けカテゴリです</strong>
+              <p>軽い恋バナや距離感の話題を含みます。苦手な人がいる場では、別カテゴリを選んでください。</p>
+            </div>
+          )}
           <SegmentedControl
             label="会話時間"
             options={wordWolfTimeOptions}
@@ -773,7 +776,7 @@ function WordWolfGame({ onHome }: { onHome: () => void }) {
             onChange={(seconds) => setState({ ...state, seconds: Number(seconds), remainingSeconds: Number(seconds) })}
           />
           <div className="action-row">
-            <button className="primary-button" disabled={!canStart} onClick={startRound}>
+            <button className="primary-button" disabled={!canStart || topicPool.length === 0} onClick={startRound}>
               <Play size={18} />
               配る
             </button>
@@ -791,6 +794,7 @@ function WordWolfGame({ onHome }: { onHome: () => void }) {
             {state.revealIndex + 1}/{state.players.length}
           </p>
           <h2>{currentRevealPlayer.name}さん</h2>
+          <p className="soft-note">本人だけが見てください。見終わったら必ず「隠す」か「次へ」で画面を戻します。</p>
           <div className={`secret-word ${state.revealVisible ? "visible" : ""}`}>
             {state.revealVisible ? currentRevealAssignment.word : "お題を隠しています"}
           </div>
@@ -821,7 +825,14 @@ function WordWolfGame({ onHome }: { onHome: () => void }) {
         <section className="tool-surface center-flow">
           <p className="eyebrow">会話タイム</p>
           <div className="timer-display">{formatTime(state.remainingSeconds)}</div>
-          <p className="soft-note">自分のお題をそのまま言わずに話してください。</p>
+          <div className="howto-panel compact">
+            <h3>会話のコツ</h3>
+            <ul className="rule-list">
+              <li>お題そのもの、略称、ほぼ同じ言葉は言わない。</li>
+              <li>好き嫌い、思い出、使う場面、雰囲気などを遠回しに話す。</li>
+              <li>自分が少数派かもと思ったら、周りに合わせすぎず自然に話す。</li>
+            </ul>
+          </div>
           <div className="action-row centered">
             <button
               className="primary-button"
@@ -846,7 +857,7 @@ function WordWolfGame({ onHome }: { onHome: () => void }) {
               投票 {state.voteIndex + 1}/{state.players.length}
             </p>
             <h2>{currentVoter.name}さんの投票</h2>
-            <p>少数派だと思う人を選んでください。</p>
+            <p>少数派だと思う人を選んでください。自分には投票できません。同票の場合は少数派の勝ちとして扱います。</p>
           </div>
           <div className="candidate-grid">
             {state.players
@@ -896,6 +907,7 @@ function WordWolfGame({ onHome }: { onHome: () => void }) {
             少数派は{wordWolfResult.minority ? state.players.find((player) => player.id === wordWolfResult.minority?.playerId)?.name : "不明"}
             さんでした。
           </p>
+          <p className="soft-note">同票や多数派に票が集まった場合は、少数派がうまく紛れ込めた扱いです。</p>
           <div className="action-row">
             <button className="primary-button" onClick={startRound}>
               <RotateCcw size={18} />

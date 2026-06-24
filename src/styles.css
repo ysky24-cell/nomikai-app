@@ -427,6 +427,43 @@ input:focus {
   color: var(--muted);
 }
 
+.howto-panel,
+.notice-panel {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfb;
+  padding: 14px;
+  margin-bottom: 16px;
+}
+
+.howto-panel.compact {
+  width: min(100%, 520px);
+  margin: 18px 0 0;
+  text-align: left;
+}
+
+.notice-panel {
+  border-color: var(--coral);
+  background: var(--coral-soft);
+}
+
+.notice-panel p {
+  margin: 7px 0 0;
+  color: #693124;
+  line-height: 1.6;
+}
+
+.rule-list {
+  margin: 10px 0 0;
+  padding-left: 22px;
+  color: var(--muted);
+  line-height: 1.75;
+}
+
+.rule-list li + li {
+  margin-top: 4px;
+}
+
 .choice-display {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
