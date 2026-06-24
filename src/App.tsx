@@ -231,6 +231,38 @@ const gameCardImages: Partial<Record<GameKey, GameCardImage>> = {
     src: publicAsset("game-cards/value-meter-game.jpg"),
     alt: "価値観メーターのメーターボードとカード",
   },
+  "acting-phrase-game": {
+    src: publicAsset("game-cards/acting-phrase-game.jpg"),
+    alt: "ひとこと演技ゲームの説明カード",
+  },
+  "party-sugoroku": {
+    src: publicAsset("game-cards/party-sugoroku.jpg"),
+    alt: "飲み会すごろくの盤面とカード",
+  },
+  "territory-board-game": {
+    src: publicAsset("game-cards/territory-board-game.jpg"),
+    alt: "シンプル陣取りの盤面と説明カード",
+  },
+  "weird-karuta-game": {
+    src: publicAsset("game-cards/weird-karuta-game.jpg"),
+    alt: "変な一言カルタの読み札と取り札",
+  },
+  "emo-hint-game": {
+    src: publicAsset("game-cards/emo-hint-game.jpg"),
+    alt: "エモヒント連想のヒントカード",
+  },
+  "resource-negotiation-game": {
+    src: publicAsset("game-cards/resource-negotiation-game.jpg"),
+    alt: "資源交渉トークの資源カード",
+  },
+  "life-event-sugoroku": {
+    src: publicAsset("game-cards/life-event-sugoroku.jpg"),
+    alt: "人生イベントすごろくの盤面とイベントカード",
+  },
+  "arm-wrestling-tournament": {
+    src: publicAsset("game-cards/arm-wrestling-tournament.jpg"),
+    alt: "腕相撲トーナメントの対戦表",
+  },
 };
 
 const urlCandidateGameMeta: GameMeta[] = urlCandidateGameConfigs.map((game) => ({
