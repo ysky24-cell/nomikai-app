@@ -26,6 +26,13 @@ import {
   type ImpressionCategory,
 } from "./data/impressionPrompts";
 import {
+  partyPackModeGuides,
+  partyPackModes,
+  partyPackPrompts,
+  type PartyPackMode,
+  type PartyPackPromptMode,
+} from "./data/partyPackPrompts";
+import {
   normalTwoChoiceCategories,
   normalTwoChoicePrompts,
   twoChoiceCategories,
@@ -40,7 +47,7 @@ import {
   type WordWolfCategory,
 } from "./data/wordWolfTopics";
 
-type GameKey = "two-choice" | "word-wolf" | "ng-word" | "impression-ranking";
+type GameKey = "two-choice" | "word-wolf" | "ng-word" | "impression-ranking" | "party-pack";
 
 type Player = {
   id: string;
@@ -58,7 +65,7 @@ type GameMeta = {
 };
 
 const STORAGE_PREFIX = "nomikai-app:v1:";
-const STORED_GAME_KEYS: readonly GameKey[] = ["two-choice", "word-wolf", "ng-word", "impression-ranking"];
+const STORED_GAME_KEYS: readonly GameKey[] = ["two-choice", "word-wolf", "ng-word", "impression-ranking", "party-pack"];
 
 const activeGames: GameMeta[] = [
   {
@@ -96,6 +103,15 @@ const activeGames: GameMeta[] = [
     minutes: "5分から",
     accent: "gold",
     icon: Sparkles,
+  },
+  {
+    key: "party-pack",
+    title: "定番ゲームパック",
+    description: "山手線、逆さ言葉、外来語禁止などをお題カードで回す",
+    people: "2人から",
+    minutes: "3分から",
+    accent: "indigo",
+    icon: ListChecks,
   },
 ];
 
@@ -177,6 +193,10 @@ function App() {
 
   if (activeGame === "impression-ranking") {
     return <ImpressionRankingGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+  }
+
+  if (activeGame === "party-pack") {
+    return <PartyPackGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
   }
 
   return <HomeScreen onStart={setActiveGame} onResetAll={resetAllGames} />;
@@ -1038,6 +1058,292 @@ function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onR
               もう一度
             </button>
             <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", votes: {}, promptId: null })}>
+              <Users size={18} />
+              設定へ
+            </button>
+          </div>
+        </section>
+      )}
+    </GameFrame>
+  );
+}
+
+type PartyPackStep = "setup" | "prompt" | "complete";
+type PartyPackQuestionCount = 5 | 10 | 20 | 30 | 50 | 100 | 300;
+
+type PartyPackState = {
+  players: Player[];
+  mode: PartyPackMode;
+  questionCount: PartyPackQuestionCount;
+  step: PartyPackStep;
+  promptId: string | null;
+  deckPromptIds: string[];
+  deckIndex: number;
+  answerVisible: boolean;
+};
+
+const partyPackQuestionCountOptions: SegmentedOption<string>[] = [
+  { value: "5", label: "5問" },
+  { value: "10", label: "10問" },
+  { value: "20", label: "20問" },
+  { value: "30", label: "30問" },
+  { value: "50", label: "50問" },
+  { value: "100", label: "100問" },
+  { value: "300", label: "300問" },
+];
+
+const initialPartyPackState: PartyPackState = {
+  players: [],
+  mode: "all",
+  questionCount: 10,
+  step: "setup",
+  promptId: null,
+  deckPromptIds: [],
+  deckIndex: 0,
+  answerVisible: false,
+};
+
+function PartyModeGuide({ mode, compact = false }: { mode: PartyPackPromptMode; compact?: boolean }) {
+  const guide = partyPackModeGuides[mode];
+  return (
+    <div className={`howto-panel ${compact ? "compact" : ""}`}>
+      <h3>{guide.label}の詳しい進め方</h3>
+      <p>{guide.description}</p>
+      <ol className="rule-list">
+        {guide.steps.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ol>
+      <div className="tip-list">
+        {guide.tips.map((tip) => (
+          <span key={tip}>{tip}</span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function PartyPackGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
+  const [storedState, setState] = useStoredState<PartyPackState>("party-pack", initialPartyPackState);
+  const state = { ...initialPartyPackState, ...storedState };
+  const prompt = partyPackPrompts.find((item) => item.id === state.promptId) ?? null;
+  const selectedGuide = state.mode === "all" ? null : partyPackModeGuides[state.mode];
+  const minPlayers = selectedGuide?.minPlayers ?? 3;
+  const canStart = state.players.length >= minPlayers && state.players.every((player) => player.name.trim());
+  const promptPool = useMemo(
+    () => (state.mode === "all" ? partyPackPrompts : partyPackPrompts.filter((item) => item.mode === state.mode)),
+    [state.mode],
+  );
+  const selectedQuestionCount = Math.min(state.questionCount, promptPool.length);
+  const progressLabel = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "";
+  const currentHost = state.players.length > 0 ? state.players[state.deckIndex % state.players.length] : null;
+
+  useEffect(() => {
+    if (state.step === "prompt" && !prompt) {
+      setState({ ...state, step: "setup", promptId: null, deckPromptIds: [], deckIndex: 0, answerVisible: false });
+    }
+  }, [prompt, setState, state.step]);
+
+  function startPartyPack() {
+    const deckPromptIds = shuffle(promptPool)
+      .slice(0, selectedQuestionCount)
+      .map((item) => item.id);
+    setState({
+      ...state,
+      step: "prompt",
+      promptId: deckPromptIds[0] ?? null,
+      deckPromptIds,
+      deckIndex: 0,
+      answerVisible: false,
+    });
+  }
+
+  function moveToNextPartyPrompt() {
+    const nextIndex = state.deckIndex + 1;
+    const nextPromptId = state.deckPromptIds[nextIndex];
+    if (!nextPromptId) {
+      setState({ ...state, step: "complete", promptId: null, answerVisible: false });
+      return;
+    }
+    setState({ ...state, step: "prompt", promptId: nextPromptId, deckIndex: nextIndex, answerVisible: false });
+  }
+
+  const promptGuide = prompt ? partyPackModeGuides[prompt.mode] : null;
+  const hiddenAnswer = prompt?.answer && (prompt.mode === "reverse-word" || prompt.mode === "hint-quiz");
+  const openAnswer = prompt?.answer && prompt.mode === "typing";
+
+  return (
+    <GameFrame
+      title="定番ゲームパック"
+      subtitle="飲み会で回しやすい定番ゲームを、詳しい進行つきのお題カードにしたパックです。"
+      onHome={onHome}
+      onResetAll={onResetAll}
+    >
+      {state.step === "setup" && (
+        <section className="tool-surface">
+          <div className="howto-panel">
+            <h3>このパックの進め方</h3>
+            <ol className="rule-list">
+              <li>参加者を登録し、遊びたいゲームの種類を選びます。</li>
+              <li>「全部」を選ぶと、山手線、多数派予想、逆さ言葉など10種類がランダムに出ます。</li>
+              <li>各お題カードに、そのゲーム専用の進め方と注意点が表示されます。</li>
+              <li>勝敗を厳しくしすぎず、短時間で笑って次へ進むのが基本です。</li>
+              <li>誰かを困らせる罰ゲームではなく、意外な答えや言い間違いを会話のきっかけにします。</li>
+            </ol>
+          </div>
+
+          <PlayerSetup
+            players={state.players}
+            minPlayers={minPlayers}
+            maxPlayers={20}
+            onChange={(players) => setState({ ...state, players })}
+          />
+
+          <SegmentedControl
+            label="ゲームの種類"
+            options={partyPackModes}
+            value={state.mode}
+            onChange={(mode) =>
+              setState({
+                ...state,
+                mode,
+                deckPromptIds: [],
+                deckIndex: 0,
+                promptId: null,
+                answerVisible: false,
+              })
+            }
+          />
+
+          {state.mode === "all" ? (
+            <div className="notice-panel calm">
+              <strong>全部モード</strong>
+              <p>
+                10種類の定番ゲームを混ぜて出します。必要人数が多いカードも入るため、3人以上での開始にしています。
+              </p>
+            </div>
+          ) : (
+            <PartyModeGuide mode={state.mode} />
+          )}
+
+          <SegmentedControl
+            label="今回の設問数"
+            options={partyPackQuestionCountOptions}
+            value={String(state.questionCount)}
+            onChange={(questionCount) =>
+              setState({
+                ...state,
+                questionCount: Number(questionCount) as PartyPackQuestionCount,
+                deckPromptIds: [],
+                deckIndex: 0,
+                promptId: null,
+                answerVisible: false,
+              })
+            }
+          />
+
+          <p className="soft-note">
+            この条件では{promptPool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。全体のお題は300問です。
+          </p>
+
+          <div className="action-row">
+            <button className="primary-button" disabled={!canStart || selectedQuestionCount === 0} onClick={startPartyPack}>
+              <Play size={18} />
+              はじめる
+            </button>
+            <button className="secondary-button" onClick={() => setState(initialPartyPackState)}>
+              <RotateCcw size={18} />
+              リセット
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "prompt" && prompt && promptGuide && (
+        <section className="tool-surface">
+          <div className="prompt-panel">
+            <p className="eyebrow">
+              {promptGuide.label} {progressLabel}
+            </p>
+            <h2>{prompt.title}</h2>
+            <p className="party-prompt-copy">{prompt.instruction}</p>
+            {currentHost && <p className="soft-note">今回の司会・親: {currentHost.name}</p>}
+          </div>
+
+          {prompt.options && (
+            <div className="option-list">
+              {prompt.options.map((option, index) => (
+                <span key={option}>
+                  {String.fromCharCode(65 + index)}. {option}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {prompt.chips && (
+            <div className="chip-list">
+              {prompt.chips.map((chip) => (
+                <span key={chip}>{chip}</span>
+              ))}
+            </div>
+          )}
+
+          {openAnswer && (
+            <div className="answer-panel">
+              <strong>入力する文</strong>
+              <p>{prompt.answer}</p>
+            </div>
+          )}
+
+          {hiddenAnswer && (
+            <div className="action-row">
+              <button
+                className="secondary-button"
+                onClick={() => setState({ ...state, answerVisible: !state.answerVisible })}
+              >
+                {state.answerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+                {state.answerVisible ? "答えを隠す" : prompt.mode === "hint-quiz" ? "出題者だけ答えを見る" : "答えを見る"}
+              </button>
+            </div>
+          )}
+
+          {hiddenAnswer && state.answerVisible && (
+            <div className="answer-panel">
+              <strong>答え</strong>
+              <p>{prompt.answer}</p>
+            </div>
+          )}
+
+          <PartyModeGuide mode={prompt.mode} compact />
+
+          <div className="action-row">
+            <button className="primary-button" onClick={moveToNextPartyPrompt}>
+              {state.deckIndex + 1 >= state.deckPromptIds.length ? <Check size={18} /> : <ChevronRight size={18} />}
+              {state.deckIndex + 1 >= state.deckPromptIds.length ? "完了" : "次のお題"}
+            </button>
+            <button
+              className="secondary-button"
+              onClick={() => setState({ ...state, step: "setup", promptId: null, answerVisible: false })}
+            >
+              <Users size={18} />
+              設定へ
+            </button>
+          </div>
+        </section>
+      )}
+
+      {state.step === "complete" && (
+        <section className="tool-surface center-flow">
+          <ListChecks size={32} />
+          <p className="eyebrow">終了</p>
+          <h2>{state.deckPromptIds.length}問おつかれさまでした</h2>
+          <p className="talk-cue">場が温まっていたら、種類を変えるか「全部」でテンポよくもう一周できます。</p>
+          <div className="action-row centered">
+            <button className="primary-button" onClick={startPartyPack}>
+              <RotateCcw size={18} />
+              もう一度
+            </button>
+            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", promptId: null })}>
               <Users size={18} />
               設定へ
             </button>
