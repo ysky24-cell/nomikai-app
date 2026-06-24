@@ -21,7 +21,8 @@ export type UrlCandidateGameKey =
   | "person-hint-quiz"
   | "large-majority-game"
   | "humming-intro-quiz"
-  | "loanword-ban-game";
+  | "loanword-ban-game"
+  | "werewolf-game";
 
 export type UrlCandidateGameGroup = "url" | "talk" | "reaction" | "luck" | "drawing" | "board" | "large";
 
@@ -109,7 +110,8 @@ type GameSpec = Omit<UrlCandidateGameConfig, "prompts"> & {
     | "arm"
     | "draw"
     | "person"
-    | "loanword";
+    | "loanword"
+    | "werewolf";
 };
 
 const scenes: readonly PromptScene[] = [
@@ -226,6 +228,8 @@ function optionsFor(style: GameSpec["style"], topic: string, scene: PromptScene,
       return ["1に近い例え", "50くらいの例え", "100に近い例え"];
     case "arm":
       return ["通常勝負", "利き手ではない手", "5秒だけ耐える", "笑わせ禁止"];
+    case "werewolf":
+      return ["6人: 人狼1/占い師1/村人4", "8人: 人狼2/占い師1/騎士1/村人4", "10人以上: 人狼2/占い師1/騎士1/霊媒師1/村人残り"];
     default:
       return index % 3 === 0 ? ["司会判断", "拍手で決める", "理由を一言"] : undefined;
   }
@@ -242,6 +246,8 @@ function answerFor(style: GameSpec["style"], topic: string, scene: PromptScene, 
     case "person":
     case "song":
       return topic;
+    case "werewolf":
+      return "夜: 人狼の相談、占い、騎士の守り、霊媒師の確認を順に処理。昼: 3分話し合って投票。村人側は人狼を全員追放、人狼側は村人と同数になれば勝ちです。";
     default:
       return index % 5 === 0 ? `${topic}を使った例を1つ出す` : undefined;
   }
@@ -291,6 +297,8 @@ function promptCopy(style: GameSpec["style"], topic: string, scene: PromptScene)
       return `出題者は「${topic}」に合う人物を思い浮かべ、写真なしでヒントを出します。個人を傷つける表現は避けます。`;
     case "loanword":
       return `「${topic}」について、カタカナ語を避けて30秒説明します。詰まったら周りが言い換えを助けてもOKです。`;
+    case "werewolf":
+      return `短時間人狼です。司会は役職を秘密で配り、「${topic}」を最初の昼の雑談テーマにして、怪しい発言や反応を手がかりに話し合います。追放された人も観戦や司会補助で参加できます。`;
     default:
       return `${scene.angle}、お題に沿って短く遊びます。`;
   }
@@ -319,6 +327,7 @@ function titleFor(style: GameSpec["style"], topic: string, scene: PromptScene) {
     draw: "安全はずれ抽選",
     person: "人物当て",
     loanword: "外来語禁止",
+    werewolf: "人狼ゲーム",
   };
   return `${prefix[style]}: ${topic} (${scene.label})`;
 }
@@ -779,6 +788,38 @@ const specs: readonly GameSpec[] = [
     setupSteps: setupBase,
     playSteps: ["テーマを読みます。", "カタカナ語を避けて説明します。", "言ってしまったら周りが優しく指摘します。"],
     judgeTips: ["固有名詞は司会判断にします。", "言い換えの面白さを褒めます。"],
+  },
+  {
+    key: "werewolf-game",
+    articleOrder: 26,
+    title: "人狼ゲーム",
+    description: "役職を隠して、昼の話し合いと投票で人狼を探す",
+    people: "6人から",
+    minutes: "15分から",
+    accent: "indigo",
+    icon: "shield",
+    groups: ["url", "talk", "large"],
+    kind: "default",
+    minPlayers: 6,
+    maxPlayers: 12,
+    style: "werewolf",
+    answerMode: "open",
+    setupSteps: [
+      "参加者を6〜12人で登録し、司会を1人決めます。司会は役職を秘密で割り当てます。",
+      "基本役職は人狼、村人、占い師。人数が多い場合は騎士や霊媒師を追加します。",
+      "夜は目を閉じて役職行動、昼は話し合い、最後に投票で1人を追放します。",
+      "脱落した人も責めず、観戦や司会補助で場を見守ります。",
+    ],
+    playSteps: [
+      "司会が夜を宣言し、人狼、占い師、騎士、霊媒師の順に静かに行動します。",
+      "朝になったら司会が結果を発表し、全員で3分ほど話し合います。",
+      "投票で一番疑われた人を追放し、勝利条件を満たすまで夜と昼を繰り返します。",
+    ],
+    judgeTips: [
+      "飲酒や暴露を罰にせず、推理と会話のゲームとして進めます。",
+      "個人攻撃になりそうな言い方は司会がやわらかく止めます。",
+      "初心者が多い時は占い師と騎士だけにして、役職を増やしすぎません。",
+    ],
   },
 ];
 

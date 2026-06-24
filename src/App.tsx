@@ -263,6 +263,30 @@ const gameCardImages: Partial<Record<GameKey, GameCardImage>> = {
     src: publicAsset("game-cards/arm-wrestling-tournament.jpg"),
     alt: "腕相撲トーナメントの対戦表",
   },
+  "safe-random-draw": {
+    src: publicAsset("game-cards/safe-random-draw.jpg"),
+    alt: "安全はずれ抽選のカードセット",
+  },
+  "person-hint-quiz": {
+    src: publicAsset("game-cards/person-hint-quiz.jpg"),
+    alt: "人物当てヒントクイズの説明カード",
+  },
+  "large-majority-game": {
+    src: publicAsset("game-cards/large-majority-game.jpg"),
+    alt: "大人数マジョリティの投票カード",
+  },
+  "humming-intro-quiz": {
+    src: publicAsset("game-cards/humming-intro-quiz.jpg"),
+    alt: "鼻歌イントロドンのヒントカード",
+  },
+  "loanword-ban-game": {
+    src: publicAsset("game-cards/loanword-ban-game.jpg"),
+    alt: "外来語禁止ゲームの言い換えカード",
+  },
+  "werewolf-game": {
+    src: publicAsset("game-cards/werewolf-game.jpg"),
+    alt: "人狼ゲームの役職カードと進行ボード",
+  },
 };
 
 const urlCandidateGameMeta: GameMeta[] = urlCandidateGameConfigs.map((game) => ({
