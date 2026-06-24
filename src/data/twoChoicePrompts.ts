@@ -8,7 +8,8 @@ export type TwoChoicePromptCategory =
   | "travel"
   | "work"
   | "imagination"
-  | "daily";
+  | "daily"
+  | "adult";
 
 export type TwoChoiceCategory = "all" | TwoChoicePromptCategory;
 
@@ -23,7 +24,7 @@ export type TwoChoicePrompt = {
 type PromptTuple = readonly [question: string, optionA: string, optionB: string];
 
 export const twoChoiceCategories: readonly { value: TwoChoiceCategory; label: string }[] = [
-  { value: "all", label: "全部" },
+  { value: "all", label: "通常全部" },
   { value: "icebreak", label: "アイスブレイク" },
   { value: "food", label: "食べ物" },
   { value: "holiday", label: "休日" },
@@ -34,6 +35,7 @@ export const twoChoiceCategories: readonly { value: TwoChoiceCategory; label: st
   { value: "work", label: "仕事仲間" },
   { value: "imagination", label: "もしも" },
   { value: "daily", label: "日常" },
+  { value: "adult", label: "大人向け" },
 ];
 
 const promptGroups = {
@@ -357,6 +359,38 @@ const promptGroups = {
     ["ポイントカードは？", "ためる", "気にしない"],
     ["日常で大事なのは？", "効率", "余裕"],
   ],
+  adult: [
+    ["ドキッとするのは？", "手をつなぐ", "目が合う"],
+    ["距離が縮まるのは？", "隣に座る", "帰り道に話す"],
+    ["キスは？", "雰囲気重視", "タイミング重視"],
+    ["色気を感じるのは？", "声", "仕草"],
+    ["甘えるなら？", "言葉で", "態度で"],
+    ["甘えられるなら？", "かわいく", "さりげなく"],
+    ["大人っぽいのは？", "余裕", "清潔感"],
+    ["ときめくのは？", "不意の優しさ", "まっすぐな言葉"],
+    ["近づかれるなら？", "ゆっくり", "思い切って"],
+    ["されて嬉しいのは？", "褒められる", "頼られる"],
+    ["夜のデートなら？", "バー", "夜景"],
+    ["帰り際なら？", "もう少し話す", "すっと帰る"],
+    ["連絡なら？", "おやすみLINE", "寝落ち通話"],
+    ["照れるのは？", "見つめられる", "名前を呼ばれる"],
+    ["香りで好きなのは？", "香水", "柔軟剤"],
+    ["雰囲気が出るのは？", "暗めの照明", "静かな音楽"],
+    ["二人きりなら？", "ゆっくり話す", "何か一緒にする"],
+    ["ドキドキする距離は？", "近い距離", "少し離れた距離"],
+    ["惹かれるのは？", "ギャップ", "安心感"],
+    ["誘われるなら？", "直接", "メッセージ"],
+    ["触れられるなら？", "手", "肩"],
+    ["褒められるなら？", "かわいい", "かっこいい"],
+    ["恋の進み方は？", "じっくり", "勢い"],
+    ["好意を感じるのは？", "目線", "行動"],
+    ["大人の魅力は？", "落ち着き", "遊び心"],
+    ["距離感は？", "分かりやすい", "じわじわ"],
+    ["デートの終わりは？", "余韻を残す", "次の約束をする"],
+    ["秘密っぽいのは？", "耳打ち", "アイコンタクト"],
+    ["胸キュンするのは？", "不意打ち", "丁寧な気遣い"],
+    ["一緒にいたいのは？", "ドキドキする人", "落ち着く人"],
+  ],
 } as const satisfies Record<TwoChoicePromptCategory, readonly PromptTuple[]>;
 
 export const twoChoicePrompts: TwoChoicePrompt[] = Object.entries(promptGroups).flatMap(([category, prompts]) =>
@@ -368,3 +402,5 @@ export const twoChoicePrompts: TwoChoicePrompt[] = Object.entries(promptGroups).
     optionB,
   })),
 );
+
+export const normalTwoChoicePrompts = twoChoicePrompts.filter((prompt) => prompt.category !== "adult");

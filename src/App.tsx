@@ -19,7 +19,7 @@ import {
   Users,
   Vote,
 } from "lucide-react";
-import { twoChoiceCategories, twoChoicePrompts, type TwoChoiceCategory } from "./data/twoChoicePrompts";
+import { normalTwoChoicePrompts, twoChoiceCategories, twoChoicePrompts, type TwoChoiceCategory } from "./data/twoChoicePrompts";
 import {
   normalWordWolfTopics,
   wordWolfCategories,
@@ -395,11 +395,15 @@ function TwoChoiceGame({ onHome }: { onHome: () => void }) {
   const prompt = twoChoicePrompts.find((item) => item.id === state.promptId) ?? null;
   const canStart = state.players.length >= 2 && state.players.every((player) => player.name.trim());
   const promptPool = useMemo(
-    () => (state.category === "all" ? twoChoicePrompts : twoChoicePrompts.filter((item) => item.category === state.category)),
+    () =>
+      state.category === "all"
+        ? normalTwoChoicePrompts
+        : twoChoicePrompts.filter((item) => item.category === state.category),
     [state.category],
   );
   const selectedQuestionCount = Math.min(state.questionCount, promptPool.length);
   const progressLabel = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "";
+  const isTwoChoiceAdultCategory = state.category === "adult";
 
   useEffect(() => {
     if ((state.step === "vote" || state.step === "result") && !prompt) {
@@ -491,7 +495,14 @@ function TwoChoiceGame({ onHome }: { onHome: () => void }) {
           />
           <p className="soft-note">
             この条件では{promptPool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。
+            「通常全部」には大人向けカテゴリを含めていません。
           </p>
+          {isTwoChoiceAdultCategory && (
+            <div className="notice-panel">
+              <strong>大人向けカテゴリです</strong>
+              <p>軽いH寄りの恋バナや距離感の話題を含みます。苦手な人がいる場では、別カテゴリを選んでください。</p>
+            </div>
+          )}
           <div className="action-row">
             <button className="primary-button" disabled={!canStart || selectedQuestionCount === 0} onClick={startTwoChoiceRound}>
               <Play size={18} />
