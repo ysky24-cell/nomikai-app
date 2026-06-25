@@ -442,6 +442,13 @@ select:focus {
   margin: 5px 0 0;
 }
 
+.room-current-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .room-code {
   min-width: 128px;
   border: 1px solid var(--teal);
@@ -469,19 +476,63 @@ select:focus {
   justify-self: start;
 }
 
+.room-participants-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.section-heading.compact h3 {
+  margin: 0;
+}
+
 .room-participants {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
   gap: 8px;
 }
 
-.room-participants span {
-  border: 1px solid #b9d9ca;
-  border-radius: 999px;
+.room-participant-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.room-participant-card.self {
+  border-color: #b9d9ca;
   background: #eff8f3;
-  color: var(--teal);
-  padding: 7px 10px;
+}
+
+.room-participant-card strong,
+.room-participant-card span {
+  display: block;
+}
+
+.room-participant-card strong {
+  color: var(--text);
   font-weight: 900;
+  line-height: 1.35;
+}
+
+.room-participant-card span {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  font-weight: 800;
+}
+
+.participant-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.participant-actions .secondary-button {
+  padding: 8px 10px;
 }
 
 .room-message {
@@ -1491,6 +1542,20 @@ select:focus {
 
   .room-game-controls {
     display: grid;
+    grid-template-columns: 1fr;
+  }
+
+  .room-current-actions,
+  .participant-actions {
+    justify-content: stretch;
+  }
+
+  .room-current-actions > *,
+  .participant-actions > * {
+    flex: 1 1 auto;
+  }
+
+  .room-participant-card {
     grid-template-columns: 1fr;
   }
 

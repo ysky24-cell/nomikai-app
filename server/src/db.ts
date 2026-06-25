@@ -114,6 +114,111 @@ export async function setParticipantConnected(participantId: string, connected: 
   );
 }
 
+export async function transferRoomHost(code: string, requesterParticipantId: string, targetParticipantId: string) {
+  const normalizedCode = normalizeRoomCode(code);
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    const room = await findRoomForUpdate(client, normalizedCode);
+    if (!room) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    await assertRoomHost(client, room.id, requesterParticipantId);
+    const target = await findParticipantInRoom(client, room.id, targetParticipantId);
+    if (!target) {
+      throw new Error("participant_not_found");
+    }
+
+    await client.query(
+      `UPDATE participants
+       SET role = CASE WHEN id = $2 THEN 'host' ELSE 'player' END,
+           updated_at = now()
+       WHERE room_id = $1`,
+      [room.id, targetParticipantId],
+    );
+
+    await client.query(
+      `INSERT INTO room_events (room_id, participant_id, event_type, payload)
+       VALUES ($1, $2, 'host_transferred', $3::jsonb)`,
+      [room.id, requesterParticipantId, JSON.stringify({ targetParticipantId, targetName: target.name })],
+    );
+
+    await client.query("COMMIT");
+    return findRoomByCode(room.code);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function removeRoomParticipant(code: string, requesterParticipantId: string, targetParticipantId: string) {
+  const normalizedCode = normalizeRoomCode(code);
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    const room = await findRoomForUpdate(client, normalizedCode);
+    if (!room) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    await assertRoomHost(client, room.id, requesterParticipantId);
+    const target = await findParticipantInRoom(client, room.id, targetParticipantId);
+    if (!target) {
+      throw new Error("participant_not_found");
+    }
+
+    await client.query("DELETE FROM participants WHERE id = $1 AND room_id = $2", [targetParticipantId, room.id]);
+
+    let promotedHost: ParticipantRow | null = null;
+    if (target.role === "host") {
+      const promotedResult = await client.query<ParticipantRow>(
+        `UPDATE participants
+         SET role = 'host', updated_at = now()
+         WHERE id = (
+           SELECT id
+           FROM participants
+           WHERE room_id = $1
+           ORDER BY created_at ASC
+           LIMIT 1
+         )
+         RETURNING id, room_id AS "roomId", name, role, connected, created_at AS "createdAt", updated_at AS "updatedAt"`,
+        [room.id],
+      );
+      promotedHost = promotedResult.rows[0] ?? null;
+    }
+
+    await client.query(
+      `INSERT INTO room_events (room_id, participant_id, event_type, payload)
+       VALUES ($1, $2, 'participant_removed', $3::jsonb)`,
+      [
+        room.id,
+        requesterParticipantId === targetParticipantId ? null : requesterParticipantId,
+        JSON.stringify({
+          targetParticipantId,
+          targetName: target.name,
+          promotedHostId: promotedHost?.id ?? null,
+          promotedHostName: promotedHost?.name ?? null,
+        }),
+      ],
+    );
+
+    await client.query("COMMIT");
+    return findRoomByCode(room.code);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
 export async function updateRoomState(code: string, state: unknown, currentGame?: string | null, status?: RoomStatus) {
   const result = await pool.query<RoomRow>(
     `UPDATE rooms
@@ -183,6 +288,34 @@ export async function updateRoomProgress({
 
 function normalizeRoomCode(code: string) {
   return code.trim().toUpperCase();
+}
+
+async function findRoomForUpdate(client: pg.PoolClient, code: string) {
+  const roomResult = await client.query<RoomRow>(
+    `SELECT id, code, status, current_game AS "currentGame", state, created_at AS "createdAt", updated_at AS "updatedAt"
+     FROM rooms
+     WHERE code = $1
+     FOR UPDATE`,
+    [code],
+  );
+  return roomResult.rows[0] ?? null;
+}
+
+async function findParticipantInRoom(client: pg.PoolClient, roomId: string, participantId: string) {
+  const participantResult = await client.query<ParticipantRow>(
+    `SELECT id, room_id AS "roomId", name, role, connected, created_at AS "createdAt", updated_at AS "updatedAt"
+     FROM participants
+     WHERE room_id = $1 AND id = $2`,
+    [roomId, participantId],
+  );
+  return participantResult.rows[0] ?? null;
+}
+
+async function assertRoomHost(client: pg.PoolClient, roomId: string, participantId: string) {
+  const requester = await findParticipantInRoom(client, roomId, participantId);
+  if (!requester || requester.role !== "host") {
+    throw new Error("host_required");
+  }
 }
 
 async function createUniqueRoomCode(client: pg.PoolClient) {

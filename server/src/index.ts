@@ -9,7 +9,9 @@ import {
   createRoom,
   findRoomByCode,
   pool,
+  removeRoomParticipant,
   setParticipantConnected,
+  transferRoomHost,
   updateRoomProgress,
   updateRoomState,
 } from "./db.js";
@@ -81,6 +83,39 @@ app.post("/rooms/:code/join", async (request, response, next) => {
     }
 
     response.status(201).json({ participant, room: snapshot?.room ?? null });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/rooms/:code/host/transfer", async (request, response, next) => {
+  try {
+    const requesterParticipantId = readRequiredString(request.body?.participantId, "participant_id");
+    const targetParticipantId = readRequiredString(request.body?.targetParticipantId, "target_participant_id");
+    const snapshot = await transferRoomHost(request.params.code, requesterParticipantId, targetParticipantId);
+    if (!snapshot) {
+      response.status(404).json({ error: "room_not_found" });
+      return;
+    }
+
+    await emitRoomSnapshot(snapshot.room.code);
+    response.json(snapshot);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/rooms/:code/participants/:targetParticipantId", async (request, response, next) => {
+  try {
+    const requesterParticipantId = readRequiredString(request.body?.participantId, "participant_id");
+    const snapshot = await removeRoomParticipant(request.params.code, requesterParticipantId, request.params.targetParticipantId);
+    if (!snapshot) {
+      response.status(404).json({ error: "room_not_found" });
+      return;
+    }
+
+    await emitRoomSnapshot(snapshot.room.code);
+    response.json(snapshot);
   } catch (error) {
     next(error);
   }

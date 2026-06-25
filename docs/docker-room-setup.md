@@ -41,6 +41,18 @@ curl -X POST http://localhost:3000/rooms/ROOMCD/join \
 ```
 
 ```bash
+curl -X POST http://localhost:3000/rooms/ROOMCD/host/transfer \
+  -H "Content-Type: application/json" \
+  -d "{\"participantId\":\"HOST_ID\",\"targetParticipantId\":\"NEXT_HOST_ID\"}"
+```
+
+```bash
+curl -X DELETE http://localhost:3000/rooms/ROOMCD/participants/TARGET_ID \
+  -H "Content-Type: application/json" \
+  -d "{\"participantId\":\"HOST_ID\"}"
+```
+
+```bash
 curl -X POST http://localhost:3000/rooms/ROOMCD/game/start \
   -H "Content-Type: application/json" \
   -d "{\"gameKey\":\"werewolf-game\",\"gameTitle\":\"人狼ゲーム\",\"participantId\":\"HOST_ID\"}"
@@ -91,8 +103,12 @@ curl -X POST http://localhost:3000/rooms/ROOMCD/game/reset \
 ## 現在の同期範囲
 
 - ルーム作成、参加、接続状態表示
+- 保存済みルームへの再接続
 - ホストによるゲーム選択
 - 開始、次へ、完了、待機戻し
+- ホスト交代
+- ホストによる参加者削除
+- ホスト交代や削除後の参加者画面更新
 - Socket.IOによる参加者画面への進行状態配信
 - ルームで選ばれたゲームを各端末で開く導線
 - 人狼ゲームの配役、夜行動、昼議論タイマー、順番投票、同票処理、勝敗判定
@@ -119,7 +135,7 @@ curl -X POST http://localhost:3000/rooms/ROOMCD/game/reset \
 
 ## 次に作る候補
 
-1. ルームUX強化: ホスト交代、再接続、参加者削除、観戦者画面
-2. 権限強化: ホスト操作、投票者操作、役職・お題情報の参加者別配信
+1. 権限強化: ホスト操作、投票者操作、役職・お題情報の参加者別配信
+2. 観戦者専用画面
 3. 第一印象ランキングの投票同期
 4. AWS公開用の本番Docker構成
