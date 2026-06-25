@@ -583,7 +583,7 @@ function App() {
   }
 
   if (activeGame === "impression-ranking") {
-    return <ImpressionRankingGame onHome={goHome} onResetAll={resetAllGames} />;
+    return <ImpressionRankingGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
   }
 
   if (activeGame === "party-pack") {
@@ -5202,9 +5202,75 @@ const initialImpressionState: ImpressionState = {
   deckIndex: 0,
 };
 
-function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
-  const [storedState, setState] = useStoredState<ImpressionState>("impression-ranking", initialImpressionState);
-  const state = { ...initialImpressionState, ...storedState };
+type ImpressionRoomEnvelope = RoomProgressState & {
+  impression?: ImpressionState;
+};
+
+function parseImpressionStateFromRoom(snapshot: RoomSnapshot | null) {
+  if (!snapshot || snapshot.room.currentGame !== "impression-ranking") return null;
+  const state =
+    snapshot.room.state && typeof snapshot.room.state === "object"
+      ? (snapshot.room.state as Partial<ImpressionRoomEnvelope>)
+      : {};
+  return state.impression && typeof state.impression === "object"
+    ? ({ ...initialImpressionState, ...state.impression } as ImpressionState)
+    : null;
+}
+
+function getImpressionProgressStep(state: ImpressionState) {
+  const stepOrder: Record<ImpressionStep, number> = {
+    setup: 1,
+    vote: 2,
+    result: 3,
+    complete: 4,
+  };
+  return stepOrder[state.step] ?? 1;
+}
+
+function describeImpressionProgress(state: ImpressionState) {
+  if (state.step === "setup") return "第一印象ランキングの設定中です";
+  if (state.step === "vote") {
+    const votedCount = state.players.filter((player) => state.votes[player.id]).length;
+    return `投票中です: ${votedCount}/${state.players.length}`;
+  }
+  if (state.step === "result") return "ランキング結果を表示中です";
+  return "第一印象ランキングが完了しました";
+}
+
+function buildImpressionRoomEnvelope(impression: ImpressionState, updatedBy: string | null): ImpressionRoomEnvelope {
+  return {
+    phase: impression.step === "complete" ? "complete" : "playing",
+    gameKey: "impression-ranking",
+    gameTitle: findGameMeta("impression-ranking")?.title ?? "第一印象ランキング",
+    step: getImpressionProgressStep(impression),
+    message: describeImpressionProgress(impression),
+    updatedBy,
+    updatedAt: new Date().toISOString(),
+    impression,
+  };
+}
+
+function ImpressionRankingGame({
+  onHome,
+  onResetAll,
+  roomSessionOverride = null,
+}: {
+  onHome: () => void;
+  onResetAll: () => void;
+  roomSessionOverride?: RoomSession | null;
+}) {
+  const storedRoomSession = useMemo(() => readRoomSession(), []);
+  const roomSession = roomSessionOverride ?? storedRoomSession;
+  const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
+  const [roomSyncError, setRoomSyncError] = useState("");
+  const roomSocketRef = useRef<Socket | null>(null);
+  const [storedState, setStoredState] = useStoredState<ImpressionState>("impression-ranking", initialImpressionState);
+  const roomImpressionState = parseImpressionStateFromRoom(roomSnapshot);
+  const isImpressionRoom = Boolean(roomSession && (!roomSnapshot || roomSnapshot.room.currentGame === "impression-ranking"));
+  const activeImpressionState = isImpressionRoom ? (roomImpressionState ?? initialImpressionState) : storedState;
+  const state = { ...initialImpressionState, ...activeImpressionState };
+  const isRoomHost = isImpressionRoom && roomSession?.participantRole === "host";
+  const canControlImpression = !isImpressionRoom || (isRoomHost && Boolean(roomSnapshot));
   const prompt = impressionPrompts.find((item) => item.id === state.promptId) ?? null;
   const canStart = state.players.length >= 3 && state.players.every((player) => player.name.trim());
   const activeImpressionCategory = !state.includeAdultTopics && state.category === "adult" ? "all" : state.category;
@@ -5220,6 +5286,70 @@ function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onR
   );
   const selectedQuestionCount = Math.min(state.questionCount, promptPool.length);
   const progressLabel = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "";
+
+  function setState(nextStateOrUpdater: ImpressionState | ((current: ImpressionState) => ImpressionState)) {
+    if (isImpressionRoom && roomSession && !roomSnapshot) {
+      setRoomSyncError("ルーム情報を読み込み中です。少し待ってから操作してください。");
+      return;
+    }
+
+    if (!isImpressionRoom || !roomSession || !roomSnapshot) {
+      setStoredState(nextStateOrUpdater);
+      return;
+    }
+
+    const nextState = typeof nextStateOrUpdater === "function" ? nextStateOrUpdater(state) : nextStateOrUpdater;
+    const nextRoomState = buildImpressionRoomEnvelope(nextState, roomSession.participantId);
+    setRoomSnapshot({
+      ...roomSnapshot,
+      room: {
+        ...roomSnapshot.room,
+        status: nextRoomState.phase === "complete" ? "complete" : "playing",
+        currentGame: "impression-ranking",
+        state: nextRoomState,
+      },
+    });
+    roomSocketRef.current?.emit("room:state:update", {
+      roomCode: roomSession.roomCode,
+      currentGame: "impression-ranking",
+      state: nextRoomState,
+    });
+  }
+
+  useEffect(() => {
+    if (!roomSession) return;
+    let ignore = false;
+    fetchRoomSnapshot(roomSession.roomCode)
+      .then((snapshot) => {
+        if (!ignore) setRoomSnapshot(snapshot);
+      })
+      .catch((caught) => {
+        if (!ignore) setRoomSyncError(toErrorMessage(caught));
+      });
+
+    const socket = io(API_URL, {
+      transports: ["websocket", "polling"],
+    });
+    roomSocketRef.current = socket;
+
+    socket.on("connect", () => {
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+    });
+
+    socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
+      if (nextSnapshot) setRoomSnapshot(nextSnapshot);
+    });
+
+    socket.on("room:error", (payload: { error?: string }) => {
+      setRoomSyncError(toErrorMessage(payload.error ?? "room_error"));
+    });
+
+    return () => {
+      ignore = true;
+      socket.disconnect();
+      roomSocketRef.current = null;
+    };
+  }, [roomSession]);
 
   useEffect(() => {
     if ((state.step === "vote" || state.step === "result") && !prompt) {
@@ -5271,6 +5401,8 @@ function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onR
 
   const votedCount = state.players.filter((player) => state.votes[player.id]).length;
   const allVoted = votedCount === state.players.length && state.players.length > 0;
+  const canVoteForPlayer = (playerId: string) =>
+    !isImpressionRoom || canControlImpression || roomSession?.participantId === playerId;
 
   return (
     <GameFrame
@@ -5279,6 +5411,24 @@ function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onR
       onHome={onHome}
       onResetAll={onResetAll}
     >
+      {isImpressionRoom && roomSession && (
+        <section className="tool-surface room-sync-strip">
+          <div>
+            <p className="eyebrow">ルーム同期中</p>
+            <h3>
+              {roomSession.roomCode} / {roomSession.participantName}
+              {isRoomHost ? " / ホスト" : ""}
+            </h3>
+            <p className="soft-note">
+              {isRoomHost
+                ? "この端末が進行役です。参加者取り込み、結果表示、次のお題を同期します。"
+                : "この端末では自分の投票だけ操作できます。ランキング結果はホスト操作で同期されます。"}
+            </p>
+          </div>
+          {roomSyncError && <p className="room-message error">{roomSyncError}</p>}
+        </section>
+      )}
+
       {state.step === "setup" && (
         <section className="tool-surface">
           <div className="howto-panel">
@@ -5291,77 +5441,140 @@ function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onR
               <li>選ばれた人が嬉しくなる言い方を優先します。からかいすぎや暴露は避けて遊びます。</li>
             </ol>
           </div>
-          <PlayerSetup
-            players={state.players}
-            minPlayers={3}
-            maxPlayers={12}
-            onChange={(players) => setState({ ...state, players })}
-          />
-          <SegmentedControl
-            label="カテゴリ"
-            options={availableImpressionCategories}
-            value={activeImpressionCategory}
-            onChange={(category) => setState({ ...state, category, deckPromptIds: [], deckIndex: 0, promptId: null })}
-          />
-          <ToggleSwitch
-            label="Hな話題"
-            description={
-              state.includeAdultTopics
-                ? "ON: 夜の話題・恋バナ寄りの第一印象お題も混ぜます。"
-                : "OFF: 通常の第一印象お題だけで遊びます。"
-            }
-            checked={state.includeAdultTopics}
-            onChange={(includeAdultTopics) =>
-              setState({
-                ...state,
-                includeAdultTopics,
-                category: state.category === "adult" ? "all" : state.category,
-                deckPromptIds: [],
-                deckIndex: 0,
-                promptId: null,
-                votes: {},
-              })
-            }
-          />
-          <SegmentedControl
-            label="今回の設問数"
-            options={impressionQuestionCountOptions}
-            value={String(state.questionCount)}
-            onChange={(questionCount) =>
-              setState({
-                ...state,
-                questionCount: Number(questionCount) as ImpressionQuestionCount,
-                deckPromptIds: [],
-                deckIndex: 0,
-                promptId: null,
-              })
-            }
-          />
-          <ToggleSwitch
-            label="自分への投票"
-            description={state.allowSelfVote ? "ON: 自分も候補に入ります。" : "OFF: 自分以外の人から選びます。"}
-            checked={state.allowSelfVote}
-            onChange={(allowSelfVote) => setState({ ...state, allowSelfVote, votes: {} })}
-          />
-          <p className="soft-note">
-            この条件では{promptPool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。通常300問、大人向け30問です。
-          </p>
-          {state.includeAdultTopics && (
-            <div className="notice-panel">
-              <strong>Hな話題がONです</strong>
-              <p>恋バナ寄りの印象お題を含みます。相手が答えにくそうなら、パスや次のお題へ切り替えてください。</p>
+
+          {isImpressionRoom && roomSnapshot && (
+            <div className="notice-panel calm">
+              <strong>ルーム参加者を第一印象ランキングメンバーに使えます</strong>
+              <p>参加者それぞれの端末で自分の投票をするには、ルーム参加者を取り込んでください。</p>
+              <div className="action-row">
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, false),
+                      step: "setup",
+                      promptId: null,
+                      votes: {},
+                      deckPromptIds: [],
+                      deckIndex: 0,
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  ホスト以外を使う
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, true),
+                      step: "setup",
+                      promptId: null,
+                      votes: {},
+                      deckPromptIds: [],
+                      deckIndex: 0,
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  全員を使う
+                </button>
+              </div>
             </div>
           )}
+
+          {canControlImpression ? (
+            <>
+              <PlayerSetup
+                players={state.players}
+                minPlayers={3}
+                maxPlayers={12}
+                onChange={(players) => setState({ ...state, players, votes: {} })}
+              />
+              <SegmentedControl
+                label="カテゴリ"
+                options={availableImpressionCategories}
+                value={activeImpressionCategory}
+                onChange={(category) => setState({ ...state, category, deckPromptIds: [], deckIndex: 0, promptId: null, votes: {} })}
+              />
+              <ToggleSwitch
+                label="Hな話題"
+                description={
+                  state.includeAdultTopics
+                    ? "ON: 夜の話題・恋バナ寄りの第一印象お題も混ぜます。"
+                    : "OFF: 通常の第一印象お題だけで遊びます。"
+                }
+                checked={state.includeAdultTopics}
+                onChange={(includeAdultTopics) =>
+                  setState({
+                    ...state,
+                    includeAdultTopics,
+                    category: state.category === "adult" ? "all" : state.category,
+                    deckPromptIds: [],
+                    deckIndex: 0,
+                    promptId: null,
+                    votes: {},
+                  })
+                }
+              />
+              <SegmentedControl
+                label="今回の設問数"
+                options={impressionQuestionCountOptions}
+                value={String(state.questionCount)}
+                onChange={(questionCount) =>
+                  setState({
+                    ...state,
+                    questionCount: Number(questionCount) as ImpressionQuestionCount,
+                    deckPromptIds: [],
+                    deckIndex: 0,
+                    promptId: null,
+                    votes: {},
+                  })
+                }
+              />
+              <ToggleSwitch
+                label="自分への投票"
+                description={state.allowSelfVote ? "ON: 自分も候補に入ります。" : "OFF: 自分以外の人から選びます。"}
+                checked={state.allowSelfVote}
+                onChange={(allowSelfVote) => setState({ ...state, allowSelfVote, votes: {} })}
+              />
+              <p className="soft-note">
+                この条件では{promptPool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。通常300問、大人向け30問です。
+              </p>
+              {state.includeAdultTopics && (
+                <div className="notice-panel">
+                  <strong>Hな話題がONです</strong>
+                  <p>恋バナ寄りの印象お題を含みます。相手が答えにくそうなら、パスや次のお題へ切り替えてください。</p>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="howto-panel compact">
+              <h3>ホストの準備待ち</h3>
+              <p className="soft-note">ホストがお題を開始すると、この端末で自分の投票を選べます。</p>
+            </div>
+          )}
+
           <div className="notice-panel calm">
             <strong>明るいランキング専用です</strong>
             <p>このゲームは印象を褒め合うためのものです。選んだ理由は短く、本人が受け取りやすい言い方にします。</p>
           </div>
           <div className="action-row">
-            <button className="primary-button" disabled={!canStart || selectedQuestionCount === 0} onClick={startImpressionRound}>
+            <button
+              className="primary-button"
+              disabled={!canStart || selectedQuestionCount === 0 || !canControlImpression}
+              onClick={startImpressionRound}
+            >
               <Play size={18} />
               はじめる
             </button>
-            <button className="secondary-button" onClick={() => setState(initialImpressionState)}>
+            <button className="secondary-button" disabled={!canControlImpression} onClick={() => setState(initialImpressionState)}>
               <RotateCcw size={18} />
               リセット
             </button>
@@ -5395,6 +5608,7 @@ function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onR
                     {candidates.map((candidate) => (
                       <button
                         className={state.votes[voter.id] === candidate.id ? "selected-choice" : ""}
+                        disabled={!canVoteForPlayer(voter.id)}
                         key={candidate.id}
                         onClick={() => updateImpressionVote(voter.id, candidate.id)}
                       >
@@ -5403,6 +5617,7 @@ function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onR
                     ))}
                     <button
                       className={state.votes[voter.id] === "skip" ? "selected-choice muted" : ""}
+                      disabled={!canVoteForPlayer(voter.id)}
                       onClick={() => updateImpressionVote(voter.id, "skip")}
                     >
                       パス
@@ -5414,12 +5629,13 @@ function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onR
           </div>
 
           <div className="action-row">
-            <button className="primary-button" disabled={!allVoted} onClick={() => setState({ ...state, step: "result" })}>
+            <button className="primary-button" disabled={!allVoted || !canControlImpression} onClick={() => setState({ ...state, step: "result" })}>
               <ChevronRight size={18} />
               結果を見る
             </button>
             <span className="inline-status">{votedCount}/{state.players.length} 投票済み</span>
           </div>
+          {!canControlImpression && <p className="soft-note">自分の投票だけ操作できます。結果表示はホスト端末で行います。</p>}
         </section>
       )}
 
@@ -5452,15 +5668,16 @@ function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onR
             </ul>
           </div>
           <div className="action-row">
-            <button className="primary-button" onClick={moveToNextImpressionPrompt}>
+            <button className="primary-button" disabled={!canControlImpression} onClick={moveToNextImpressionPrompt}>
               {state.deckIndex + 1 >= state.deckPromptIds.length ? <Check size={18} /> : <ChevronRight size={18} />}
               {state.deckIndex + 1 >= state.deckPromptIds.length ? "完了" : "次のお題"}
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", votes: {} })}>
+            <button className="secondary-button" disabled={!canControlImpression} onClick={() => setState({ ...state, step: "setup", votes: {} })}>
               <Users size={18} />
               参加者を変える
             </button>
           </div>
+          {!canControlImpression && <p className="soft-note">次のお題へ進む操作はホスト端末で行います。</p>}
         </section>
       )}
 
@@ -5471,11 +5688,11 @@ function ImpressionRankingGame({ onHome, onResetAll }: { onHome: () => void; onR
           <h2>{state.deckPromptIds.length}問おつかれさまでした</h2>
           <p className="talk-cue">雰囲気がよければ、カテゴリを変えてもう一度遊べます。</p>
           <div className="action-row centered">
-            <button className="primary-button" onClick={startImpressionRound}>
+            <button className="primary-button" disabled={!canControlImpression} onClick={startImpressionRound}>
               <RotateCcw size={18} />
               もう一度
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", votes: {}, promptId: null })}>
+            <button className="secondary-button" disabled={!canControlImpression} onClick={() => setState({ ...state, step: "setup", votes: {}, promptId: null })}>
               <Users size={18} />
               設定へ
             </button>
