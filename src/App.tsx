@@ -139,6 +139,13 @@ type RoomProgressState = {
   updatedAt: string | null;
 };
 
+type RoomSession = {
+  roomCode: string;
+  participantId: string;
+  participantName: string;
+  participantRole: "host" | "player";
+};
+
 type GameCardImage = {
   src: string;
   alt: string;
@@ -157,6 +164,7 @@ type GameMeta = {
 };
 
 const STORAGE_PREFIX = "nomikai-app:v1:";
+const ROOM_SESSION_KEY = `${STORAGE_PREFIX}room-session`;
 const API_URL = (import.meta.env.VITE_API_URL || "http://localhost:3000").replace(/\/$/, "");
 const publicAsset = (path: string) => `${import.meta.env.BASE_URL}${path}`;
 const STORED_GAME_KEYS: readonly GameKey[] = [
@@ -495,6 +503,45 @@ function clearStoredGameStates() {
   });
 }
 
+function readRoomSession(): RoomSession | null {
+  try {
+    const stored = window.localStorage.getItem(ROOM_SESSION_KEY);
+    if (!stored) return null;
+    const parsed = JSON.parse(stored) as Partial<RoomSession>;
+    if (
+      typeof parsed.roomCode === "string" &&
+      typeof parsed.participantId === "string" &&
+      typeof parsed.participantName === "string" &&
+      (parsed.participantRole === "host" || parsed.participantRole === "player")
+    ) {
+      return {
+        roomCode: parsed.roomCode,
+        participantId: parsed.participantId,
+        participantName: parsed.participantName,
+        participantRole: parsed.participantRole,
+      };
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function saveRoomSession(roomCode: string, participant: RoomParticipant | null) {
+  if (!participant) return;
+  const session: RoomSession = {
+    roomCode,
+    participantId: participant.id,
+    participantName: participant.name,
+    participantRole: participant.role,
+  };
+  window.localStorage.setItem(ROOM_SESSION_KEY, JSON.stringify(session));
+}
+
+function clearRoomSession() {
+  window.localStorage.removeItem(ROOM_SESSION_KEY);
+}
+
 function isUrlCandidateGameKey(key: GameKey | null): key is UrlCandidateGameKey {
   return Boolean(key && key in urlCandidateGameByKey);
 }
@@ -736,6 +783,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey) => void }) {
       const roomSnapshot = await fetchRoomSnapshot(result.room.code);
       setSnapshot(roomSnapshot);
       setParticipant(result.host);
+      saveRoomSession(result.room.code, result.host);
       setJoinCode(result.room.code);
       setNotice("ルームを作成しました。コードを参加者に共有してください。");
     } catch (caught) {
@@ -767,6 +815,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey) => void }) {
       const roomSnapshot = await fetchRoomSnapshot(code);
       setSnapshot(roomSnapshot);
       setParticipant(result.participant);
+      saveRoomSession(code, result.participant);
       setJoinCode(code);
       setNotice("ルームに参加しました。");
     } catch (caught) {
@@ -860,6 +909,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey) => void }) {
     socketRef.current = null;
     setSnapshot(null);
     setParticipant(null);
+    clearRoomSession();
     setSocketStatus("idle");
     setNotice("");
     setError("");
@@ -1971,9 +2021,87 @@ function tallyWerewolfVotes(votes: Record<string, string>, candidates: readonly 
   return { rows, maxVotes, topTargetIds };
 }
 
+type WerewolfRoomEnvelope = RoomProgressState & {
+  werewolf?: WerewolfState;
+};
+
+function parseWerewolfStateFromRoom(snapshot: RoomSnapshot | null) {
+  if (!snapshot || snapshot.room.currentGame !== "werewolf-game") return null;
+  const state = snapshot.room.state && typeof snapshot.room.state === "object" ? (snapshot.room.state as Partial<WerewolfRoomEnvelope>) : {};
+  return state.werewolf && typeof state.werewolf === "object" ? ({ ...initialWerewolfState, ...state.werewolf } as WerewolfState) : null;
+}
+
+function getWerewolfProgressStep(state: WerewolfState) {
+  const phaseOrder: Record<WerewolfPhase, number> = {
+    setup: 1,
+    reveal: 2,
+    night: 3,
+    day: 4,
+    vote: 5,
+    voteResult: 6,
+    result: 7,
+  };
+  return phaseOrder[state.phase];
+}
+
+function describeWerewolfProgress(state: WerewolfState) {
+  if (state.phase === "setup") return "人狼ゲームの準備中です";
+  if (state.phase === "reveal") return "役職確認中です";
+  if (state.phase === "night") return `夜${state.dayNumber}: ${werewolfNightStepLabel(state.nightStep)}を処理中です`;
+  if (state.phase === "day") return `昼${state.dayNumber}: 話し合い中です`;
+  if (state.phase === "vote") return "投票中です";
+  if (state.phase === "voteResult") return "投票結果を確認中です";
+  return state.winner === "village" ? "村人側の勝利で終了しました" : "人狼側の勝利で終了しました";
+}
+
+function werewolfNightStepLabel(step: WerewolfNightStep) {
+  const labels: Record<WerewolfNightStep, string> = {
+    werewolf: "人狼の襲撃",
+    seer: "占い師の占い",
+    knight: "騎士の護衛",
+    medium: "霊媒師の確認",
+    dawn: "朝の結果",
+  };
+  return labels[step];
+}
+
+function buildWerewolfRoomEnvelope(snapshot: RoomSnapshot, werewolf: WerewolfState, updatedBy: string | null): WerewolfRoomEnvelope {
+  const current = parseRoomProgress(snapshot);
+  return {
+    ...current,
+    phase: werewolf.phase === "result" ? "complete" : "playing",
+    gameKey: "werewolf-game",
+    gameTitle: "人狼ゲーム",
+    step: getWerewolfProgressStep(werewolf),
+    message: describeWerewolfProgress(werewolf),
+    updatedBy,
+    updatedAt: new Date().toISOString(),
+    werewolf,
+  };
+}
+
+function roomParticipantsToWerewolfPlayers(snapshot: RoomSnapshot, includeHost: boolean) {
+  return snapshot.participants
+    .filter((participant) => includeHost || participant.role !== "host")
+    .map((participant) => ({
+      id: participant.id,
+      name: participant.name,
+    }));
+}
+
 function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
-  const [storedState, setState] = useStoredState<WerewolfState>("werewolf-game", initialWerewolfState);
-  const state = { ...initialWerewolfState, ...storedState };
+  const roomSession = useMemo(() => readRoomSession(), []);
+  const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
+  const [roomSyncError, setRoomSyncError] = useState("");
+  const [ownRoleVisible, setOwnRoleVisible] = useState(false);
+  const roomSocketRef = useRef<Socket | null>(null);
+  const [storedState, setStoredState] = useStoredState<WerewolfState>("werewolf-game", initialWerewolfState);
+  const roomWerewolfState = parseWerewolfStateFromRoom(roomSnapshot);
+  const isWerewolfRoom = Boolean(roomSession && roomSnapshot?.room.currentGame === "werewolf-game");
+  const activeWerewolfState = isWerewolfRoom ? (roomWerewolfState ?? initialWerewolfState) : storedState;
+  const state = { ...initialWerewolfState, ...activeWerewolfState };
+  const isRoomHost = isWerewolfRoom && roomSession?.participantRole === "host";
+  const canControlWerewolf = !isWerewolfRoom || isRoomHost;
   const canStart = state.players.length >= 6 && state.players.every((player) => player.name.trim());
   const rolePreview = countWerewolfRoles(getWerewolfRoleDeck(Math.max(6, state.players.length || 6)));
   const alivePlayers = getAliveWerewolfPlayers(state.players, state.assignments);
@@ -1989,9 +2117,71 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
       ? state.players.filter((player) => voteParticipantIds.has(player.id))
       : alivePlayers;
   const voteTally = tallyWerewolfVotes(state.votes, voteDisplayPlayers);
+  const ownAssignment = roomSession ? getWerewolfAssignment(state.assignments, roomSession.participantId) : null;
+  const currentVoterIsThisParticipant = Boolean(isWerewolfRoom && currentVoter?.id === roomSession?.participantId);
+  const canVoteForCurrentVoter = canControlWerewolf || currentVoterIsThisParticipant;
+
+  function setState(nextStateOrUpdater: WerewolfState | ((current: WerewolfState) => WerewolfState)) {
+    if (!isWerewolfRoom || !roomSession || !roomSnapshot) {
+      setStoredState(nextStateOrUpdater);
+      return;
+    }
+
+    const nextState = typeof nextStateOrUpdater === "function" ? nextStateOrUpdater(state) : nextStateOrUpdater;
+    const nextRoomState = buildWerewolfRoomEnvelope(roomSnapshot, nextState, roomSession.participantId);
+    setRoomSnapshot({
+      ...roomSnapshot,
+      room: {
+        ...roomSnapshot.room,
+        status: nextRoomState.phase === "complete" ? "complete" : "playing",
+        currentGame: "werewolf-game",
+        state: nextRoomState,
+      },
+    });
+    roomSocketRef.current?.emit("room:state:update", {
+      roomCode: roomSession.roomCode,
+      currentGame: "werewolf-game",
+      state: nextRoomState,
+    });
+  }
 
   useEffect(() => {
-    if (state.phase !== "day" || !state.timerRunning) return;
+    if (!roomSession) return;
+    let ignore = false;
+    fetchRoomSnapshot(roomSession.roomCode)
+      .then((snapshot) => {
+        if (!ignore) setRoomSnapshot(snapshot);
+      })
+      .catch((caught) => {
+        if (!ignore) setRoomSyncError(toErrorMessage(caught));
+      });
+
+    const socket = io(API_URL, {
+      transports: ["websocket", "polling"],
+    });
+    roomSocketRef.current = socket;
+
+    socket.on("connect", () => {
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+    });
+
+    socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
+      if (nextSnapshot) setRoomSnapshot(nextSnapshot);
+    });
+
+    socket.on("room:error", (payload: { error?: string }) => {
+      setRoomSyncError(toErrorMessage(payload.error ?? "room_error"));
+    });
+
+    return () => {
+      ignore = true;
+      socket.disconnect();
+      roomSocketRef.current = null;
+    };
+  }, [roomSession]);
+
+  useEffect(() => {
+    if (state.phase !== "day" || !state.timerRunning || (isWerewolfRoom && !isRoomHost)) return;
     const timer = window.setInterval(() => {
       setState((current) => {
         if (current.phase !== "day" || !current.timerRunning) return current;
@@ -2004,7 +2194,7 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
       });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [setState, state.phase, state.timerRunning]);
+  }, [isRoomHost, isWerewolfRoom, state.phase, state.remainingSeconds, state.timerRunning]);
 
   function startWerewolfGame() {
     const assignments = createWerewolfAssignments(state.players);
@@ -2142,6 +2332,34 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
       onHome={onHome}
       onResetAll={onResetAll}
     >
+      {isWerewolfRoom && roomSession && (
+        <section className="tool-surface room-sync-strip">
+          <div>
+            <p className="eyebrow">ルーム同期中</p>
+            <h3>
+              {roomSession.roomCode} / {roomSession.participantName}
+              {isRoomHost ? " / ホスト" : ""}
+            </h3>
+            <p className="soft-note">
+              {isRoomHost
+                ? "この端末が司会用です。配役、夜行動、昼投票、勝敗判定をルームへ同期します。"
+                : "この端末は参加者用です。自分の役職確認と、自分の番の投票に使えます。"}
+            </p>
+          </div>
+          {ownAssignment && (
+            <div className="own-role-panel">
+              <span>あなたの役職</span>
+              <strong>{ownRoleVisible ? werewolfRoleLabels[ownAssignment.role] : "非表示"}</strong>
+              <button className="secondary-button" type="button" onClick={() => setOwnRoleVisible(!ownRoleVisible)}>
+                {ownRoleVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+                {ownRoleVisible ? "隠す" : "見る"}
+              </button>
+            </div>
+          )}
+          {roomSyncError && <p className="room-message error">{roomSyncError}</p>}
+        </section>
+      )}
+
       {state.phase === "setup" && (
         <section className="tool-surface">
           <div className="howto-panel">
@@ -2155,21 +2373,71 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
             </ol>
           </div>
 
-          <PlayerSetup
-            players={state.players}
-            minPlayers={6}
-            maxPlayers={12}
-            onChange={(players) => setState({ ...state, players, assignments: [], phase: "setup" })}
-          />
+          {isWerewolfRoom && roomSnapshot && (
+            <div className="notice-panel calm">
+              <strong>ルーム参加者を人狼メンバーに使えます</strong>
+              <p>司会をホスト端末にする場合は「ホスト以外」を使います。ホストも参加者にする場合は「全員」を使います。</p>
+              <div className="action-row">
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToWerewolfPlayers(roomSnapshot, false),
+                      assignments: [],
+                      phase: "setup",
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  ホスト以外を使う
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToWerewolfPlayers(roomSnapshot, true),
+                      assignments: [],
+                      phase: "setup",
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  全員を使う
+                </button>
+              </div>
+            </div>
+          )}
 
-          <SegmentedControl
-            label="昼の議論時間"
-            options={werewolfDiscussionTimeOptions}
-            value={String(state.discussionSeconds) as "180" | "300" | "420"}
-            onChange={(seconds) =>
-              setState({ ...state, discussionSeconds: Number(seconds), remainingSeconds: Number(seconds) })
-            }
-          />
+          {canControlWerewolf ? (
+            <PlayerSetup
+              players={state.players}
+              minPlayers={6}
+              maxPlayers={12}
+              onChange={(players) => setState({ ...state, players, assignments: [], phase: "setup" })}
+            />
+          ) : (
+            <div className="howto-panel compact">
+              <h3>ホストの準備待ち</h3>
+              <p className="soft-note">ホストが参加者を確定して役職を配ると、この画面にも同期されます。</p>
+            </div>
+          )}
+
+          {canControlWerewolf && (
+            <SegmentedControl
+              label="昼の議論時間"
+              options={werewolfDiscussionTimeOptions}
+              value={String(state.discussionSeconds) as "180" | "300" | "420"}
+              onChange={(seconds) =>
+                setState({ ...state, discussionSeconds: Number(seconds), remainingSeconds: Number(seconds) })
+              }
+            />
+          )}
 
           <div className="howto-panel compact">
             <h3>今回の役職配分</h3>
@@ -2190,11 +2458,11 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
           </div>
 
           <div className="action-row">
-            <button className="primary-button" disabled={!canStart} onClick={startWerewolfGame}>
+            <button className="primary-button" disabled={!canStart || !canControlWerewolf} onClick={startWerewolfGame}>
               <Play size={18} />
               役職を配る
             </button>
-            <button className="secondary-button" onClick={() => setState(initialWerewolfState)}>
+            <button className="secondary-button" disabled={!canControlWerewolf} onClick={() => setState(initialWerewolfState)}>
               <RotateCcw size={18} />
               リセット
             </button>
@@ -2219,13 +2487,17 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
             </div>
           )}
           <div className="action-row centered">
-            <button className="primary-button" onClick={() => setState({ ...state, revealVisible: !state.revealVisible })}>
+            <button
+              className="primary-button"
+              disabled={!canControlWerewolf}
+              onClick={() => setState({ ...state, revealVisible: !state.revealVisible })}
+            >
               {state.revealVisible ? <EyeOff size={18} /> : <Eye size={18} />}
               {state.revealVisible ? "隠す" : "見る"}
             </button>
             <button
               className="secondary-button"
-              disabled={!state.revealVisible}
+              disabled={!state.revealVisible || !canControlWerewolf}
               onClick={() => {
                 if (state.revealIndex + 1 >= state.players.length) {
                   setState({ ...state, phase: "night", revealVisible: false, nightStep: "werewolf" });
@@ -2273,6 +2545,7 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
                 {werewolfTargets.map((player) => (
                   <button
                     className={state.werewolfTargetId === player.id ? "selected-choice" : ""}
+                    disabled={!canControlWerewolf}
                     key={player.id}
                     onClick={() => setState({ ...state, werewolfTargetId: player.id })}
                   >
@@ -2283,7 +2556,7 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
               <div className="action-row">
                 <button
                   className="primary-button"
-                  disabled={!state.werewolfTargetId}
+                  disabled={!state.werewolfTargetId || !canControlWerewolf}
                   onClick={() =>
                     setState({
                       ...state,
@@ -2306,6 +2579,7 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
                 {seerTargets.map((player) => (
                   <button
                     className={state.seerTargetId === player.id ? "selected-choice" : ""}
+                    disabled={!canControlWerewolf}
                     key={player.id}
                     onClick={() => setState({ ...state, seerTargetId: player.id })}
                   >
@@ -2322,7 +2596,7 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
               <div className="action-row">
                 <button
                   className="primary-button"
-                  disabled={!state.seerTargetId}
+                  disabled={!state.seerTargetId || !canControlWerewolf}
                   onClick={() =>
                     setState({
                       ...state,
@@ -2345,6 +2619,7 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
                 {knightTargets.map((player) => (
                   <button
                     className={state.knightTargetId === player.id ? "selected-choice" : ""}
+                    disabled={!canControlWerewolf}
                     key={player.id}
                     onClick={() => setState({ ...state, knightTargetId: player.id })}
                   >
@@ -2355,7 +2630,7 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
               <div className="action-row">
                 <button
                   className="primary-button"
-                  disabled={!state.knightTargetId}
+                  disabled={!state.knightTargetId || !canControlWerewolf}
                   onClick={() =>
                     setState({
                       ...state,
@@ -2381,6 +2656,7 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
               <div className="action-row">
                 <button
                   className="primary-button"
+                  disabled={!canControlWerewolf}
                   onClick={() =>
                     setState({
                       ...state,
@@ -2404,7 +2680,7 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
                 {getWerewolfPlayerName(state.players, state.knightTargetId)}さんです。
               </p>
               <div className="action-row">
-                <button className="primary-button" onClick={finishNight}>
+                <button className="primary-button" disabled={!canControlWerewolf} onClick={finishNight}>
                   <Play size={18} />
                   朝の結果を出す
                 </button>
@@ -2435,13 +2711,14 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
             <button
               className="primary-button"
               onClick={() => setState({ ...state, timerRunning: !state.timerRunning })}
-              disabled={state.remainingSeconds === 0}
+              disabled={state.remainingSeconds === 0 || !canControlWerewolf}
             >
               {state.timerRunning ? <Pause size={18} /> : <Play size={18} />}
               {state.timerRunning ? "止める" : "開始"}
             </button>
             <button
               className="secondary-button"
+              disabled={!canControlWerewolf}
               onClick={() => setState({ ...state, phase: "vote", timerRunning: false, votes: {}, voteIndex: 0 })}
             >
               <Vote size={18} />
@@ -2464,7 +2741,7 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
             {alivePlayers
               .filter((player) => player.id !== currentVoter.id)
               .map((player) => (
-                <button key={player.id} onClick={() => finishVote(player.id)}>
+                <button key={player.id} disabled={!canVoteForCurrentVoter} onClick={() => finishVote(player.id)}>
                   {player.name}
                 </button>
               ))}
@@ -2495,19 +2772,24 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
             <div className="action-row">
               <button
                 className="primary-button"
+                disabled={!canControlWerewolf}
                 onClick={() => setState({ ...state, phase: "vote", votes: {}, voteIndex: 0, tiedTargetIds: [] })}
               >
                 <Vote size={18} />
                 再投票
               </button>
-              <button className="secondary-button" onClick={() => goToNextNight({ ...state, lastExecutedId: null })}>
+              <button
+                className="secondary-button"
+                disabled={!canControlWerewolf}
+                onClick={() => goToNextNight({ ...state, lastExecutedId: null })}
+              >
                 <ChevronRight size={18} />
                 追放なしで夜へ
               </button>
             </div>
           ) : (
             <div className="action-row">
-              <button className="primary-button" onClick={() => goToNextNight()}>
+              <button className="primary-button" disabled={!canControlWerewolf} onClick={() => goToNextNight()}>
                 <ChevronRight size={18} />
                 次の夜へ
               </button>
@@ -2540,11 +2822,15 @@ function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
             })}
           </div>
           <div className="action-row">
-            <button className="primary-button" onClick={startWerewolfGame}>
+            <button className="primary-button" disabled={!canControlWerewolf} onClick={startWerewolfGame}>
               <RotateCcw size={18} />
               同じメンバーでもう一度
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...initialWerewolfState, players: state.players })}>
+            <button
+              className="secondary-button"
+              disabled={!canControlWerewolf}
+              onClick={() => setState({ ...initialWerewolfState, players: state.players })}
+            >
               <Users size={18} />
               設定へ
             </button>

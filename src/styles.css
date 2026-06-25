@@ -501,6 +501,40 @@ select:focus {
   color: var(--danger);
 }
 
+.room-sync-strip {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.room-sync-strip .soft-note {
+  margin: 6px 0 0;
+}
+
+.own-role-panel {
+  display: grid;
+  min-width: 180px;
+  gap: 7px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfb;
+  padding: 12px;
+}
+
+.own-role-panel span {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.own-role-panel strong {
+  color: var(--teal);
+  font-size: 1.25rem;
+  line-height: 1.3;
+}
+
 .player-list {
   display: grid;
   gap: 8px;
@@ -1458,6 +1492,14 @@ select:focus {
   .room-game-controls {
     display: grid;
     grid-template-columns: 1fr;
+  }
+
+  .room-sync-strip {
+    grid-template-columns: 1fr;
+  }
+
+  .own-role-panel {
+    min-width: 0;
   }
 
   .room-open-game {

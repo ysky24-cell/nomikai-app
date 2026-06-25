@@ -274,7 +274,19 @@ io.on("connection", (socket) => {
       return;
     }
 
-    const room = await updateRoomState(roomCode, payload.state ?? {}, payload.currentGame ?? null);
+    const currentSnapshot = await findRoomByCode(roomCode);
+    if (!currentSnapshot) {
+      socket.emit("room:error", { error: "room_not_found" });
+      return;
+    }
+
+    const currentGame = payload.currentGame ?? currentSnapshot.room.currentGame;
+    const room = await updateRoomState(
+      roomCode,
+      payload.state ?? {},
+      currentGame,
+      readRoomStatusFromState(payload.state, currentGame),
+    );
     if (!room) {
       socket.emit("room:error", { error: "room_not_found" });
       return;
@@ -328,6 +340,15 @@ function readRequiredString(value: unknown, field: string) {
     throw new Error(`${field}_required`);
   }
   return value.trim();
+}
+
+function readRoomStatusFromState(stateValue: unknown, currentGame: string | null) {
+  if (stateValue && typeof stateValue === "object") {
+    const state = stateValue as { phase?: unknown };
+    if (state.phase === "complete") return "complete";
+    if (state.phase === "lobby") return "waiting";
+  }
+  return currentGame ? "playing" : "waiting";
 }
 
 async function emitRoomSnapshot(roomCode: string) {

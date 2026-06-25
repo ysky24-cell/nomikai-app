@@ -114,15 +114,16 @@ export async function setParticipantConnected(participantId: string, connected: 
   );
 }
 
-export async function updateRoomState(code: string, state: unknown, currentGame?: string | null) {
+export async function updateRoomState(code: string, state: unknown, currentGame?: string | null, status?: RoomStatus) {
   const result = await pool.query<RoomRow>(
     `UPDATE rooms
      SET state = $2::jsonb,
          current_game = COALESCE($3, current_game),
+         status = COALESCE($4, status),
          updated_at = now()
      WHERE code = $1
      RETURNING id, code, status, current_game AS "currentGame", state, created_at AS "createdAt", updated_at AS "updatedAt"`,
-    [normalizeRoomCode(code), JSON.stringify(state), currentGame ?? null],
+    [normalizeRoomCode(code), JSON.stringify(state), currentGame ?? null, status ?? null],
   );
   return result.rows[0] ?? null;
 }
