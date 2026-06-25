@@ -159,6 +159,15 @@ docker compose -p nomikai-app up --build
 
 詳しくは [Docker / ルーム版セットアップ](docs/docker-room-setup.md) を参照してください。
 
+Docker版の初期ファイルは `docker-room` ブランチに用意しています。
+ローカルでは次のコマンドで、Reactフロント、API、PostgreSQL、Redisをまとめて起動できます。
+
+```bash
+docker compose up --build
+```
+
+詳しくは [Docker / ルーム版セットアップ](docs/docker-room-setup.md) を参照してください。
+
 ## ローカル起動
 
 ```bash
