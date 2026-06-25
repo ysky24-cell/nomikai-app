@@ -548,66 +548,78 @@ function isUrlCandidateGameKey(key: GameKey | null): key is UrlCandidateGameKey 
 
 function App() {
   const [activeGame, setActiveGame] = useState<GameKey | null>(null);
+  const [activeRoomSession, setActiveRoomSession] = useState<RoomSession | null>(null);
+
+  function startGame(game: GameKey, roomSession: RoomSession | null = null) {
+    setActiveRoomSession(roomSession);
+    setActiveGame(game);
+  }
+
+  function goHome() {
+    setActiveGame(null);
+  }
 
   function resetAllGames() {
     clearStoredGameStates();
+    clearRoomSession();
+    setActiveRoomSession(null);
     setActiveGame(null);
   }
 
   if (activeGame === "yamanote") {
-    return <YamanoteGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+    return <YamanoteGame onHome={goHome} onResetAll={resetAllGames} />;
   }
 
   if (activeGame === "two-choice") {
-    return <TwoChoiceGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+    return <TwoChoiceGame onHome={goHome} onResetAll={resetAllGames} />;
   }
 
   if (activeGame === "word-wolf") {
-    return <WordWolfGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+    return <WordWolfGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
   }
 
   if (activeGame === "ng-word") {
-    return <NgWordGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+    return <NgWordGame onHome={goHome} onResetAll={resetAllGames} />;
   }
 
   if (activeGame === "impression-ranking") {
-    return <ImpressionRankingGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+    return <ImpressionRankingGame onHome={goHome} onResetAll={resetAllGames} />;
   }
 
   if (activeGame === "party-pack") {
-    return <PartyPackGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+    return <PartyPackGame onHome={goHome} onResetAll={resetAllGames} />;
   }
 
   if (activeGame === "johari-window") {
-    return <JohariWindowGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+    return <JohariWindowGame onHome={goHome} onResetAll={resetAllGames} />;
   }
 
   if (activeGame === "turtle-soup") {
-    return <TurtleSoupGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+    return <TurtleSoupGame onHome={goHome} onResetAll={resetAllGames} />;
   }
 
   if (activeGame === "anonymous-box") {
-    return <AnonymousQuestionBoxGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+    return <AnonymousQuestionBoxGame onHome={goHome} onResetAll={resetAllGames} />;
   }
 
   if (activeGame === "werewolf-game") {
-    return <WerewolfGame onHome={() => setActiveGame(null)} onResetAll={resetAllGames} />;
+    return <WerewolfGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
   }
 
   if (isUrlCandidateGameKey(activeGame)) {
     return (
       <UrlCandidateGame
         config={urlCandidateGameByKey[activeGame]}
-        onHome={() => setActiveGame(null)}
+        onHome={goHome}
         onResetAll={resetAllGames}
       />
     );
   }
 
-  return <HomeScreen onStart={setActiveGame} onResetAll={resetAllGames} />;
+  return <HomeScreen onStart={startGame} onResetAll={resetAllGames} />;
 }
 
-function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey) => void; onResetAll: () => void }) {
+function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey, roomSession?: RoomSession | null) => void; onResetAll: () => void }) {
   const [filter, setFilter] = useState<HomeFilter>("all");
   const visibleGames = filter === "all" ? activeGames : activeGames.filter((game) => game.groups.includes(filter));
 
@@ -695,7 +707,7 @@ function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey) => void;
   );
 }
 
-function RoomLobby({ onStart }: { onStart: (game: GameKey) => void }) {
+function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSession | null) => void }) {
   const [apiStatus, setApiStatus] = useState<"checking" | "ready" | "offline">("checking");
   const [socketStatus, setSocketStatus] = useState<"idle" | "connecting" | "connected">("idle");
   const [hostName, setHostName] = useState("");
@@ -718,6 +730,33 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey) => void }) {
       .catch(() => {
         if (!ignore) setApiStatus("offline");
       });
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const session = readRoomSession();
+    if (!session) return;
+
+    let ignore = false;
+    setJoinCode(session.roomCode);
+    fetchRoomSnapshot(session.roomCode)
+      .then((roomSnapshot) => {
+        if (ignore) return;
+        const savedParticipant = roomSnapshot.participants.find((item) => item.id === session.participantId) ?? null;
+        if (!savedParticipant) {
+          clearRoomSession();
+          return;
+        }
+        setSnapshot(roomSnapshot);
+        setParticipant(savedParticipant);
+        setNotice("保存済みのルームに再接続しました。");
+      })
+      .catch((caught) => {
+        if (!ignore) setError(toErrorMessage(caught));
+      });
+
     return () => {
       ignore = true;
     };
@@ -926,8 +965,15 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey) => void }) {
   }
 
   function openCurrentRoomGame() {
-    if (progress?.gameKey) {
-      onStart(progress.gameKey);
+    if (progress?.gameKey && snapshot && participant) {
+      const roomSession: RoomSession = {
+        roomCode: snapshot.room.code,
+        participantId: participant.id,
+        participantName: participant.name,
+        participantRole: participant.role,
+      };
+      saveRoomSession(snapshot.room.code, participant);
+      onStart(progress.gameKey, roomSession);
     }
   }
 
@@ -2089,8 +2135,17 @@ function roomParticipantsToWerewolfPlayers(snapshot: RoomSnapshot, includeHost: 
     }));
 }
 
-function WerewolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
-  const roomSession = useMemo(() => readRoomSession(), []);
+function WerewolfGame({
+  onHome,
+  onResetAll,
+  roomSessionOverride = null,
+}: {
+  onHome: () => void;
+  onResetAll: () => void;
+  roomSessionOverride?: RoomSession | null;
+}) {
+  const storedRoomSession = useMemo(() => readRoomSession(), []);
+  const roomSession = roomSessionOverride ?? storedRoomSession;
   const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
   const [roomSyncError, setRoomSyncError] = useState("");
   const [ownRoleVisible, setOwnRoleVisible] = useState(false);
@@ -5072,9 +5127,92 @@ const initialWordWolfState: WordWolfState = {
   voteIndex: 0,
 };
 
-function WordWolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
-  const [state, setState] = useStoredState<WordWolfState>("word-wolf", initialWordWolfState);
-  const canStart = state.players.length >= 4 && state.players.every((player) => player.name.trim());
+type WordWolfRoomEnvelope = RoomProgressState & {
+  wordWolf?: WordWolfState;
+};
+
+function parseWordWolfStateFromRoom(snapshot: RoomSnapshot | null) {
+  if (!snapshot || snapshot.room.currentGame !== "word-wolf") return null;
+  const state = snapshot.room.state && typeof snapshot.room.state === "object" ? (snapshot.room.state as Partial<WordWolfRoomEnvelope>) : {};
+  return state.wordWolf && typeof state.wordWolf === "object" ? ({ ...initialWordWolfState, ...state.wordWolf } as WordWolfState) : null;
+}
+
+function getWordWolfVoteResult(state: WordWolfState) {
+  const tally = state.players.map((player) => ({
+    player,
+    count: Object.values(state.votes).filter((targetId) => targetId === player.id).length,
+  }));
+  const maxVotes = Math.max(0, ...tally.map((item) => item.count));
+  const topTargets = tally.filter((item) => item.count === maxVotes && maxVotes > 0).map((item) => item.player.id);
+  const minority = state.assignments.find((assignment) => assignment.role === "minority");
+  const majorityWin = Boolean(minority && topTargets.length === 1 && topTargets[0] === minority.playerId);
+  return { tally, topTargets, minority, majorityWin };
+}
+
+function getWordWolfProgressStep(state: WordWolfState) {
+  const stepOrder: Record<WordWolfStep, number> = {
+    setup: 1,
+    reveal: 2,
+    discussion: 3,
+    vote: 4,
+    result: 5,
+  };
+  return stepOrder[state.step] ?? 1;
+}
+
+function describeWordWolfProgress(state: WordWolfState) {
+  if (state.step === "setup") return "ワードウルフの設定中です";
+  if (state.step === "reveal") return "お題を配布しました。各自端末で自分のお題を確認してください";
+  if (state.step === "discussion") return `会話タイム中です / 残り${formatTime(state.remainingSeconds)}`;
+  if (state.step === "vote") return `投票中です: ${Math.min(state.voteIndex + 1, state.players.length)}/${state.players.length}`;
+  const result = getWordWolfVoteResult(state);
+  return result.majorityWin ? "多数派が少数派を見破りました" : "少数派がうまく紛れ込みました";
+}
+
+function buildWordWolfRoomEnvelope(wordWolf: WordWolfState, updatedBy: string | null): WordWolfRoomEnvelope {
+  return {
+    phase: wordWolf.step === "result" ? "complete" : "playing",
+    gameKey: "word-wolf",
+    gameTitle: findGameMeta("word-wolf")?.title ?? "ワードウルフ",
+    step: getWordWolfProgressStep(wordWolf),
+    message: describeWordWolfProgress(wordWolf),
+    updatedBy,
+    updatedAt: new Date().toISOString(),
+    wordWolf,
+  };
+}
+
+function roomParticipantsToWordWolfPlayers(snapshot: RoomSnapshot, includeHost: boolean) {
+  return snapshot.participants
+    .filter((participant) => includeHost || participant.role !== "host")
+    .map((participant) => ({
+      id: participant.id,
+      name: participant.name,
+    }));
+}
+
+function WordWolfGame({
+  onHome,
+  onResetAll,
+  roomSessionOverride = null,
+}: {
+  onHome: () => void;
+  onResetAll: () => void;
+  roomSessionOverride?: RoomSession | null;
+}) {
+  const storedRoomSession = useMemo(() => readRoomSession(), []);
+  const roomSession = roomSessionOverride ?? storedRoomSession;
+  const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
+  const [roomSyncError, setRoomSyncError] = useState("");
+  const [ownWordVisible, setOwnWordVisible] = useState(false);
+  const roomSocketRef = useRef<Socket | null>(null);
+  const [storedState, setStoredState] = useStoredState<WordWolfState>("word-wolf", initialWordWolfState);
+  const roomWordWolfState = parseWordWolfStateFromRoom(roomSnapshot);
+  const isWordWolfRoom = Boolean(roomSession && (!roomSnapshot || roomSnapshot.room.currentGame === "word-wolf"));
+  const activeWordWolfState = isWordWolfRoom ? (roomWordWolfState ?? initialWordWolfState) : storedState;
+  const state = { ...initialWordWolfState, ...activeWordWolfState };
+  const isRoomHost = isWordWolfRoom && roomSession?.participantRole === "host";
+  const canControlWordWolf = !isWordWolfRoom || (isRoomHost && Boolean(roomSnapshot));
   const activeWordWolfCategory = !state.includeAdultTopics && state.category === "adult" ? "all" : state.category;
   const availableWordWolfCategories = state.includeAdultTopics ? wordWolfCategories : normalWordWolfCategories;
   const topicPool = useMemo(
@@ -5087,9 +5225,83 @@ function WordWolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
     [activeWordWolfCategory, state.includeAdultTopics],
   );
   const selectedWordWolfCategory = wordWolfCategories.find((category) => category.value === activeWordWolfCategory);
+  const canStart = state.players.length >= 4 && state.players.every((player) => player.name.trim());
+  const currentRevealPlayer = state.players[state.revealIndex] ?? null;
+  const currentRevealAssignment = currentRevealPlayer
+    ? state.assignments.find((assignment) => assignment.playerId === currentRevealPlayer.id)
+    : null;
+  const currentVoter = state.players[state.voteIndex] ?? null;
+  const ownAssignment = roomSession ? state.assignments.find((assignment) => assignment.playerId === roomSession.participantId) : null;
+  const currentVoterIsThisParticipant = Boolean(isWordWolfRoom && currentVoter?.id === roomSession?.participantId);
+  const canVoteForCurrentVoter = canControlWordWolf || currentVoterIsThisParticipant;
+  const wordWolfResult = useMemo(() => getWordWolfVoteResult(state), [state.assignments, state.players, state.votes]);
+
+  function setState(nextStateOrUpdater: WordWolfState | ((current: WordWolfState) => WordWolfState)) {
+    if (isWordWolfRoom && roomSession && !roomSnapshot) {
+      setRoomSyncError("ルーム情報を読み込み中です。少し待ってから操作してください。");
+      return;
+    }
+
+    if (!isWordWolfRoom || !roomSession || !roomSnapshot) {
+      setStoredState(nextStateOrUpdater);
+      return;
+    }
+
+    const nextState = typeof nextStateOrUpdater === "function" ? nextStateOrUpdater(state) : nextStateOrUpdater;
+    const nextRoomState = buildWordWolfRoomEnvelope(nextState, roomSession.participantId);
+    setRoomSnapshot({
+      ...roomSnapshot,
+      room: {
+        ...roomSnapshot.room,
+        status: nextRoomState.phase === "complete" ? "complete" : "playing",
+        currentGame: "word-wolf",
+        state: nextRoomState,
+      },
+    });
+    roomSocketRef.current?.emit("room:state:update", {
+      roomCode: roomSession.roomCode,
+      currentGame: "word-wolf",
+      state: nextRoomState,
+    });
+  }
 
   useEffect(() => {
-    if (state.step !== "discussion" || !state.timerRunning) return;
+    if (!roomSession) return;
+    let ignore = false;
+    fetchRoomSnapshot(roomSession.roomCode)
+      .then((snapshot) => {
+        if (!ignore) setRoomSnapshot(snapshot);
+      })
+      .catch((caught) => {
+        if (!ignore) setRoomSyncError(toErrorMessage(caught));
+      });
+
+    const socket = io(API_URL, {
+      transports: ["websocket", "polling"],
+    });
+    roomSocketRef.current = socket;
+
+    socket.on("connect", () => {
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+    });
+
+    socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
+      if (nextSnapshot) setRoomSnapshot(nextSnapshot);
+    });
+
+    socket.on("room:error", (payload: { error?: string }) => {
+      setRoomSyncError(toErrorMessage(payload.error ?? "room_error"));
+    });
+
+    return () => {
+      ignore = true;
+      socket.disconnect();
+      roomSocketRef.current = null;
+    };
+  }, [roomSession]);
+
+  useEffect(() => {
+    if (state.step !== "discussion" || !state.timerRunning || (isWordWolfRoom && !isRoomHost)) return;
     const timer = window.setInterval(() => {
       setState((current) => {
         if (current.step !== "discussion" || !current.timerRunning) return current;
@@ -5102,7 +5314,11 @@ function WordWolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
       });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [setState, state.step, state.timerRunning]);
+  }, [isRoomHost, isWordWolfRoom, state.remainingSeconds, state.step, state.timerRunning]);
+
+  useEffect(() => {
+    setOwnWordVisible(false);
+  }, [ownAssignment?.word, state.step]);
 
   function startRound() {
     const topic = pickOne(topicPool);
@@ -5127,24 +5343,6 @@ function WordWolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
     });
   }
 
-  const currentRevealPlayer = state.players[state.revealIndex] ?? null;
-  const currentRevealAssignment = currentRevealPlayer
-    ? state.assignments.find((assignment) => assignment.playerId === currentRevealPlayer.id)
-    : null;
-  const currentVoter = state.players[state.voteIndex] ?? null;
-
-  const wordWolfResult = useMemo(() => {
-    const tally = state.players.map((player) => ({
-      player,
-      count: Object.values(state.votes).filter((targetId) => targetId === player.id).length,
-    }));
-    const maxVotes = Math.max(0, ...tally.map((item) => item.count));
-    const topTargets = tally.filter((item) => item.count === maxVotes && maxVotes > 0).map((item) => item.player.id);
-    const minority = state.assignments.find((assignment) => assignment.role === "minority");
-    const majorityWin = Boolean(minority && topTargets.length === 1 && topTargets[0] === minority.playerId);
-    return { tally, topTargets, minority, majorityWin };
-  }, [state.assignments, state.players, state.votes]);
-
   return (
     <GameFrame
       title="ワードウルフ"
@@ -5152,6 +5350,34 @@ function WordWolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
       onHome={onHome}
       onResetAll={onResetAll}
     >
+      {isWordWolfRoom && roomSession && (
+        <section className="tool-surface room-sync-strip">
+          <div>
+            <p className="eyebrow">ルーム同期中</p>
+            <h3>
+              {roomSession.roomCode} / {roomSession.participantName}
+              {isRoomHost ? " / ホスト" : ""}
+            </h3>
+            <p className="soft-note">
+              {isRoomHost
+                ? "この端末が進行役です。配る、会話開始、投票、結果表示をルームへ同期します。"
+                : "この端末では自分のお題確認と、自分の投票順の操作ができます。"}
+            </p>
+          </div>
+          {ownAssignment && state.step !== "result" && (
+            <div className="own-role-panel">
+              <span>あなたのお題</span>
+              <strong>{ownWordVisible ? ownAssignment.word : "非表示"}</strong>
+              <button className="secondary-button" type="button" onClick={() => setOwnWordVisible(!ownWordVisible)}>
+                {ownWordVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+                {ownWordVisible ? "隠す" : "見る"}
+              </button>
+            </div>
+          )}
+          {roomSyncError && <p className="room-message error">{roomSyncError}</p>}
+        </section>
+      )}
+
       {state.step === "setup" && (
         <section className="tool-surface">
           <div className="howto-panel">
@@ -5165,60 +5391,118 @@ function WordWolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
               <li>最後に「少数派だと思う人」へ投票します。最多票が少数派なら多数派の勝ち、外したら少数派の勝ちです。</li>
             </ol>
           </div>
-          <PlayerSetup
-            players={state.players}
-            minPlayers={4}
-            maxPlayers={12}
-            onChange={(players) => setState({ ...state, players })}
-          />
-          <SegmentedControl
-            label="お題"
-            options={availableWordWolfCategories}
-            value={activeWordWolfCategory}
-            onChange={(category) => setState({ ...state, category })}
-          />
-          <ToggleSwitch
-            label="Hな話題"
-            description={
-              state.includeAdultTopics
-                ? "ON: 全部に大人向けも混ぜます。カテゴリで大人向けだけも選べます。"
-                : "OFF: 軽い恋バナや距離感の強い話題は出ません。"
-            }
-            checked={state.includeAdultTopics}
-            onChange={(includeAdultTopics) =>
-              setState({
-                ...state,
-                includeAdultTopics,
-                category: state.category === "adult" ? "all" : state.category,
-                topicId: null,
-                assignments: [],
-                votes: {},
-                voteIndex: 0,
-              })
-            }
-          />
-          <p className="soft-note">
-            {selectedWordWolfCategory?.label ?? "選択中"}: {topicPool.length}ペアからランダムに1つ配ります。
-            Hな話題は{state.includeAdultTopics ? "ON" : "OFF"}です。
-          </p>
-          {state.includeAdultTopics && (
-            <div className="notice-panel">
-              <strong>Hな話題がONです</strong>
-              <p>軽い恋バナや距離感の話題を含みます。苦手な人がいる場ではOFFにしてください。</p>
+
+          {isWordWolfRoom && roomSnapshot && (
+            <div className="notice-panel calm">
+              <strong>ルーム参加者をワードウルフメンバーに使えます</strong>
+              <p>
+                参加者それぞれの端末で自分のお題を確認するには、ルーム参加者を取り込んでください。ホストも遊ぶ場合は「全員」を使います。
+              </p>
+              <div className="action-row">
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToWordWolfPlayers(roomSnapshot, false),
+                      assignments: [],
+                      step: "setup",
+                      votes: {},
+                      voteIndex: 0,
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  ホスト以外を使う
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToWordWolfPlayers(roomSnapshot, true),
+                      assignments: [],
+                      step: "setup",
+                      votes: {},
+                      voteIndex: 0,
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  全員を使う
+                </button>
+              </div>
             </div>
           )}
-          <SegmentedControl
-            label="会話時間"
-            options={wordWolfTimeOptions}
-            value={String(state.seconds) as "180" | "300" | "420"}
-            onChange={(seconds) => setState({ ...state, seconds: Number(seconds), remainingSeconds: Number(seconds) })}
-          />
+
+          {canControlWordWolf ? (
+            <>
+              <PlayerSetup
+                players={state.players}
+                minPlayers={4}
+                maxPlayers={12}
+                onChange={(players) => setState({ ...state, players })}
+              />
+              <SegmentedControl
+                label="お題"
+                options={availableWordWolfCategories}
+                value={activeWordWolfCategory}
+                onChange={(category) => setState({ ...state, category })}
+              />
+              <ToggleSwitch
+                label="Hな話題"
+                description={
+                  state.includeAdultTopics
+                    ? "ON: 全部に大人向けも混ぜます。カテゴリで大人向けだけも選べます。"
+                    : "OFF: 軽い恋バナや距離感の強い話題は出ません。"
+                }
+                checked={state.includeAdultTopics}
+                onChange={(includeAdultTopics) =>
+                  setState({
+                    ...state,
+                    includeAdultTopics,
+                    category: state.category === "adult" ? "all" : state.category,
+                    topicId: null,
+                    assignments: [],
+                    votes: {},
+                    voteIndex: 0,
+                  })
+                }
+              />
+              <p className="soft-note">
+                {selectedWordWolfCategory?.label ?? "選択中"}: {topicPool.length}ペアからランダムに1つ配ります。
+                Hな話題は{state.includeAdultTopics ? "ON" : "OFF"}です。
+              </p>
+              {state.includeAdultTopics && (
+                <div className="notice-panel">
+                  <strong>Hな話題がONです</strong>
+                  <p>軽い恋バナや距離感の話題を含みます。苦手な人がいる場ではOFFにしてください。</p>
+                </div>
+              )}
+              <SegmentedControl
+                label="会話時間"
+                options={wordWolfTimeOptions}
+                value={String(state.seconds) as "180" | "300" | "420"}
+                onChange={(seconds) => setState({ ...state, seconds: Number(seconds), remainingSeconds: Number(seconds) })}
+              />
+            </>
+          ) : (
+            <div className="howto-panel compact">
+              <h3>ホストの準備待ち</h3>
+              <p className="soft-note">ホストがお題を配ると、この端末に自分のお題確認ボタンが表示されます。</p>
+            </div>
+          )}
+
           <div className="action-row">
-            <button className="primary-button" disabled={!canStart || topicPool.length === 0} onClick={startRound}>
+            <button className="primary-button" disabled={!canStart || topicPool.length === 0 || !canControlWordWolf} onClick={startRound}>
               <Play size={18} />
               配る
             </button>
-            <button className="secondary-button" onClick={() => setState(initialWordWolfState)}>
+            <button className="secondary-button" disabled={!canControlWordWolf} onClick={() => setState(initialWordWolfState)}>
               <RotateCcw size={18} />
               リセット
             </button>
@@ -5226,7 +5510,37 @@ function WordWolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
         </section>
       )}
 
-      {state.step === "reveal" && currentRevealPlayer && currentRevealAssignment && (
+      {isWordWolfRoom && state.step === "reveal" && (
+        <section className="tool-surface center-flow">
+          <p className="eyebrow">お題確認</p>
+          <h2>{ownAssignment ? `${roomSession?.participantName}さんのお題` : "ホストの進行待ち"}</h2>
+          <p className="soft-note">
+            {ownAssignment
+              ? "本人だけが見てください。会話が始まるまで、お題そのものは口に出さないでください。"
+              : "この端末の参加者IDがプレイヤーに含まれていません。ホストがルーム参加者を取り込んでいるか確認してください。"}
+          </p>
+          <div className={`secret-word ${ownWordVisible ? "visible" : ""}`}>
+            {ownAssignment ? (ownWordVisible ? ownAssignment.word : "お題を隠しています") : "未配布"}
+          </div>
+          <div className="action-row centered">
+            <button className="primary-button" disabled={!ownAssignment} onClick={() => setOwnWordVisible(!ownWordVisible)}>
+              {ownWordVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+              {ownWordVisible ? "隠す" : "見る"}
+            </button>
+            <button
+              className="secondary-button"
+              disabled={!canControlWordWolf}
+              onClick={() => setState({ ...state, step: "discussion", revealVisible: false, timerRunning: false })}
+            >
+              <ChevronRight size={18} />
+              会話へ
+            </button>
+          </div>
+          {!isRoomHost && <p className="soft-note">全員がお題を確認したら、ホストが会話タイムへ進めます。</p>}
+        </section>
+      )}
+
+      {!isWordWolfRoom && state.step === "reveal" && currentRevealPlayer && currentRevealAssignment && (
         <section className="tool-surface center-flow">
           <p className="eyebrow">
             {state.revealIndex + 1}/{state.players.length}
@@ -5275,16 +5589,17 @@ function WordWolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
             <button
               className="primary-button"
               onClick={() => setState({ ...state, timerRunning: !state.timerRunning })}
-              disabled={state.remainingSeconds === 0}
+              disabled={state.remainingSeconds === 0 || !canControlWordWolf}
             >
               {state.timerRunning ? <Pause size={18} /> : <Play size={18} />}
               {state.timerRunning ? "止める" : "開始"}
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "vote", timerRunning: false })}>
+            <button className="secondary-button" disabled={!canControlWordWolf} onClick={() => setState({ ...state, step: "vote", timerRunning: false })}>
               <Vote size={18} />
               投票へ
             </button>
           </div>
+          {!canControlWordWolf && <p className="soft-note">会話時間と投票への切り替えはホスト端末で操作します。</p>}
         </section>
       )}
 
@@ -5303,6 +5618,7 @@ function WordWolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
               .map((player) => (
                 <button
                   key={player.id}
+                  disabled={!canVoteForCurrentVoter}
                   onClick={() => {
                     const nextVotes = { ...state.votes, [currentVoter.id]: player.id };
                     if (state.voteIndex + 1 >= state.players.length) {
@@ -5316,6 +5632,11 @@ function WordWolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
                 </button>
               ))}
           </div>
+          {!canVoteForCurrentVoter && (
+            <p className="soft-note">
+              今は{currentVoter.name}さんの投票順です。自分の順番になると候補を選べます。
+            </p>
+          )}
         </section>
       )}
 
@@ -5347,15 +5668,16 @@ function WordWolfGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
           </p>
           <p className="soft-note">同票や多数派に票が集まった場合は、少数派がうまく紛れ込めた扱いです。</p>
           <div className="action-row">
-            <button className="primary-button" onClick={startRound}>
+            <button className="primary-button" disabled={!canControlWordWolf} onClick={startRound}>
               <RotateCcw size={18} />
               同じメンバーでもう一度
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup" })}>
+            <button className="secondary-button" disabled={!canControlWordWolf} onClick={() => setState({ ...state, step: "setup" })}>
               <Users size={18} />
               設定へ
             </button>
           </div>
+          {!canControlWordWolf && <p className="soft-note">もう一度遊ぶ操作はホスト端末で行います。</p>}
         </section>
       )}
     </GameFrame>
