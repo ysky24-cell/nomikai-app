@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { LucideIcon } from "lucide-react";
 import {
   Check,
@@ -20,6 +20,7 @@ import {
   Users,
   Vote,
 } from "lucide-react";
+import { io, type Socket } from "socket.io-client";
 import {
   anonymousQuestionCategories,
   anonymousQuestionPrompts,
@@ -101,6 +102,43 @@ type Player = {
   name: string;
 };
 
+type RoomParticipant = {
+  id: string;
+  roomId: string;
+  name: string;
+  role: "host" | "player";
+  connected: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type RoomInfo = {
+  id: string;
+  code: string;
+  status: string;
+  currentGame: string | null;
+  state: unknown;
+  createdAt: string;
+  updatedAt: string;
+};
+
+type RoomSnapshot = {
+  room: RoomInfo;
+  participants: RoomParticipant[];
+};
+
+type RoomProgressPhase = "lobby" | "playing" | "complete";
+
+type RoomProgressState = {
+  phase: RoomProgressPhase;
+  gameKey: GameKey | null;
+  gameTitle: string | null;
+  step: number;
+  message: string;
+  updatedBy: string | null;
+  updatedAt: string | null;
+};
+
 type GameCardImage = {
   src: string;
   alt: string;
@@ -119,6 +157,7 @@ type GameMeta = {
 };
 
 const STORAGE_PREFIX = "nomikai-app:v1:";
+const API_URL = (import.meta.env.VITE_API_URL || "http://localhost:3000").replace(/\/$/, "");
 const publicAsset = (path: string) => `${import.meta.env.BASE_URL}${path}`;
 const STORED_GAME_KEYS: readonly GameKey[] = [
   "yamanote",
@@ -529,14 +568,14 @@ function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey) => void;
     <main className="app-shell">
       <section className="top-bar" aria-label="アプリ概要">
         <div>
-          <p className="eyebrow">1台共有モード</p>
+          <p className="eyebrow">1台共有 / ルーム式</p>
           <h1>飲み会アプリ</h1>
-          <p className="lead">幹事のスマホを回して、すぐ遊べるミニゲーム集。</p>
+          <p className="lead">幹事のスマホを回す静的版と、Docker版のルーム参加を並べて育てるミニゲーム集。</p>
         </div>
         <div className="top-actions">
           <div className="status-pill">
             <Check size={18} />
-            DB不要
+            静的版完成
           </div>
           <button className="secondary-button reset-all-button" onClick={onResetAll}>
             <RotateCcw size={18} />
@@ -544,6 +583,8 @@ function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey) => void;
           </button>
         </div>
       </section>
+
+      <RoomLobby onStart={onStart} />
 
       <section className="home-filter" aria-label="ゲーム絞り込み">
         <SegmentedControl label="表示するゲーム" options={homeFilterOptions} value={filter} onChange={setFilter} />
@@ -605,6 +646,425 @@ function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey) => void;
       )}
     </main>
   );
+}
+
+function RoomLobby({ onStart }: { onStart: (game: GameKey) => void }) {
+  const [apiStatus, setApiStatus] = useState<"checking" | "ready" | "offline">("checking");
+  const [socketStatus, setSocketStatus] = useState<"idle" | "connecting" | "connected">("idle");
+  const [hostName, setHostName] = useState("");
+  const [joinCode, setJoinCode] = useState("");
+  const [joinName, setJoinName] = useState("");
+  const [selectedRoomGame, setSelectedRoomGame] = useState<GameKey>("werewolf-game");
+  const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
+  const [participant, setParticipant] = useState<RoomParticipant | null>(null);
+  const [isBusy, setIsBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [error, setError] = useState("");
+  const socketRef = useRef<Socket | null>(null);
+
+  useEffect(() => {
+    let ignore = false;
+    requestJson<{ ok: boolean }>("/health")
+      .then(() => {
+        if (!ignore) setApiStatus("ready");
+      })
+      .catch(() => {
+        if (!ignore) setApiStatus("offline");
+      });
+    return () => {
+      ignore = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!snapshot || !participant) {
+      socketRef.current?.disconnect();
+      socketRef.current = null;
+      setSocketStatus("idle");
+      return;
+    }
+
+    socketRef.current?.disconnect();
+    setSocketStatus("connecting");
+    const socket = io(API_URL, {
+      transports: ["websocket", "polling"],
+    });
+    socketRef.current = socket;
+
+    socket.on("connect", () => {
+      setSocketStatus("connected");
+      socket.emit("room:join", { roomCode: snapshot.room.code, participantId: participant.id });
+    });
+
+    socket.on("disconnect", () => {
+      setSocketStatus("idle");
+    });
+
+    socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
+      if (nextSnapshot) setSnapshot(nextSnapshot);
+    });
+
+    socket.on("room:error", (payload: { error?: string }) => {
+      setError(toErrorMessage(payload.error ?? "room_error"));
+    });
+
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, [participant, snapshot?.room.code]);
+
+  const isHost = participant?.role === "host";
+  const progress = snapshot ? parseRoomProgress(snapshot) : null;
+  const currentGame = progress?.gameKey ? findGameMeta(progress.gameKey) : null;
+
+  async function createRoomForHost() {
+    const name = hostName.trim();
+    if (!name) {
+      setError("ホスト名を入力してください。");
+      return;
+    }
+
+    setIsBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await requestJson<{ room: RoomInfo; host: RoomParticipant | null }>("/rooms", {
+        method: "POST",
+        body: { hostName: name },
+      });
+      const roomSnapshot = await fetchRoomSnapshot(result.room.code);
+      setSnapshot(roomSnapshot);
+      setParticipant(result.host);
+      setJoinCode(result.room.code);
+      setNotice("ルームを作成しました。コードを参加者に共有してください。");
+    } catch (caught) {
+      setError(toErrorMessage(caught));
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function joinRoom() {
+    const code = normalizeInputRoomCode(joinCode);
+    const name = joinName.trim();
+    if (!code || !name) {
+      setError("ルームコードと名前を入力してください。");
+      return;
+    }
+
+    setIsBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await requestJson<{ participant: RoomParticipant; room: RoomInfo | null }>(
+        `/rooms/${encodeURIComponent(code)}/join`,
+        {
+          method: "POST",
+          body: { name },
+        },
+      );
+      const roomSnapshot = await fetchRoomSnapshot(code);
+      setSnapshot(roomSnapshot);
+      setParticipant(result.participant);
+      setJoinCode(code);
+      setNotice("ルームに参加しました。");
+    } catch (caught) {
+      setError(toErrorMessage(caught));
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function startRoomGame() {
+    if (!snapshot || !participant) return;
+    const game = findGameMeta(selectedRoomGame);
+    if (!game) return;
+
+    setIsBusy(true);
+    setError("");
+    try {
+      const nextSnapshot = await requestJson<RoomSnapshot>(`/rooms/${encodeURIComponent(snapshot.room.code)}/game/start`, {
+        method: "POST",
+        body: { gameKey: game.key, gameTitle: game.title, participantId: participant.id },
+      });
+      setSnapshot(nextSnapshot);
+      setNotice(`${game.title}を開始しました。`);
+    } catch (caught) {
+      setError(toErrorMessage(caught));
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function advanceRoomGame() {
+    if (!snapshot || !participant) return;
+    setIsBusy(true);
+    setError("");
+    try {
+      const nextSnapshot = await requestJson<RoomSnapshot>(
+        `/rooms/${encodeURIComponent(snapshot.room.code)}/game/advance`,
+        {
+          method: "POST",
+          body: { participantId: participant.id },
+        },
+      );
+      setSnapshot(nextSnapshot);
+    } catch (caught) {
+      setError(toErrorMessage(caught));
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function completeRoomGame() {
+    if (!snapshot || !participant) return;
+    setIsBusy(true);
+    setError("");
+    try {
+      const nextSnapshot = await requestJson<RoomSnapshot>(
+        `/rooms/${encodeURIComponent(snapshot.room.code)}/game/complete`,
+        {
+          method: "POST",
+          body: { participantId: participant.id },
+        },
+      );
+      setSnapshot(nextSnapshot);
+    } catch (caught) {
+      setError(toErrorMessage(caught));
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function resetRoomGame() {
+    if (!snapshot || !participant) return;
+    setIsBusy(true);
+    setError("");
+    try {
+      const nextSnapshot = await requestJson<RoomSnapshot>(`/rooms/${encodeURIComponent(snapshot.room.code)}/game/reset`, {
+        method: "POST",
+        body: { participantId: participant.id },
+      });
+      setSnapshot(nextSnapshot);
+      setNotice("ルームを待機中に戻しました。");
+    } catch (caught) {
+      setError(toErrorMessage(caught));
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  function leaveLocalRoom() {
+    socketRef.current?.disconnect();
+    socketRef.current = null;
+    setSnapshot(null);
+    setParticipant(null);
+    setSocketStatus("idle");
+    setNotice("");
+    setError("");
+  }
+
+  async function copyRoomCode() {
+    if (!snapshot) return;
+    try {
+      await navigator.clipboard.writeText(snapshot.room.code);
+      setNotice("ルームコードをコピーしました。");
+    } catch {
+      setNotice(`ルームコード: ${snapshot.room.code}`);
+    }
+  }
+
+  function openCurrentRoomGame() {
+    if (progress?.gameKey) {
+      onStart(progress.gameKey);
+    }
+  }
+
+  return (
+    <section className="room-panel" aria-label="ルーム参加">
+      <div className="room-panel-heading">
+        <div>
+          <p className="eyebrow">Dockerルーム版</p>
+          <h2>ルームを作って参加者を同期</h2>
+          <p className="soft-note">全ゲーム共通で、開始・進行・完了・待機戻しを参加者へ共有します。</p>
+        </div>
+        <div className={`room-status status-${apiStatus}`}>
+          <span>API: {apiStatus === "ready" ? "OK" : apiStatus === "checking" ? "確認中" : "停止中"}</span>
+          <span>同期: {socketStatus === "connected" ? "接続中" : socketStatus === "connecting" ? "接続中..." : "未接続"}</span>
+        </div>
+      </div>
+
+      <div className="room-actions-grid">
+        <div className="room-form">
+          <h3>ホストとして作成</h3>
+          <div className="room-button-row">
+            <input value={hostName} onChange={(event) => setHostName(event.currentTarget.value)} placeholder="ホスト名" />
+            <button className="primary-button" type="button" disabled={isBusy || apiStatus !== "ready"} onClick={createRoomForHost}>
+              <Plus size={18} />
+              ルーム作成
+            </button>
+          </div>
+        </div>
+
+        <div className="room-form">
+          <h3>コードで参加</h3>
+          <div className="room-button-row">
+            <input
+              value={joinCode}
+              onChange={(event) => setJoinCode(event.currentTarget.value.toUpperCase())}
+              placeholder="ルームコード"
+              inputMode="text"
+            />
+            <input value={joinName} onChange={(event) => setJoinName(event.currentTarget.value)} placeholder="名前" />
+            <button className="secondary-button" type="button" disabled={isBusy || apiStatus !== "ready"} onClick={joinRoom}>
+              <Users size={18} />
+              参加
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {snapshot && participant && (
+        <>
+          <div className="room-current">
+            <div>
+              <p className="eyebrow">ルームコード</p>
+              <button className="room-code" type="button" onClick={copyRoomCode}>
+                {snapshot.room.code}
+              </button>
+            </div>
+            <div>
+              <p className="eyebrow">現在のゲーム</p>
+              <h3>{currentGame ? currentGame.title : "待機中"}</h3>
+              <p className="soft-note">
+                {progress?.message || "ホストがゲームを開始すると参加者に同期されます。"}
+                {progress && progress.step > 0 ? ` / ステップ ${progress.step}` : ""}
+              </p>
+            </div>
+            <button className="secondary-button" type="button" onClick={leaveLocalRoom}>
+              この端末だけ退出
+            </button>
+          </div>
+
+          <div className="room-game-panel">
+            <label>
+              <span className="control-label">開始するゲーム</span>
+              <select
+                value={selectedRoomGame}
+                onChange={(event) => setSelectedRoomGame(event.currentTarget.value as GameKey)}
+                disabled={!isHost || isBusy}
+              >
+                {activeGames.map((game) => (
+                  <option value={game.key} key={game.key}>
+                    {game.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="room-game-controls">
+              <button className="primary-button" type="button" disabled={!isHost || isBusy} onClick={startRoomGame}>
+                <Play size={18} />
+                ルームで開始
+              </button>
+              <button className="secondary-button" type="button" disabled={!isHost || isBusy || !currentGame} onClick={advanceRoomGame}>
+                <ChevronRight size={18} />
+                次へ
+              </button>
+              <button className="secondary-button" type="button" disabled={!isHost || isBusy || !currentGame} onClick={completeRoomGame}>
+                <Trophy size={18} />
+                完了
+              </button>
+              <button className="secondary-button" type="button" disabled={!isHost || isBusy} onClick={resetRoomGame}>
+                <RotateCcw size={18} />
+                待機に戻す
+              </button>
+            </div>
+            {!isHost && <p className="soft-note">ゲーム開始や進行操作はホスト端末で行います。</p>}
+          </div>
+
+          {currentGame && (
+            <button className="primary-button room-open-game" type="button" onClick={openCurrentRoomGame}>
+              <Play size={18} />
+              この端末で開く
+            </button>
+          )}
+
+          <div className="room-participants">
+            {snapshot.participants.map((item) => (
+              <span key={item.id}>
+                {item.name}
+                {item.role === "host" ? " / ホスト" : ""}
+                {item.connected ? " / 接続中" : " / 離席"}
+              </span>
+            ))}
+          </div>
+        </>
+      )}
+
+      {notice && <p className="room-message">{notice}</p>}
+      {error && <p className="room-message error">{error}</p>}
+    </section>
+  );
+}
+
+async function requestJson<T>(path: string, options: { method?: string; body?: unknown } = {}) {
+  const response = await fetch(`${API_URL}${path}`, {
+    method: options.method ?? "GET",
+    headers: options.body ? { "Content-Type": "application/json" } : undefined,
+    body: options.body ? JSON.stringify(options.body) : undefined,
+  });
+
+  const payload = (await response.json().catch(() => null)) as T | { error?: string } | null;
+  if (!response.ok) {
+    const error = payload && typeof payload === "object" && "error" in payload ? payload.error : response.statusText;
+    throw new Error(error || "request_failed");
+  }
+  return payload as T;
+}
+
+async function fetchRoomSnapshot(code: string) {
+  return requestJson<RoomSnapshot>(`/rooms/${encodeURIComponent(code)}`);
+}
+
+function parseRoomProgress(snapshot: RoomSnapshot): RoomProgressState {
+  const state = snapshot.room.state && typeof snapshot.room.state === "object" ? (snapshot.room.state as Partial<RoomProgressState>) : {};
+  const gameKey = toGameKey(state.gameKey ?? snapshot.room.currentGame);
+  return {
+    phase: state.phase === "complete" ? "complete" : state.phase === "lobby" ? "lobby" : gameKey ? "playing" : "lobby",
+    gameKey,
+    gameTitle: typeof state.gameTitle === "string" ? state.gameTitle : findGameMeta(gameKey)?.title ?? null,
+    step: typeof state.step === "number" && Number.isFinite(state.step) ? state.step : gameKey ? 1 : 0,
+    message: typeof state.message === "string" ? state.message : "",
+    updatedBy: typeof state.updatedBy === "string" ? state.updatedBy : null,
+    updatedAt: typeof state.updatedAt === "string" ? state.updatedAt : null,
+  };
+}
+
+function findGameMeta(key: GameKey | null) {
+  return activeGames.find((game) => game.key === key) ?? null;
+}
+
+function toGameKey(value: unknown): GameKey | null {
+  return typeof value === "string" && activeGames.some((game) => game.key === value) ? (value as GameKey) : null;
+}
+
+function normalizeInputRoomCode(value: string) {
+  return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function toErrorMessage(error: unknown) {
+  const value = error instanceof Error ? error.message : String(error);
+  const messages: Record<string, string> = {
+    room_not_found: "ルームが見つかりません。",
+    room_code_required: "ルームコードを入力してください。",
+    name_required: "名前を入力してください。",
+    game_key_required: "ゲームを選択してください。",
+    game_title_required: "ゲーム名が取得できません。",
+    game_not_started: "先にゲームを開始してください。",
+    Failed_to_fetch: "APIに接続できません。Docker版が起動しているか確認してください。",
+  };
+  return messages[value] ?? "処理に失敗しました。APIサーバーの状態を確認してください。";
 }
 
 type PlayerSetupProps = {
