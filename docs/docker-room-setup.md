@@ -53,6 +53,24 @@ curl -X POST http://localhost:3000/rooms/ROOMCD/game/start \
 ```
 
 ```bash
+curl -X POST http://localhost:3000/rooms/ROOMCD/game/start \
+  -H "Content-Type: application/json" \
+  -d "{\"gameKey\":\"two-choice\",\"gameTitle\":\"二択トーク\",\"participantId\":\"HOST_ID\"}"
+```
+
+```bash
+curl -X POST http://localhost:3000/rooms/ROOMCD/game/start \
+  -H "Content-Type: application/json" \
+  -d "{\"gameKey\":\"majority-game\",\"gameTitle\":\"マジョリティゲーム\",\"participantId\":\"HOST_ID\"}"
+```
+
+```bash
+curl -X POST http://localhost:3000/rooms/ROOMCD/game/start \
+  -H "Content-Type: application/json" \
+  -d "{\"gameKey\":\"large-majority-game\",\"gameTitle\":\"大人数マジョリティ\",\"participantId\":\"HOST_ID\"}"
+```
+
+```bash
 curl -X POST http://localhost:3000/rooms/ROOMCD/game/advance \
   -H "Content-Type: application/json" \
   -d "{\"participantId\":\"HOST_ID\"}"
@@ -83,10 +101,16 @@ curl -X POST http://localhost:3000/rooms/ROOMCD/game/reset \
 - ワードウルフの各自お題確認、会話タイマー、順番投票、結果表示
 - ワードウルフで、参加者は自分のお題確認と自分の投票順の操作ができます
 - ワードウルフで、ホストはルーム参加者をプレイヤーとして取り込み、進行役として配布と会話・投票切り替えができます
+- 二択トークの各自投票、集計、結果表示
+- 二択トークで、参加者は自分の投票だけ操作できます
+- 二択トークで、ホストはルーム参加者をプレイヤーとして取り込み、全員分の代行投票と結果表示ができます
+- マジョリティゲーム / 大人数マジョリティの各自投票、集計表示
+- マジョリティ系で、参加者は自分の投票だけ操作できます
+- マジョリティ系で、ホストはルーム参加者をプレイヤーとして取り込み、全員分の代行投票と次のお題への進行ができます
 
 ## 既知の制限
 
-- 人狼・ワードウルフ以外の各ゲーム内操作、カードめくり、回答入力はまだ端末ごとのローカル状態です。
+- 人狼、ワードウルフ、二択トーク、マジョリティ系以外の各ゲーム内操作、カードめくり、回答入力はまだ端末ごとのローカル状態です。
 - 人狼の役職とワードウルフのお題は画面上では本人だけに表示しますが、現時点ではルーム状態JSONに含まれます。信頼できる参加者同士で遊ぶ前提です。
 - ソケット更新はUI側で操作権限を制御しています。参加者ごとの厳密なサーバー権限検証は今後の実装対象です。
 - 静的版の `localStorage` 進行は残しています。
@@ -95,7 +119,7 @@ curl -X POST http://localhost:3000/rooms/ROOMCD/game/reset \
 
 ## 次に作る候補
 
-1. 二択トーク、マジョリティの投票同期
-2. ルームUX強化: ホスト交代、再接続、参加者削除、観戦者画面
-3. 権限強化: ホスト操作、投票者操作、役職・お題情報の参加者別配信
+1. ルームUX強化: ホスト交代、再接続、参加者削除、観戦者画面
+2. 権限強化: ホスト操作、投票者操作、役職・お題情報の参加者別配信
+3. 第一印象ランキングの投票同期
 4. AWS公開用の本番Docker構成

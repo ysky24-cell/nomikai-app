@@ -571,7 +571,7 @@ function App() {
   }
 
   if (activeGame === "two-choice") {
-    return <TwoChoiceGame onHome={goHome} onResetAll={resetAllGames} />;
+    return <TwoChoiceGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
   }
 
   if (activeGame === "word-wolf") {
@@ -612,6 +612,7 @@ function App() {
         config={urlCandidateGameByKey[activeGame]}
         onHome={goHome}
         onResetAll={resetAllGames}
+        roomSessionOverride={activeRoomSession}
       />
     );
   }
@@ -1358,6 +1359,7 @@ type UrlCandidateState = {
   hazardIndex: number;
   completedPairs: number;
   actionLog: string[];
+  votes: Record<string, string>;
 };
 
 const urlCandidateQuestionCountOptions: SegmentedOption<string>[] = [
@@ -1386,6 +1388,7 @@ const initialUrlCandidateState: UrlCandidateState = {
   hazardIndex: 4,
   completedPairs: 0,
   actionLog: [],
+  votes: {},
 };
 
 function createPlayerPositions(players: Player[]) {
@@ -1396,17 +1399,95 @@ function createHazardIndex() {
   return Math.floor(Math.random() * 8) + 1;
 }
 
+function formatChoiceLabel(option: string, index: number) {
+  return /^[A-ZＡ-Ｚ]\s*[:：.．]/.test(option) ? option : `${String.fromCharCode(65 + index)}. ${option}`;
+}
+
+type UrlCandidateRoomEnvelope = RoomProgressState & {
+  urlCandidate?: {
+    key: UrlCandidateGameKey;
+    state: UrlCandidateState;
+  };
+};
+
+function isRoomSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
+  return key === "majority-game" || key === "large-majority-game";
+}
+
+function parseUrlCandidateStateFromRoom(snapshot: RoomSnapshot | null, key: UrlCandidateGameKey) {
+  if (!snapshot || snapshot.room.currentGame !== key) return null;
+  const roomState =
+    snapshot.room.state && typeof snapshot.room.state === "object"
+      ? (snapshot.room.state as Partial<UrlCandidateRoomEnvelope>)
+      : {};
+  const urlCandidate = roomState.urlCandidate;
+  if (!urlCandidate || urlCandidate.key !== key || typeof urlCandidate.state !== "object") return null;
+  return { ...initialUrlCandidateState, ...urlCandidate.state } as UrlCandidateState;
+}
+
+function getUrlCandidateProgressStep(state: UrlCandidateState) {
+  const stepOrder: Record<UrlCandidateStep, number> = {
+    setup: 1,
+    play: 2,
+    complete: 3,
+  };
+  return stepOrder[state.step] ?? 1;
+}
+
+function describeUrlCandidateProgress(config: UrlCandidateGameConfig, state: UrlCandidateState) {
+  if (state.step === "setup") return `${config.title}の設定中です`;
+  if (state.step === "play") {
+    const votedCount = state.players.filter((player) => state.votes[player.id]).length;
+    const progress = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "準備中";
+    return `${config.title}: お題${progress}で投票中です (${votedCount}/${state.players.length})`;
+  }
+  return `${config.title}が完了しました`;
+}
+
+function buildUrlCandidateRoomEnvelope(
+  config: UrlCandidateGameConfig,
+  urlCandidateState: UrlCandidateState,
+  updatedBy: string | null,
+): UrlCandidateRoomEnvelope {
+  return {
+    phase: urlCandidateState.step === "complete" ? "complete" : "playing",
+    gameKey: config.key,
+    gameTitle: config.title,
+    step: getUrlCandidateProgressStep(urlCandidateState),
+    message: describeUrlCandidateProgress(config, urlCandidateState),
+    updatedBy,
+    updatedAt: new Date().toISOString(),
+    urlCandidate: {
+      key: config.key,
+      state: urlCandidateState,
+    },
+  };
+}
+
 function UrlCandidateGame({
   config,
   onHome,
   onResetAll,
+  roomSessionOverride = null,
 }: {
   config: UrlCandidateGameConfig;
   onHome: () => void;
   onResetAll: () => void;
+  roomSessionOverride?: RoomSession | null;
 }) {
-  const [storedState, setState] = useStoredState<UrlCandidateState>(config.key, initialUrlCandidateState);
-  const state = { ...initialUrlCandidateState, ...storedState };
+  const storedRoomSession = useMemo(() => readRoomSession(), []);
+  const roomSession = roomSessionOverride ?? storedRoomSession;
+  const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
+  const [roomSyncError, setRoomSyncError] = useState("");
+  const roomSocketRef = useRef<Socket | null>(null);
+  const [storedState, setStoredState] = useStoredState<UrlCandidateState>(config.key, initialUrlCandidateState);
+  const supportsRoomSync = isRoomSyncableUrlCandidateKey(config.key);
+  const roomUrlCandidateState = supportsRoomSync ? parseUrlCandidateStateFromRoom(roomSnapshot, config.key) : null;
+  const isUrlCandidateRoom = Boolean(supportsRoomSync && roomSession && (!roomSnapshot || roomSnapshot.room.currentGame === config.key));
+  const activeUrlCandidateState = isUrlCandidateRoom ? (roomUrlCandidateState ?? initialUrlCandidateState) : storedState;
+  const state = { ...initialUrlCandidateState, ...activeUrlCandidateState };
+  const isRoomHost = isUrlCandidateRoom && roomSession?.participantRole === "host";
+  const canControlUrlCandidate = !isUrlCandidateRoom || (isRoomHost && Boolean(roomSnapshot));
   const promptPool = useMemo(
     () => config.prompts.filter((prompt) => state.includeAdultTopics || prompt.rating === "normal"),
     [config.prompts, state.includeAdultTopics],
@@ -1419,9 +1500,73 @@ function UrlCandidateGame({
   const normalCount = config.prompts.filter((item) => item.rating === "normal").length;
   const adultCount = config.prompts.filter((item) => item.rating === "adult").length;
 
+  function setState(nextStateOrUpdater: UrlCandidateState | ((current: UrlCandidateState) => UrlCandidateState)) {
+    if (isUrlCandidateRoom && roomSession && !roomSnapshot) {
+      setRoomSyncError("ルーム情報を読み込み中です。少し待ってから操作してください。");
+      return;
+    }
+
+    if (!isUrlCandidateRoom || !roomSession || !roomSnapshot) {
+      setStoredState(nextStateOrUpdater);
+      return;
+    }
+
+    const nextState = typeof nextStateOrUpdater === "function" ? nextStateOrUpdater(state) : nextStateOrUpdater;
+    const nextRoomState = buildUrlCandidateRoomEnvelope(config, nextState, roomSession.participantId);
+    setRoomSnapshot({
+      ...roomSnapshot,
+      room: {
+        ...roomSnapshot.room,
+        status: nextRoomState.phase === "complete" ? "complete" : "playing",
+        currentGame: config.key,
+        state: nextRoomState,
+      },
+    });
+    roomSocketRef.current?.emit("room:state:update", {
+      roomCode: roomSession.roomCode,
+      currentGame: config.key,
+      state: nextRoomState,
+    });
+  }
+
+  useEffect(() => {
+    if (!supportsRoomSync || !roomSession) return;
+    let ignore = false;
+    fetchRoomSnapshot(roomSession.roomCode)
+      .then((snapshot) => {
+        if (!ignore) setRoomSnapshot(snapshot);
+      })
+      .catch((caught) => {
+        if (!ignore) setRoomSyncError(toErrorMessage(caught));
+      });
+
+    const socket = io(API_URL, {
+      transports: ["websocket", "polling"],
+    });
+    roomSocketRef.current = socket;
+
+    socket.on("connect", () => {
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+    });
+
+    socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
+      if (nextSnapshot) setRoomSnapshot(nextSnapshot);
+    });
+
+    socket.on("room:error", (payload: { error?: string }) => {
+      setRoomSyncError(toErrorMessage(payload.error ?? "room_error"));
+    });
+
+    return () => {
+      ignore = true;
+      socket.disconnect();
+      roomSocketRef.current = null;
+    };
+  }, [roomSession, supportsRoomSync]);
+
   useEffect(() => {
     if (state.step === "play" && !prompt) {
-      setState({ ...state, step: "setup", deckPromptIds: [], deckIndex: 0, answerVisible: false });
+      setState({ ...state, step: "setup", deckPromptIds: [], deckIndex: 0, answerVisible: false, votes: {} });
     }
   }, [prompt, setState, state.step]);
 
@@ -1443,6 +1588,7 @@ function UrlCandidateGame({
       hazardIndex: createHazardIndex(),
       completedPairs: 0,
       actionLog: [],
+      votes: {},
     });
   }
 
@@ -1460,11 +1606,33 @@ function UrlCandidateGame({
       drawnCount: 0,
       hazardIndex: createHazardIndex(),
       actionLog: [],
+      votes: {},
     });
   }
 
+  const canVoteForUrlPlayer = (playerId: string) =>
+    !isUrlCandidateRoom || canControlUrlCandidate || roomSession?.participantId === playerId;
+
   return (
     <GameFrame title={config.title} subtitle={config.description} onHome={onHome} onResetAll={onResetAll}>
+      {isUrlCandidateRoom && roomSession && (
+        <section className="tool-surface room-sync-strip">
+          <div>
+            <p className="eyebrow">ルーム同期中</p>
+            <h3>
+              {roomSession.roomCode} / {roomSession.participantName}
+              {isRoomHost ? " / ホスト" : ""}
+            </h3>
+            <p className="soft-note">
+              {isRoomHost
+                ? "この端末が進行役です。参加者取り込み、次のお題、完了を同期します。"
+                : "この端末では自分の投票だけ操作できます。集計とお題の進行は同期されます。"}
+            </p>
+          </div>
+          {roomSyncError && <p className="room-message error">{roomSyncError}</p>}
+        </section>
+      )}
+
       {state.step === "setup" && (
         <section className="tool-surface">
           <div className="howto-panel">
@@ -1476,50 +1644,107 @@ function UrlCandidateGame({
             </ol>
           </div>
 
-          <PlayerSetup
-            players={state.players}
-            minPlayers={config.minPlayers}
-            maxPlayers={config.maxPlayers}
-            onChange={(players) => setState({ ...state, players })}
-          />
+          {isUrlCandidateRoom && roomSnapshot && (
+            <div className="notice-panel calm">
+              <strong>ルーム参加者を{config.title}メンバーに使えます</strong>
+              <p>参加者それぞれの端末で自分の投票をするには、ルーム参加者を取り込んでください。</p>
+              <div className="action-row">
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, false),
+                      step: "setup",
+                      deckPromptIds: [],
+                      deckIndex: 0,
+                      answerVisible: false,
+                      votes: {},
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  ホスト以外を使う
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, true),
+                      step: "setup",
+                      deckPromptIds: [],
+                      deckIndex: 0,
+                      answerVisible: false,
+                      votes: {},
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  全員を使う
+                </button>
+              </div>
+            </div>
+          )}
 
-          <ToggleSwitch
-            label="Hな話題"
-            description={
-              state.includeAdultTopics
-                ? "ON: 夜の話題・恋バナ寄りのお題も混ぜます。答えにくければスキップできます。"
-                : "OFF: 通常のお題だけで遊びます。"
-            }
-            checked={state.includeAdultTopics}
-            onChange={(includeAdultTopics) =>
-              setState({ ...state, includeAdultTopics, deckPromptIds: [], deckIndex: 0, answerVisible: false })
-            }
-          />
+          {canControlUrlCandidate ? (
+            <>
+              <PlayerSetup
+                players={state.players}
+                minPlayers={config.minPlayers}
+                maxPlayers={config.maxPlayers}
+                onChange={(players) => setState({ ...state, players, votes: {} })}
+              />
 
-          <SegmentedControl
-            label="今回の設問数"
-            options={urlCandidateQuestionCountOptions}
-            value={String(state.questionCount)}
-            onChange={(questionCount) =>
-              setState({
-                ...state,
-                questionCount: Number(questionCount) as UrlCandidateQuestionCount,
-                deckPromptIds: [],
-                deckIndex: 0,
-                answerVisible: false,
-              })
-            }
-          />
+              <ToggleSwitch
+                label="Hな話題"
+                description={
+                  state.includeAdultTopics
+                    ? "ON: 夜の話題・恋バナ寄りのお題も混ぜます。答えにくければスキップできます。"
+                    : "OFF: 通常のお題だけで遊びます。"
+                }
+                checked={state.includeAdultTopics}
+                onChange={(includeAdultTopics) =>
+                  setState({ ...state, includeAdultTopics, deckPromptIds: [], deckIndex: 0, answerVisible: false, votes: {} })
+                }
+              />
 
-          <p className="soft-note">
-            通常{normalCount}問、大人向け{adultCount}問を搭載。現在は{promptPool.length}問から
-            {selectedQuestionCount}問をランダムに使います。
-          </p>
+              <SegmentedControl
+                label="今回の設問数"
+                options={urlCandidateQuestionCountOptions}
+                value={String(state.questionCount)}
+                onChange={(questionCount) =>
+                  setState({
+                    ...state,
+                    questionCount: Number(questionCount) as UrlCandidateQuestionCount,
+                    deckPromptIds: [],
+                    deckIndex: 0,
+                    answerVisible: false,
+                    votes: {},
+                  })
+                }
+              />
 
-          {state.includeAdultTopics && (
-            <div className="notice-panel">
-              <strong>Hな話題がONです</strong>
-              <p>露骨すぎる話、個人情報、相手が嫌がる深掘りは避けます。答えにくい場合は迷わずスキップしてください。</p>
+              <p className="soft-note">
+                通常{normalCount}問、大人向け{adultCount}問を搭載。現在は{promptPool.length}問から
+                {selectedQuestionCount}問をランダムに使います。
+              </p>
+
+              {state.includeAdultTopics && (
+                <div className="notice-panel">
+                  <strong>Hな話題がONです</strong>
+                  <p>露骨すぎる話、個人情報、相手が嫌がる深掘りは避けます。答えにくい場合は迷わずスキップしてください。</p>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="howto-panel compact">
+              <h3>ホストの準備待ち</h3>
+              <p className="soft-note">ホストがお題を開始すると、この端末で自分の投票を選べます。</p>
             </div>
           )}
 
@@ -1533,11 +1758,15 @@ function UrlCandidateGame({
           </div>
 
           <div className="action-row">
-            <button className="primary-button" disabled={!canStart || selectedQuestionCount === 0} onClick={startUrlCandidateGame}>
+            <button
+              className="primary-button"
+              disabled={!canStart || selectedQuestionCount === 0 || !canControlUrlCandidate}
+              onClick={startUrlCandidateGame}
+            >
               <Play size={18} />
               はじめる
             </button>
-            <button className="secondary-button" onClick={() => setState(initialUrlCandidateState)}>
+            <button className="secondary-button" disabled={!canControlUrlCandidate} onClick={() => setState(initialUrlCandidateState)}>
               <RotateCcw size={18} />
               リセット
             </button>
@@ -1559,9 +1788,7 @@ function UrlCandidateGame({
           {prompt.options && (
             <div className="option-list">
               {prompt.options.map((option, index) => (
-                <span key={option}>
-                  {String.fromCharCode(65 + index)}. {option}
-                </span>
+                <span key={option}>{formatChoiceLabel(option, index)}</span>
               ))}
             </div>
           )}
@@ -1600,7 +1827,15 @@ function UrlCandidateGame({
             </div>
           )}
 
-          <UrlCandidateInteractionPanel config={config} prompt={prompt} state={state} setState={setState} />
+          <UrlCandidateInteractionPanel
+            config={config}
+            prompt={prompt}
+            state={state}
+            setState={setState}
+            canControl={canControlUrlCandidate}
+            canVoteForPlayer={canVoteForUrlPlayer}
+            isRoomMode={isUrlCandidateRoom}
+          />
 
           <div className="howto-panel compact">
             <h3>このゲームの進め方</h3>
@@ -1612,15 +1847,20 @@ function UrlCandidateGame({
           </div>
 
           <div className="action-row">
-            <button className="primary-button" onClick={moveToNextUrlPrompt}>
+            <button className="primary-button" disabled={!canControlUrlCandidate} onClick={moveToNextUrlPrompt}>
               {state.deckIndex + 1 >= state.deckPromptIds.length ? <Check size={18} /> : <ChevronRight size={18} />}
               {state.deckIndex + 1 >= state.deckPromptIds.length ? "完了" : "次のお題"}
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", answerVisible: false })}>
+            <button
+              className="secondary-button"
+              disabled={!canControlUrlCandidate}
+              onClick={() => setState({ ...state, step: "setup", answerVisible: false, votes: {} })}
+            >
               <Users size={18} />
               設定へ
             </button>
           </div>
+          {!canControlUrlCandidate && <p className="soft-note">次のお題へ進む操作はホスト端末で行います。</p>}
         </section>
       )}
 
@@ -1631,11 +1871,11 @@ function UrlCandidateGame({
           <h2>{state.deckPromptIds.length}問おつかれさまでした</h2>
           <p className="talk-cue">違う設問数やHな話題ON/OFFに変えると、同じゲームでも雰囲気を変えて遊べます。</p>
           <div className="action-row centered">
-            <button className="primary-button" onClick={startUrlCandidateGame}>
+            <button className="primary-button" disabled={!canControlUrlCandidate} onClick={startUrlCandidateGame}>
               <RotateCcw size={18} />
               もう一度
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup" })}>
+            <button className="secondary-button" disabled={!canControlUrlCandidate} onClick={() => setState({ ...state, step: "setup", votes: {} })}>
               <Users size={18} />
               設定へ
             </button>
@@ -1651,11 +1891,17 @@ function UrlCandidateInteractionPanel({
   prompt,
   state,
   setState,
+  canControl = true,
+  canVoteForPlayer = () => true,
+  isRoomMode = false,
 }: {
   config: UrlCandidateGameConfig;
   prompt: UrlCandidatePrompt;
   state: UrlCandidateState;
   setState: (state: UrlCandidateState) => void;
+  canControl?: boolean;
+  canVoteForPlayer?: (playerId: string) => boolean;
+  isRoomMode?: boolean;
 }) {
   const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
   const secondPlayer = state.players[(state.currentPlayerIndex + 1) % Math.max(1, state.players.length)] ?? null;
@@ -1670,6 +1916,91 @@ function UrlCandidateInteractionPanel({
 
   function rotatePlayer(message: string) {
     pushLog(message, { currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length) });
+  }
+
+  if (isRoomSyncableUrlCandidateKey(config.key) && prompt.options?.length) {
+    const voteOptions = prompt.options.slice(0, 4);
+    const tallyRows = voteOptions.map((option, index) => ({
+      option,
+      value: String(index),
+      players: state.players.filter((player) => state.votes[player.id] === String(index)),
+    }));
+    const votedPlayers = state.players.filter((player) => state.votes[player.id]);
+    const skippedPlayers = state.players.filter((player) => state.votes[player.id] === "skip");
+    const total = tallyRows.reduce((sum, row) => sum + row.players.length, 0);
+    const topCount = Math.max(0, ...tallyRows.map((row) => row.players.length));
+    const winners = topCount === 0 ? [] : tallyRows.filter((row) => row.players.length === topCount);
+    const allVoted = votedPlayers.length === state.players.length && state.players.length > 0;
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>投票同期</h3>
+          <ul className="rule-list">
+            <li>各自の端末では自分の行だけ選べます。</li>
+            <li>ホスト端末では全員分を代行入力できます。</li>
+            <li>票が出そろったら、多数派の理由と少数派の理由を1人ずつ聞きます。</li>
+          </ul>
+        </div>
+
+        <div className="vote-list">
+          {state.players.map((player) => (
+            <div className="vote-row" key={player.id}>
+              <strong>{player.name || "名前なし"}</strong>
+              <div className="vote-buttons">
+                {voteOptions.map((option, index) => (
+                  <button
+                    className={state.votes[player.id] === String(index) ? "selected-choice" : ""}
+                    disabled={!canVoteForPlayer(player.id)}
+                    key={option}
+                    type="button"
+                    onClick={() => setState({ ...state, votes: { ...state.votes, [player.id]: String(index) } })}
+                  >
+                    {formatChoiceLabel(option, index)}
+                  </button>
+                ))}
+                <button
+                  className={state.votes[player.id] === "skip" ? "selected-choice muted" : ""}
+                  disabled={!canVoteForPlayer(player.id)}
+                  type="button"
+                  onClick={() => setState({ ...state, votes: { ...state.votes, [player.id]: "skip" } })}
+                >
+                  パス
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="action-row">
+          <span className="inline-status">{votedPlayers.length}/{state.players.length} 投票済み</span>
+          {allVoted && winners.length > 0 && (
+            <span className="inline-status">多数派: {winners.map((row) => row.option).join(" / ")}</span>
+          )}
+        </div>
+
+        <div className="ranking-bars">
+          {tallyRows.map((row) => (
+            <ChoiceBar
+              count={row.players.length}
+              key={row.value}
+              label={formatChoiceLabel(row.option, Number(row.value))}
+              total={total}
+            />
+          ))}
+        </div>
+
+        {skippedPlayers.length > 0 && <p className="soft-note">パス: {skippedPlayers.map((player) => player.name).join("、")}</p>}
+
+        <div className="split-result">
+          {tallyRows.map((row, index) => (
+            <NameCluster key={row.value} title={formatChoiceLabel(row.option, index)} players={row.players} />
+          ))}
+        </div>
+
+        {isRoomMode && !canControl && <p className="soft-note">自分の投票だけ操作できます。次のお題へ進む操作はホスト端末で行います。</p>}
+      </div>
+    );
   }
 
   if (config.kind === "count-up") {
@@ -4180,9 +4511,79 @@ const initialTwoChoiceState: TwoChoiceState = {
   deckIndex: 0,
 };
 
-function TwoChoiceGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
-  const [storedState, setState] = useStoredState<TwoChoiceState>("two-choice", initialTwoChoiceState);
-  const state = { ...initialTwoChoiceState, ...storedState };
+type TwoChoiceRoomEnvelope = RoomProgressState & {
+  twoChoice?: TwoChoiceState;
+};
+
+function parseTwoChoiceStateFromRoom(snapshot: RoomSnapshot | null) {
+  if (!snapshot || snapshot.room.currentGame !== "two-choice") return null;
+  const state = snapshot.room.state && typeof snapshot.room.state === "object" ? (snapshot.room.state as Partial<TwoChoiceRoomEnvelope>) : {};
+  return state.twoChoice && typeof state.twoChoice === "object" ? ({ ...initialTwoChoiceState, ...state.twoChoice } as TwoChoiceState) : null;
+}
+
+function getTwoChoiceProgressStep(state: TwoChoiceState) {
+  const stepOrder: Record<TwoChoiceStep, number> = {
+    setup: 1,
+    vote: 2,
+    result: 3,
+    complete: 4,
+  };
+  return stepOrder[state.step] ?? 1;
+}
+
+function describeTwoChoiceProgress(state: TwoChoiceState) {
+  if (state.step === "setup") return "二択トークの設定中です";
+  if (state.step === "vote") {
+    const votedCount = state.players.filter((player) => state.votes[player.id]).length;
+    return `投票中です: ${votedCount}/${state.players.length}`;
+  }
+  if (state.step === "result") return "投票結果を表示中です";
+  return "二択トークが完了しました";
+}
+
+function buildTwoChoiceRoomEnvelope(twoChoice: TwoChoiceState, updatedBy: string | null): TwoChoiceRoomEnvelope {
+  return {
+    phase: twoChoice.step === "complete" ? "complete" : "playing",
+    gameKey: "two-choice",
+    gameTitle: findGameMeta("two-choice")?.title ?? "二択トーク",
+    step: getTwoChoiceProgressStep(twoChoice),
+    message: describeTwoChoiceProgress(twoChoice),
+    updatedBy,
+    updatedAt: new Date().toISOString(),
+    twoChoice,
+  };
+}
+
+function roomParticipantsToPlayers(snapshot: RoomSnapshot, includeHost: boolean) {
+  return snapshot.participants
+    .filter((participant) => includeHost || participant.role !== "host")
+    .map((participant) => ({
+      id: participant.id,
+      name: participant.name,
+    }));
+}
+
+function TwoChoiceGame({
+  onHome,
+  onResetAll,
+  roomSessionOverride = null,
+}: {
+  onHome: () => void;
+  onResetAll: () => void;
+  roomSessionOverride?: RoomSession | null;
+}) {
+  const storedRoomSession = useMemo(() => readRoomSession(), []);
+  const roomSession = roomSessionOverride ?? storedRoomSession;
+  const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
+  const [roomSyncError, setRoomSyncError] = useState("");
+  const roomSocketRef = useRef<Socket | null>(null);
+  const [storedState, setStoredState] = useStoredState<TwoChoiceState>("two-choice", initialTwoChoiceState);
+  const roomTwoChoiceState = parseTwoChoiceStateFromRoom(roomSnapshot);
+  const isTwoChoiceRoom = Boolean(roomSession && (!roomSnapshot || roomSnapshot.room.currentGame === "two-choice"));
+  const activeTwoChoiceState = isTwoChoiceRoom ? (roomTwoChoiceState ?? initialTwoChoiceState) : storedState;
+  const state = { ...initialTwoChoiceState, ...activeTwoChoiceState };
+  const isRoomHost = isTwoChoiceRoom && roomSession?.participantRole === "host";
+  const canControlTwoChoice = !isTwoChoiceRoom || (isRoomHost && Boolean(roomSnapshot));
   const prompt = twoChoicePrompts.find((item) => item.id === state.promptId) ?? null;
   const canStart = state.players.length >= 2 && state.players.every((player) => player.name.trim());
   const activeTwoChoiceCategory = !state.includeAdultTopics && state.category === "adult" ? "all" : state.category;
@@ -4198,6 +4599,70 @@ function TwoChoiceGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
   );
   const selectedQuestionCount = Math.min(state.questionCount, promptPool.length);
   const progressLabel = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "";
+
+  function setState(nextStateOrUpdater: TwoChoiceState | ((current: TwoChoiceState) => TwoChoiceState)) {
+    if (isTwoChoiceRoom && roomSession && !roomSnapshot) {
+      setRoomSyncError("ルーム情報を読み込み中です。少し待ってから操作してください。");
+      return;
+    }
+
+    if (!isTwoChoiceRoom || !roomSession || !roomSnapshot) {
+      setStoredState(nextStateOrUpdater);
+      return;
+    }
+
+    const nextState = typeof nextStateOrUpdater === "function" ? nextStateOrUpdater(state) : nextStateOrUpdater;
+    const nextRoomState = buildTwoChoiceRoomEnvelope(nextState, roomSession.participantId);
+    setRoomSnapshot({
+      ...roomSnapshot,
+      room: {
+        ...roomSnapshot.room,
+        status: nextRoomState.phase === "complete" ? "complete" : "playing",
+        currentGame: "two-choice",
+        state: nextRoomState,
+      },
+    });
+    roomSocketRef.current?.emit("room:state:update", {
+      roomCode: roomSession.roomCode,
+      currentGame: "two-choice",
+      state: nextRoomState,
+    });
+  }
+
+  useEffect(() => {
+    if (!roomSession) return;
+    let ignore = false;
+    fetchRoomSnapshot(roomSession.roomCode)
+      .then((snapshot) => {
+        if (!ignore) setRoomSnapshot(snapshot);
+      })
+      .catch((caught) => {
+        if (!ignore) setRoomSyncError(toErrorMessage(caught));
+      });
+
+    const socket = io(API_URL, {
+      transports: ["websocket", "polling"],
+    });
+    roomSocketRef.current = socket;
+
+    socket.on("connect", () => {
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+    });
+
+    socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
+      if (nextSnapshot) setRoomSnapshot(nextSnapshot);
+    });
+
+    socket.on("room:error", (payload: { error?: string }) => {
+      setRoomSyncError(toErrorMessage(payload.error ?? "room_error"));
+    });
+
+    return () => {
+      ignore = true;
+      socket.disconnect();
+      roomSocketRef.current = null;
+    };
+  }, [roomSession]);
 
   useEffect(() => {
     if ((state.step === "vote" || state.step === "result") && !prompt) {
@@ -4246,9 +4711,28 @@ function TwoChoiceGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
 
   const votedCount = state.players.filter((player) => state.votes[player.id]).length;
   const allVoted = votedCount === state.players.length && state.players.length > 0;
+  const canVoteForPlayer = (playerId: string) => !isTwoChoiceRoom || canControlTwoChoice || roomSession?.participantId === playerId;
 
   return (
     <GameFrame title="二択トーク" subtitle="選んだ理由を話すだけで、場がすぐ温まります。" onHome={onHome} onResetAll={onResetAll}>
+      {isTwoChoiceRoom && roomSession && (
+        <section className="tool-surface room-sync-strip">
+          <div>
+            <p className="eyebrow">ルーム同期中</p>
+            <h3>
+              {roomSession.roomCode} / {roomSession.participantName}
+              {isRoomHost ? " / ホスト" : ""}
+            </h3>
+            <p className="soft-note">
+              {isRoomHost
+                ? "この端末が進行役です。参加者取り込み、結果表示、次のお題を同期します。"
+                : "この端末では自分の投票だけ操作できます。全員の投票状況と結果は同期されます。"}
+            </p>
+          </div>
+          {roomSyncError && <p className="room-message error">{roomSyncError}</p>}
+        </section>
+      )}
+
       {state.step === "setup" && (
         <section className="tool-surface">
           <div className="howto-panel">
@@ -4261,67 +4745,125 @@ function TwoChoiceGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
               <li>正解はありません。違いを楽しみながら、軽く会話を広げるゲームです。</li>
             </ol>
           </div>
-          <PlayerSetup
-            players={state.players}
-            minPlayers={2}
-            maxPlayers={20}
-            onChange={(players) => setState({ ...state, players })}
-          />
-          <SegmentedControl
-            label="カテゴリ"
-            options={availableTwoChoiceCategories}
-            value={activeTwoChoiceCategory}
-            onChange={(category) => setState({ ...state, category, deckPromptIds: [], deckIndex: 0, promptId: null })}
-          />
-          <ToggleSwitch
-            label="Hな話題"
-            description={
-              state.includeAdultTopics
-                ? "ON: 全部に大人向けも混ぜます。カテゴリで大人向けだけも選べます。"
-                : "OFF: 軽いH寄りの恋バナや距離感の話題は出ません。"
-            }
-            checked={state.includeAdultTopics}
-            onChange={(includeAdultTopics) =>
-              setState({
-                ...state,
-                includeAdultTopics,
-                category: state.category === "adult" ? "all" : state.category,
-                deckPromptIds: [],
-                deckIndex: 0,
-                promptId: null,
-              })
-            }
-          />
-          <SegmentedControl
-            label="今回の設問数"
-            options={twoChoiceQuestionCountOptions}
-            value={String(state.questionCount)}
-            onChange={(questionCount) =>
-              setState({
-                ...state,
-                questionCount: Number(questionCount) as TwoChoiceQuestionCount,
-                deckPromptIds: [],
-                deckIndex: 0,
-                promptId: null,
-              })
-            }
-          />
-          <p className="soft-note">
-            この条件では{promptPool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。
-            Hな話題は{state.includeAdultTopics ? "ON" : "OFF"}です。
-          </p>
-          {state.includeAdultTopics && (
-            <div className="notice-panel">
-              <strong>Hな話題がONです</strong>
-              <p>軽いH寄りの恋バナや距離感の話題を含みます。苦手な人がいる場ではOFFにしてください。</p>
+
+          {isTwoChoiceRoom && roomSnapshot && (
+            <div className="notice-panel calm">
+              <strong>ルーム参加者を二択トークメンバーに使えます</strong>
+              <p>参加者それぞれの端末で自分の投票をするには、ルーム参加者を取り込んでください。</p>
+              <div className="action-row">
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, false),
+                      step: "setup",
+                      promptId: null,
+                      votes: {},
+                      deckPromptIds: [],
+                      deckIndex: 0,
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  ホスト以外を使う
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, true),
+                      step: "setup",
+                      promptId: null,
+                      votes: {},
+                      deckPromptIds: [],
+                      deckIndex: 0,
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  全員を使う
+                </button>
+              </div>
             </div>
           )}
+
+          {canControlTwoChoice ? (
+            <>
+              <PlayerSetup
+                players={state.players}
+                minPlayers={2}
+                maxPlayers={20}
+                onChange={(players) => setState({ ...state, players })}
+              />
+              <SegmentedControl
+                label="カテゴリ"
+                options={availableTwoChoiceCategories}
+                value={activeTwoChoiceCategory}
+                onChange={(category) => setState({ ...state, category, deckPromptIds: [], deckIndex: 0, promptId: null })}
+              />
+              <ToggleSwitch
+                label="Hな話題"
+                description={
+                  state.includeAdultTopics
+                    ? "ON: 全部に大人向けも混ぜます。カテゴリで大人向けだけも選べます。"
+                    : "OFF: 軽いH寄りの恋バナや距離感の話題は出ません。"
+                }
+                checked={state.includeAdultTopics}
+                onChange={(includeAdultTopics) =>
+                  setState({
+                    ...state,
+                    includeAdultTopics,
+                    category: state.category === "adult" ? "all" : state.category,
+                    deckPromptIds: [],
+                    deckIndex: 0,
+                    promptId: null,
+                  })
+                }
+              />
+              <SegmentedControl
+                label="今回の設問数"
+                options={twoChoiceQuestionCountOptions}
+                value={String(state.questionCount)}
+                onChange={(questionCount) =>
+                  setState({
+                    ...state,
+                    questionCount: Number(questionCount) as TwoChoiceQuestionCount,
+                    deckPromptIds: [],
+                    deckIndex: 0,
+                    promptId: null,
+                  })
+                }
+              />
+              <p className="soft-note">
+                この条件では{promptPool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。
+                Hな話題は{state.includeAdultTopics ? "ON" : "OFF"}です。
+              </p>
+              {state.includeAdultTopics && (
+                <div className="notice-panel">
+                  <strong>Hな話題がONです</strong>
+                  <p>軽いH寄りの恋バナや距離感の話題を含みます。苦手な人がいる場ではOFFにしてください。</p>
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="howto-panel compact">
+              <h3>ホストの準備待ち</h3>
+              <p className="soft-note">ホストがお題を開始すると、この端末で自分の投票を選べます。</p>
+            </div>
+          )}
+
           <div className="action-row">
-            <button className="primary-button" disabled={!canStart || selectedQuestionCount === 0} onClick={startTwoChoiceRound}>
+            <button className="primary-button" disabled={!canStart || selectedQuestionCount === 0 || !canControlTwoChoice} onClick={startTwoChoiceRound}>
               <Play size={18} />
               はじめる
             </button>
-            <button className="secondary-button" onClick={() => setState(initialTwoChoiceState)}>
+            <button className="secondary-button" disabled={!canControlTwoChoice} onClick={() => setState(initialTwoChoiceState)}>
               <RotateCcw size={18} />
               リセット
             </button>
@@ -4355,18 +4897,21 @@ function TwoChoiceGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
                 <div className="vote-buttons">
                   <button
                     className={state.votes[player.id] === "A" ? "selected-choice" : ""}
+                    disabled={!canVoteForPlayer(player.id)}
                     onClick={() => updateVote(player.id, "A")}
                   >
                     {prompt.optionA}
                   </button>
                   <button
                     className={state.votes[player.id] === "B" ? "selected-choice" : ""}
+                    disabled={!canVoteForPlayer(player.id)}
                     onClick={() => updateVote(player.id, "B")}
                   >
                     {prompt.optionB}
                   </button>
                   <button
                     className={state.votes[player.id] === "skip" ? "selected-choice muted" : ""}
+                    disabled={!canVoteForPlayer(player.id)}
                     onClick={() => updateVote(player.id, "skip")}
                   >
                     パス
@@ -4377,12 +4922,13 @@ function TwoChoiceGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
           </div>
 
           <div className="action-row">
-            <button className="primary-button" disabled={!allVoted} onClick={() => setState({ ...state, step: "result" })}>
+            <button className="primary-button" disabled={!allVoted || !canControlTwoChoice} onClick={() => setState({ ...state, step: "result" })}>
               <ChevronRight size={18} />
               結果を見る
             </button>
             <span className="inline-status">{votedCount}/{state.players.length} 投票済み</span>
           </div>
+          {!canControlTwoChoice && <p className="soft-note">自分の投票だけ操作できます。結果表示はホスト端末で行います。</p>}
         </section>
       )}
 
@@ -4413,15 +4959,16 @@ function TwoChoiceGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
             </ul>
           </div>
           <div className="action-row">
-            <button className="primary-button" onClick={moveToNextPrompt}>
+            <button className="primary-button" disabled={!canControlTwoChoice} onClick={moveToNextPrompt}>
               {state.deckIndex + 1 >= state.deckPromptIds.length ? <Check size={18} /> : <ChevronRight size={18} />}
               {state.deckIndex + 1 >= state.deckPromptIds.length ? "完了" : "次のお題"}
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", votes: {} })}>
+            <button className="secondary-button" disabled={!canControlTwoChoice} onClick={() => setState({ ...state, step: "setup", votes: {} })}>
               <Users size={18} />
               参加者を変える
             </button>
           </div>
+          {!canControlTwoChoice && <p className="soft-note">次のお題へ進む操作はホスト端末で行います。</p>}
         </section>
       )}
 
@@ -4432,11 +4979,11 @@ function TwoChoiceGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
           <h2>{state.deckPromptIds.length}問おつかれさまでした</h2>
           <p className="talk-cue">続ける場合は、同じ設定で新しい設問をシャッフルできます。</p>
           <div className="action-row centered">
-            <button className="primary-button" onClick={startTwoChoiceRound}>
+            <button className="primary-button" disabled={!canControlTwoChoice} onClick={startTwoChoiceRound}>
               <RotateCcw size={18} />
               もう一度
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", votes: {}, promptId: null })}>
+            <button className="secondary-button" disabled={!canControlTwoChoice} onClick={() => setState({ ...state, step: "setup", votes: {}, promptId: null })}>
               <Users size={18} />
               設定へ
             </button>
