@@ -599,7 +599,7 @@ function App() {
   }
 
   if (activeGame === "anonymous-box") {
-    return <AnonymousQuestionBoxGame onHome={goHome} onResetAll={resetAllGames} />;
+    return <AnonymousQuestionBoxGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
   }
 
   if (activeGame === "werewolf-game") {
@@ -4410,10 +4410,78 @@ const initialAnonymousQuestionState: AnonymousQuestionState = {
   deckIndex: 0,
 };
 
-function AnonymousQuestionBoxGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
-  const [storedState, setState] = useStoredState<AnonymousQuestionState>("anonymous-box", initialAnonymousQuestionState);
+type AnonymousQuestionRoomEnvelope = RoomProgressState & {
+  anonymousQuestion?: AnonymousQuestionState;
+};
+
+function parseAnonymousQuestionStateFromRoom(snapshot: RoomSnapshot | null) {
+  if (!snapshot || snapshot.room.currentGame !== "anonymous-box") return null;
+  const state =
+    snapshot.room.state && typeof snapshot.room.state === "object"
+      ? (snapshot.room.state as Partial<AnonymousQuestionRoomEnvelope>)
+      : {};
+  return state.anonymousQuestion && typeof state.anonymousQuestion === "object"
+    ? ({ ...initialAnonymousQuestionState, ...state.anonymousQuestion } as AnonymousQuestionState)
+    : null;
+}
+
+function getAnonymousQuestionProgressStep(state: AnonymousQuestionState) {
+  const stepOrder: Record<AnonymousQuestionStep, number> = {
+    setup: 1,
+    question: 2,
+    complete: 3,
+  };
+  return stepOrder[state.step] ?? 1;
+}
+
+function describeAnonymousQuestionProgress(state: AnonymousQuestionState) {
+  if (state.step === "setup") return `匿名質問箱の準備中です: 投稿${state.customQuestions.length}件`;
+  if (state.step === "question") {
+    const current = state.deckQuestionIds.length > 0 ? `${state.deckIndex + 1}/${state.deckQuestionIds.length}` : "0/0";
+    return `質問を開封中です: ${current}`;
+  }
+  return "匿名質問箱が完了しました";
+}
+
+function buildAnonymousQuestionRoomEnvelope(
+  anonymousQuestion: AnonymousQuestionState,
+  updatedBy: string | null,
+): AnonymousQuestionRoomEnvelope {
+  return {
+    phase: anonymousQuestion.step === "complete" ? "complete" : "playing",
+    gameKey: "anonymous-box",
+    gameTitle: findGameMeta("anonymous-box")?.title ?? "匿名質問箱",
+    step: getAnonymousQuestionProgressStep(anonymousQuestion),
+    message: describeAnonymousQuestionProgress(anonymousQuestion),
+    updatedBy,
+    updatedAt: new Date().toISOString(),
+    anonymousQuestion,
+  };
+}
+
+function AnonymousQuestionBoxGame({
+  onHome,
+  onResetAll,
+  roomSessionOverride = null,
+}: {
+  onHome: () => void;
+  onResetAll: () => void;
+  roomSessionOverride?: RoomSession | null;
+}) {
+  const storedRoomSession = useMemo(() => readRoomSession(), []);
+  const roomSession = roomSessionOverride ?? storedRoomSession;
+  const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
+  const [roomSyncError, setRoomSyncError] = useState("");
+  const roomSocketRef = useRef<Socket | null>(null);
+  const [storedState, setStoredState] = useStoredState<AnonymousQuestionState>("anonymous-box", initialAnonymousQuestionState);
   const [draftQuestion, setDraftQuestion] = useState("");
-  const state = { ...initialAnonymousQuestionState, ...storedState };
+  const roomAnonymousQuestionState = parseAnonymousQuestionStateFromRoom(roomSnapshot);
+  const isAnonymousQuestionRoom = Boolean(roomSession && (!roomSnapshot || roomSnapshot.room.currentGame === "anonymous-box"));
+  const activeAnonymousQuestionState = isAnonymousQuestionRoom ? (roomAnonymousQuestionState ?? initialAnonymousQuestionState) : storedState;
+  const state = { ...initialAnonymousQuestionState, ...activeAnonymousQuestionState };
+  const isRoomHost = isAnonymousQuestionRoom && roomSession?.participantRole === "host";
+  const canControlAnonymousQuestion = !isAnonymousQuestionRoom || (isRoomHost && Boolean(roomSnapshot));
+  const canSubmitAnonymousQuestion = !isAnonymousQuestionRoom || Boolean(roomSnapshot);
   const questionPool = useMemo(
     () =>
       state.category === "all"
@@ -4429,21 +4497,100 @@ function AnonymousQuestionBoxGame({ onHome, onResetAll }: { onHome: () => void; 
     : anonymousQuestionPrompts.find((item) => `template:${item.id}` === currentQuestionId)?.question;
   const progressLabel = state.deckQuestionIds.length > 0 ? `${state.deckIndex + 1}/${state.deckQuestionIds.length}` : "";
 
+  function setState(nextStateOrUpdater: AnonymousQuestionState | ((current: AnonymousQuestionState) => AnonymousQuestionState)) {
+    if (isAnonymousQuestionRoom && roomSession && !roomSnapshot) {
+      setRoomSyncError("ルーム情報を読み込み中です。少し待ってから操作してください。");
+      return;
+    }
+
+    if (!isAnonymousQuestionRoom || !roomSession || !roomSnapshot) {
+      setStoredState(nextStateOrUpdater);
+      return;
+    }
+
+    const nextState = typeof nextStateOrUpdater === "function" ? nextStateOrUpdater(state) : nextStateOrUpdater;
+    const nextRoomState = buildAnonymousQuestionRoomEnvelope(nextState, roomSession.participantId);
+    setRoomSnapshot({
+      ...roomSnapshot,
+      room: {
+        ...roomSnapshot.room,
+        status: nextRoomState.phase === "complete" ? "complete" : "playing",
+        currentGame: "anonymous-box",
+        state: nextRoomState,
+      },
+    });
+    roomSocketRef.current?.emit("room:state:update", {
+      roomCode: roomSession.roomCode,
+      currentGame: "anonymous-box",
+      state: nextRoomState,
+    });
+  }
+
+  useEffect(() => {
+    if (!roomSession) return;
+    let ignore = false;
+    fetchRoomSnapshot(roomSession.roomCode)
+      .then((snapshot) => {
+        if (!ignore) setRoomSnapshot(snapshot);
+      })
+      .catch((caught) => {
+        if (!ignore) setRoomSyncError(toErrorMessage(caught));
+      });
+
+    const socket = io(API_URL, {
+      transports: ["websocket", "polling"],
+    });
+    roomSocketRef.current = socket;
+
+    socket.on("connect", () => {
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+    });
+
+    socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
+      if (nextSnapshot) setRoomSnapshot(nextSnapshot);
+    });
+
+    socket.on("room:error", (payload: { error?: string }) => {
+      setRoomSyncError(toErrorMessage(payload.error ?? "room_error"));
+    });
+
+    return () => {
+      ignore = true;
+      socket.disconnect();
+      roomSocketRef.current = null;
+    };
+  }, [roomSession]);
+
+  useEffect(() => {
+    if (state.step === "question" && !currentQuestion) {
+      setState({ ...state, step: "setup", deckQuestionIds: [], deckIndex: 0 });
+    }
+  }, [currentQuestion, setState, state.step]);
+
   function addCustomQuestion() {
     const text = draftQuestion.trim();
-    if (!text) return;
+    if (!text || !canSubmitAnonymousQuestion) return;
     setState({
       ...state,
       customQuestions: [...state.customQuestions, { id: createId("question"), text }],
+      deckQuestionIds: [],
+      deckIndex: 0,
     });
     setDraftQuestion("");
   }
 
   function removeCustomQuestion(id: string) {
-    setState({ ...state, customQuestions: state.customQuestions.filter((question) => question.id !== id) });
+    if (!canControlAnonymousQuestion) return;
+    setState({
+      ...state,
+      customQuestions: state.customQuestions.filter((question) => question.id !== id),
+      deckQuestionIds: [],
+      deckIndex: 0,
+    });
   }
 
   function startAnonymousBox() {
+    if (!canControlAnonymousQuestion) return;
     const customIds = state.customQuestions.map((question) => `custom:${question.id}`);
     const templateLimit = Math.max(0, selectedQuestionCount - customIds.length);
     const templateIds = shuffle(questionPool)
@@ -4454,6 +4601,7 @@ function AnonymousQuestionBoxGame({ onHome, onResetAll }: { onHome: () => void; 
   }
 
   function moveToNextAnonymousQuestion() {
+    if (!canControlAnonymousQuestion) return;
     const nextIndex = state.deckIndex + 1;
     if (nextIndex >= state.deckQuestionIds.length) {
       setState({ ...state, step: "complete" });
@@ -4469,6 +4617,24 @@ function AnonymousQuestionBoxGame({ onHome, onResetAll }: { onHome: () => void; 
       onHome={onHome}
       onResetAll={onResetAll}
     >
+      {isAnonymousQuestionRoom && roomSession && (
+        <section className="tool-surface room-sync-strip">
+          <div>
+            <p className="eyebrow">ルーム同期中</p>
+            <h3>
+              {roomSession.roomCode} / {roomSession.participantName}
+              {isRoomHost ? " / ホスト" : ""}
+            </h3>
+            <p className="soft-note">
+              {isRoomHost
+                ? "この端末が進行役です。参加者取り込み、質問開封、次の質問を同期します。"
+                : "この端末では匿名質問を投稿できます。質問の開封と進行はホスト端末で行います。"}
+            </p>
+          </div>
+          {roomSyncError && <p className="room-message error">{roomSyncError}</p>}
+        </section>
+      )}
+
       {state.step === "setup" && (
         <section className="tool-surface">
           <div className="howto-panel">
@@ -4481,36 +4647,90 @@ function AnonymousQuestionBoxGame({ onHome, onResetAll }: { onHome: () => void; 
               <li>投稿者探しはせず、答えやすい範囲で会話を楽しみます。</li>
             </ol>
           </div>
-          <PlayerSetup
-            players={state.players}
-            minPlayers={2}
-            maxPlayers={20}
-            onChange={(players) => setState({ ...state, players })}
-          />
-          <SegmentedControl
-            label="テンプレートカテゴリ"
-            options={anonymousQuestionCategories}
-            value={state.category}
-            onChange={(category) => setState({ ...state, category, deckQuestionIds: [], deckIndex: 0 })}
-          />
-          <SegmentedControl
-            label="今回の質問数"
-            options={anonymousQuestionCountOptions}
-            value={String(state.questionCount)}
-            onChange={(questionCount) =>
-              setState({
-                ...state,
-                questionCount: Number(questionCount) as AnonymousQuestionCount,
-                deckQuestionIds: [],
-                deckIndex: 0,
-              })
-            }
-          />
+
+          {isAnonymousQuestionRoom && roomSnapshot && (
+            <div className="notice-panel calm">
+              <strong>ルーム参加者を匿名質問箱メンバーに使えます</strong>
+              <p>参加者一覧を取り込むと、ルーム内の人数で開始条件を満たせます。投稿者名は質問には保存しません。</p>
+              <div className="action-row">
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, false),
+                      step: "setup",
+                      deckQuestionIds: [],
+                      deckIndex: 0,
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  ホスト以外を使う
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, true),
+                      step: "setup",
+                      deckQuestionIds: [],
+                      deckIndex: 0,
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  全員を使う
+                </button>
+              </div>
+            </div>
+          )}
+
+          {canControlAnonymousQuestion ? (
+            <>
+              <PlayerSetup
+                players={state.players}
+                minPlayers={2}
+                maxPlayers={20}
+                onChange={(players) => setState({ ...state, players, deckQuestionIds: [], deckIndex: 0 })}
+              />
+              <SegmentedControl
+                label="テンプレートカテゴリ"
+                options={anonymousQuestionCategories}
+                value={state.category}
+                onChange={(category) => setState({ ...state, category, deckQuestionIds: [], deckIndex: 0 })}
+              />
+              <SegmentedControl
+                label="今回の質問数"
+                options={anonymousQuestionCountOptions}
+                value={String(state.questionCount)}
+                onChange={(questionCount) =>
+                  setState({
+                    ...state,
+                    questionCount: Number(questionCount) as AnonymousQuestionCount,
+                    deckQuestionIds: [],
+                    deckIndex: 0,
+                  })
+                }
+              />
+            </>
+          ) : (
+            <div className="howto-panel compact">
+              <h3>ホストの準備待ち</h3>
+              <p className="soft-note">ホストが開始するまで、この端末から匿名質問を投稿できます。</p>
+            </div>
+          )}
+
           <div className="setup-block">
             <div className="setup-heading">
               <div>
                 <h3>匿名で質問を追加</h3>
-                <p>投稿者が分からないよう、入力後はすぐ追加します。</p>
+                <p>投稿者が分からないよう、名前は保存せずに質問だけ追加します。</p>
               </div>
               <span className="count-badge">{state.customQuestions.length}件</span>
             </div>
@@ -4527,12 +4747,12 @@ function AnonymousQuestionBoxGame({ onHome, onResetAll }: { onHome: () => void; 
                 placeholder="答えやすい質問を書く"
                 maxLength={80}
               />
-              <button className="primary-button" disabled={!draftQuestion.trim()} type="submit">
+              <button className="primary-button" disabled={!draftQuestion.trim() || !canSubmitAnonymousQuestion} type="submit">
                 <Plus size={18} />
                 追加
               </button>
             </form>
-            {state.customQuestions.length > 0 && (
+            {state.customQuestions.length > 0 && canControlAnonymousQuestion && (
               <div className="custom-question-list">
                 {state.customQuestions.map((question) => (
                   <div className="custom-question-row" key={question.id}>
@@ -4545,6 +4765,9 @@ function AnonymousQuestionBoxGame({ onHome, onResetAll }: { onHome: () => void; 
                 ))}
               </div>
             )}
+            {state.customQuestions.length > 0 && !canControlAnonymousQuestion && (
+              <p className="soft-note">投稿済みの質問はホストが確認します。内容から投稿者を当てにいかない前提で遊びます。</p>
+            )}
           </div>
           <p className="soft-note">
             テンプレートは{questionPool.length}問、追加質問は{state.customQuestions.length}問です。今回は最大
@@ -4555,11 +4778,11 @@ function AnonymousQuestionBoxGame({ onHome, onResetAll }: { onHome: () => void; 
             <p>個人攻撃、暴露、容姿いじり、答えにくい恋愛・収入・家族事情は避けます。困る質問は読まずにスキップできます。</p>
           </div>
           <div className="action-row">
-            <button className="primary-button" disabled={!canStart} onClick={startAnonymousBox}>
+            <button className="primary-button" disabled={!canStart || !canControlAnonymousQuestion} onClick={startAnonymousBox}>
               <Play size={18} />
               はじめる
             </button>
-            <button className="secondary-button" onClick={() => setState(initialAnonymousQuestionState)}>
+            <button className="secondary-button" disabled={!canControlAnonymousQuestion} onClick={() => setState(initialAnonymousQuestionState)}>
               <RotateCcw size={18} />
               リセット
             </button>
@@ -4583,15 +4806,16 @@ function AnonymousQuestionBoxGame({ onHome, onResetAll }: { onHome: () => void; 
             </ul>
           </div>
           <div className="action-row">
-            <button className="primary-button" onClick={moveToNextAnonymousQuestion}>
+            <button className="primary-button" disabled={!canControlAnonymousQuestion} onClick={moveToNextAnonymousQuestion}>
               {state.deckIndex + 1 >= state.deckQuestionIds.length ? <Check size={18} /> : <ChevronRight size={18} />}
               {state.deckIndex + 1 >= state.deckQuestionIds.length ? "完了" : "次の質問"}
             </button>
-            <button className="secondary-button" onClick={moveToNextAnonymousQuestion}>
+            <button className="secondary-button" disabled={!canControlAnonymousQuestion} onClick={moveToNextAnonymousQuestion}>
               <ChevronRight size={18} />
               スキップ
             </button>
           </div>
+          {!canControlAnonymousQuestion && <p className="soft-note">質問を進める操作はホスト端末で行います。</p>}
         </section>
       )}
 
@@ -4602,15 +4826,16 @@ function AnonymousQuestionBoxGame({ onHome, onResetAll }: { onHome: () => void; 
           <h2>{state.deckQuestionIds.length}問おつかれさまでした</h2>
           <p className="talk-cue">答えやすかった質問をもう少し深掘りするか、カテゴリを変えて続けられます。</p>
           <div className="action-row centered">
-            <button className="primary-button" onClick={startAnonymousBox}>
+            <button className="primary-button" disabled={!canControlAnonymousQuestion} onClick={startAnonymousBox}>
               <RotateCcw size={18} />
               もう一度
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup" })}>
+            <button className="secondary-button" disabled={!canControlAnonymousQuestion} onClick={() => setState({ ...state, step: "setup" })}>
               <Users size={18} />
               設定へ
             </button>
           </div>
+          {!canControlAnonymousQuestion && <p className="soft-note">再開や設定変更はホスト端末で行います。</p>}
         </section>
       )}
     </GameFrame>
