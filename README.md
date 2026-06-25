@@ -139,6 +139,15 @@ Docker、DB、WebSocketを使う多人数ルーム参加版は、別ブランチ
 - 参加者画面へのリアルタイム同期
 - 人狼、ワードウルフ、二択トークから順に対応
 
+Docker版の初期ファイルは `docker-room` ブランチに用意しています。
+ローカルでは次のコマンドで、Reactフロント、API、PostgreSQL、Redisをまとめて起動できます。
+
+```bash
+docker compose up --build
+```
+
+詳しくは [Docker / ルーム版セットアップ](docs/docker-room-setup.md) を参照してください。
+
 ## ローカル起動
 
 ```bash
