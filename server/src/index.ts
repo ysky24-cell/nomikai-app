@@ -558,6 +558,16 @@ function validateParticipantScopedStateChange(
     case "arm-wrestling-tournament":
       if (progress.phaseOrStepChanged) return "host_required";
       return validateUrlCandidateTournamentChange(currentStateValue, nextStateValue, activeGame, requesterId);
+    case "yamanote":
+      if (progress.phaseOrStepChanged) return "host_required";
+      return validateYamanoteParticipantChange(currentStateValue, nextStateValue, requesterId);
+    case "party-pack":
+      if (progress.phaseOrStepChanged) return "host_required";
+      return validatePartyPackParticipantChange(currentStateValue, nextStateValue, requesterId);
+    case "johari-window":
+      return validateJohariParticipantChange(currentStateValue, nextStateValue, requesterId, progress);
+    case "turtle-soup":
+      return validateTurtleSoupParticipantChange(currentStateValue, nextStateValue, requesterId, progress);
     case "anonymous-box":
       if (progress.phaseOrStepChanged) return "host_required";
       return validateAnonymousQuestionSubmission(currentStateValue, nextStateValue);
@@ -1532,6 +1542,377 @@ function validateSingleOwnedNumberDelta(
   if (nextNumber === null || nextNumber < 0) return false;
   const delta = nextNumber - currentNumber;
   return Number.isInteger(delta) && delta >= minDelta && delta <= maxDelta && delta !== 0;
+}
+
+function validateYamanoteParticipantChange(currentStateValue: unknown, nextStateValue: unknown, requesterId: string) {
+  const change = readSingleBranchChange(currentStateValue, nextStateValue, "yamanote");
+  if ("error" in change) return change.error;
+  if (change.currentBranch.step !== "play" || change.nextBranch.step !== "play") return "host_required";
+
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(change.currentBranch);
+  if (requesterId !== currentPlayerId) return "participant_field_forbidden";
+  const changedKeys = getChangedKeys(change.currentBranch, change.nextBranch);
+
+  if (isOnlyChangedKeys(changedKeys, ["currentPlayerIndex"])) {
+    return validateAdvancedPlayerIndex(change.currentBranch, change.nextBranch, 1) ? null : "participant_field_forbidden";
+  }
+
+  if (isOnlyChangedKeys(changedKeys, ["currentPlayerIndex", "missCounts"])) {
+    return validateAdvancedPlayerIndex(change.currentBranch, change.nextBranch, 1) &&
+      validateScoreIncrement(change.currentBranch.missCounts, change.nextBranch.missCounts, requesterId)
+      ? null
+      : "participant_field_forbidden";
+  }
+
+  if (isOnlyChangedKeys(changedKeys, ["currentPlayerIndex", "answerLog"])) {
+    return validateAdvancedPlayerIndex(change.currentBranch, change.nextBranch, 1) &&
+      validateYamanoteAnswerAppend(change.currentBranch.answerLog, change.nextBranch.answerLog, requesterId)
+      ? null
+      : "participant_field_forbidden";
+  }
+
+  return "participant_field_forbidden";
+}
+
+function validatePartyPackParticipantChange(currentStateValue: unknown, nextStateValue: unknown, requesterId: string) {
+  const change = readSingleBranchChange(currentStateValue, nextStateValue, "partyPack");
+  if ("error" in change) return change.error;
+  if (change.currentBranch.step !== "prompt" || change.nextBranch.step !== "prompt") return "host_required";
+  if (change.currentBranch.promptId !== change.nextBranch.promptId) return "host_required";
+
+  const mode = readPartyPackPromptMode(change.currentBranch.promptId);
+  if (!mode) return "participant_field_forbidden";
+
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(change.currentBranch);
+  const changedKeys = getChangedKeys(change.currentBranch, change.nextBranch);
+  if (
+    requesterId === currentPlayerId &&
+    partyPackParticipantRevealModes.has(mode) &&
+    isOnlyChangedKeys(changedKeys, ["answerVisible"]) &&
+    typeof change.nextBranch.answerVisible === "boolean"
+  ) {
+    return null;
+  }
+
+  switch (mode) {
+    case "majority":
+      if (change.currentBranch.answerVisible === true || change.nextBranch.answerVisible === true) return "participant_field_forbidden";
+      return validateOwnedStateMaps(change.currentBranch, change.nextBranch, requesterId, ["votes"]);
+    case "yamanote":
+    case "reverse-word":
+    case "loanword-ban":
+      if (requesterId !== currentPlayerId) return "participant_field_forbidden";
+      return validateUrlCandidateTurnRecord(change.currentBranch, change.nextBranch, requesterId) ? null : "participant_field_forbidden";
+    case "truth-lie":
+      return validateTruthLieBranchChange(change.currentBranch, change.nextBranch, requesterId, "truthLieAnswer");
+    case "typing":
+      return validateTypingBranchChange(change.currentBranch, change.nextBranch, requesterId);
+    case "memory-drawing":
+      return validateMemoryDrawingBranchChange(change.currentBranch, change.nextBranch, requesterId);
+    case "value-meter":
+      if (change.currentBranch.answerVisible === true || change.nextBranch.answerVisible === true) return "participant_field_forbidden";
+      return validateOwnedStateMaps(change.currentBranch, change.nextBranch, requesterId, ["guesses", "votes"]);
+    case "acting":
+      return validateActingBranchChange(change.currentBranch, change.nextBranch, requesterId, "actingEmotion");
+    case "hint-quiz":
+      return validateGuessBranchChange(change.currentBranch, change.nextBranch, requesterId);
+    default:
+      return "participant_field_forbidden";
+  }
+}
+
+function validateJohariParticipantChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  requesterId: string,
+  progress: ParticipantProgressChange,
+) {
+  const change = readSingleBranchChange(currentStateValue, nextStateValue, "johari");
+  if ("error" in change) return change.error;
+  const currentStep = readString(change.currentBranch.step);
+  const nextStep = readString(change.nextBranch.step);
+  if (!nextStep || !validateProgressForBranchStep(progress.next, nextStep, { setup: 1, self: 2, peer: 3, result: 4, complete: 5 })) {
+    return "host_required";
+  }
+
+  if (currentStep === "self" && nextStep === "self") {
+    const targetId = getIndexedPlayerId(change.currentBranch, "targetIndex");
+    if (requesterId !== targetId) return "participant_field_forbidden";
+    const changedKeys = getChangedKeys(change.currentBranch, change.nextBranch);
+    return isOnlyChangedKeys(changedKeys, ["selfWordIds"]) && validateWordSelection(change.nextBranch.selfWordIds, change.currentBranch.deckWordIds)
+      ? null
+      : "participant_field_forbidden";
+  }
+
+  if (currentStep === "self" && nextStep === "peer") {
+    const targetId = getIndexedPlayerId(change.currentBranch, "targetIndex");
+    if (requesterId !== targetId) return "participant_field_forbidden";
+    const expectedBranch = { ...change.currentBranch, step: "peer", peerIndex: 0 };
+    return isDeepEqual(change.nextBranch, expectedBranch) ? null : "participant_field_forbidden";
+  }
+
+  if (currentStep === "peer" && nextStep === "peer") {
+    const currentPeerId = getJohariCurrentPeerId(change.currentBranch);
+    if (requesterId !== currentPeerId) return "participant_field_forbidden";
+    const changedKeys = getChangedKeys(change.currentBranch, change.nextBranch);
+    if (isOnlyChangedKeys(changedKeys, ["peerSelections"])) {
+      return validateOwnedWordSelectionMap(change.currentBranch.peerSelections, change.nextBranch.peerSelections, requesterId, change.currentBranch.deckWordIds)
+        ? null
+        : "participant_field_forbidden";
+    }
+    const currentPeerIndex = readNonnegativeInteger(change.currentBranch.peerIndex);
+    const nextPeerIndex = readNonnegativeInteger(change.nextBranch.peerIndex);
+    if (isOnlyChangedKeys(changedKeys, ["peerIndex"]) && currentPeerIndex !== null && nextPeerIndex === currentPeerIndex + 1) {
+      return null;
+    }
+  }
+
+  if (currentStep === "peer" && nextStep === "result") {
+    const currentPeerId = getJohariCurrentPeerId(change.currentBranch);
+    if (requesterId !== currentPeerId) return "participant_field_forbidden";
+    const expectedBranch = { ...change.currentBranch, step: "result" };
+    return isDeepEqual(change.nextBranch, expectedBranch) ? null : "participant_field_forbidden";
+  }
+
+  return "participant_field_forbidden";
+}
+
+function validateTurtleSoupParticipantChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  requesterId: string,
+  progress: ParticipantProgressChange,
+) {
+  const change = readSingleBranchChange(currentStateValue, nextStateValue, "turtleSoup");
+  if ("error" in change) return change.error;
+  if (change.currentBranch.step !== "play") return "host_required";
+
+  const facilitatorId = getTurtleSoupFacilitatorId(change.currentBranch);
+  if (requesterId !== facilitatorId) return "participant_field_forbidden";
+
+  const nextStep = readString(change.nextBranch.step);
+  if (!nextStep || !validateProgressForBranchStep(progress.next, nextStep, { setup: 1, play: 2, complete: 3 })) {
+    return "host_required";
+  }
+
+  const changedKeys = getChangedKeys(change.currentBranch, change.nextBranch);
+  if (change.nextBranch.step === "play") {
+    if (isOnlyChangedKeys(changedKeys, ["questionLog"])) {
+      return validateTurtleQuestionLogAppend(change.currentBranch.questionLog, change.nextBranch.questionLog)
+        ? null
+        : "participant_field_forbidden";
+    }
+    if (isOnlyChangedKeys(changedKeys, ["hintLevel"])) {
+      const currentHintLevel = readNonnegativeInteger(change.currentBranch.hintLevel);
+      const nextHintLevel = readNonnegativeInteger(change.nextBranch.hintLevel);
+      return currentHintLevel !== null && nextHintLevel === currentHintLevel + 1 ? null : "participant_field_forbidden";
+    }
+    if (isOnlyChangedKeys(changedKeys, ["answerVisible"]) && typeof change.nextBranch.answerVisible === "boolean") {
+      return null;
+    }
+    if (validateTurtleNextCaseChange(change.currentBranch, change.nextBranch, false)) {
+      return null;
+    }
+  }
+
+  if (change.nextBranch.step === "complete" && validateTurtleNextCaseChange(change.currentBranch, change.nextBranch, true)) {
+    return null;
+  }
+
+  return "participant_field_forbidden";
+}
+
+function validateYamanoteAnswerAppend(currentValue: unknown, nextValue: unknown, requesterId: string) {
+  const currentLog = readRecordArray(currentValue);
+  const nextLog = readRecordArray(nextValue);
+  if (nextLog.length !== currentLog.length + 1) return false;
+  if (!currentLog.every((item, index) => isDeepEqual(item, nextLog[index]))) return false;
+
+  const added = nextLog[nextLog.length - 1];
+  const answer = readString(added.answer);
+  if (readString(added.id) === null || readString(added.playerId) !== requesterId || readString(added.playerName) === null || !answer) return false;
+
+  const currentAnswers = new Set(
+    currentLog
+      .map((item) => readString(item.answer)?.toLowerCase())
+      .filter((answer): answer is string => typeof answer === "string"),
+  );
+  return !currentAnswers.has(answer.toLowerCase());
+}
+
+const partyPackPromptModes = new Set([
+  "yamanote",
+  "majority",
+  "truth-lie",
+  "reverse-word",
+  "loanword-ban",
+  "typing",
+  "memory-drawing",
+  "value-meter",
+  "acting",
+  "hint-quiz",
+]);
+
+const partyPackParticipantRevealModes = new Set(["truth-lie", "typing", "acting", "hint-quiz"]);
+
+function readPartyPackPromptMode(value: unknown) {
+  const promptId = readString(value);
+  if (!promptId) return null;
+  const mode = promptId.replace(/-\d+$/, "");
+  return partyPackPromptModes.has(mode) ? mode : null;
+}
+
+function validateTruthLieBranchChange(currentBranch: Record<string, unknown>, nextBranch: Record<string, unknown>, requesterId: string, answerKey: string) {
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(currentBranch);
+  const changedKeys = getChangedKeys(currentBranch, nextBranch);
+  if (requesterId !== currentPlayerId && isOnlyChangedKeys(changedKeys, ["votes"])) {
+    return validateOwnedStateMaps(currentBranch, nextBranch, requesterId, ["votes"]);
+  }
+  if (requesterId === currentPlayerId && validateUrlCandidateOwnerAnswerChange(currentBranch, nextBranch, answerKey)) {
+    return null;
+  }
+  return "participant_field_forbidden";
+}
+
+function validateActingBranchChange(currentBranch: Record<string, unknown>, nextBranch: Record<string, unknown>, requesterId: string, answerKey: string) {
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(currentBranch);
+  const changedKeys = getChangedKeys(currentBranch, nextBranch);
+  if (requesterId !== currentPlayerId && isOnlyChangedKeys(changedKeys, ["votes"])) {
+    return validateOwnedStateMaps(currentBranch, nextBranch, requesterId, ["votes"]);
+  }
+  if (requesterId === currentPlayerId && validateUrlCandidateOwnerAnswerChange(currentBranch, nextBranch, answerKey)) {
+    return null;
+  }
+  return "participant_field_forbidden";
+}
+
+function validateTypingBranchChange(currentBranch: Record<string, unknown>, nextBranch: Record<string, unknown>, requesterId: string) {
+  const changedKeys = getChangedKeys(currentBranch, nextBranch);
+  if (isOnlyChangedKeys(changedKeys, ["guesses"])) {
+    return validateOwnedStateMaps(currentBranch, nextBranch, requesterId, ["guesses"]);
+  }
+  if (validateUrlCandidateSelfCorrectChange(currentBranch, nextBranch, requesterId)) {
+    return null;
+  }
+  return "participant_field_forbidden";
+}
+
+function validateGuessBranchChange(currentBranch: Record<string, unknown>, nextBranch: Record<string, unknown>, requesterId: string) {
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(currentBranch);
+  const changedKeys = getChangedKeys(currentBranch, nextBranch);
+  if (isOnlyChangedKeys(changedKeys, ["guesses"])) {
+    if (requesterId === currentPlayerId) return "participant_field_forbidden";
+    return validateOwnedStateMaps(currentBranch, nextBranch, requesterId, ["guesses"]);
+  }
+  if (requesterId === currentPlayerId && validateUrlCandidateJudgeChange(currentBranch, nextBranch)) {
+    return null;
+  }
+  return "participant_field_forbidden";
+}
+
+function validateMemoryDrawingBranchChange(currentBranch: Record<string, unknown>, nextBranch: Record<string, unknown>, requesterId: string) {
+  const changedKeys = getChangedKeys(currentBranch, nextBranch);
+  if (!isOnlyChangedKeys(changedKeys, ["votes", "actionLog"]) || !changedKeys.includes("votes") || !changedKeys.includes("actionLog")) {
+    return "participant_field_forbidden";
+  }
+  if (!validatePrependedActionLog(currentBranch.actionLog, nextBranch.actionLog)) return "participant_field_forbidden";
+  const currentVotes = asRecord(currentBranch.votes) ?? {};
+  const nextVotes = asRecord(nextBranch.votes) ?? {};
+  const changedVoteKeys = getChangedKeys(currentVotes, nextVotes);
+  return changedVoteKeys.length === 1 && changedVoteKeys[0] === requesterId && nextVotes[requesterId] === "done"
+    ? null
+    : "participant_field_forbidden";
+}
+
+function validateProgressForBranchStep(progress: Omit<ProgressState, "updatedAt">, branchStep: string, stepOrder: Record<string, number>) {
+  const expectedStep = stepOrder[branchStep];
+  if (!expectedStep) return false;
+  const expectedPhase = branchStep === "complete" ? "complete" : "playing";
+  return progress.phase === expectedPhase && progress.step === expectedStep;
+}
+
+function getIndexedPlayerId(state: Record<string, unknown>, indexKey: string) {
+  const players = readRecordArray(state.players);
+  const index = readNonnegativeInteger(state[indexKey]);
+  if (index === null) return null;
+  return readString(players[index]?.id);
+}
+
+function getJohariCurrentPeerId(state: Record<string, unknown>) {
+  const targetId = getIndexedPlayerId(state, "targetIndex");
+  const peers = readRecordArray(state.players).filter((player) => readString(player.id) !== targetId);
+  const peerIndex = readNonnegativeInteger(state.peerIndex);
+  if (peerIndex === null) return null;
+  return readString(peers[peerIndex]?.id);
+}
+
+function validateWordSelection(value: unknown, deckWordIdsValue: unknown) {
+  const deckWordIds = new Set((Array.isArray(deckWordIdsValue) ? deckWordIdsValue : []).filter((item): item is string => typeof item === "string"));
+  const selectedIds = Array.isArray(value) ? value : [];
+  return selectedIds.every((item) => typeof item === "string" && deckWordIds.has(item));
+}
+
+function validateOwnedWordSelectionMap(currentValue: unknown, nextValue: unknown, requesterId: string, deckWordIdsValue: unknown) {
+  const currentMap = asRecord(currentValue) ?? {};
+  const nextMap = asRecord(nextValue) ?? {};
+  const changedKeys = getChangedKeys(currentMap, nextMap);
+  return changedKeys.length === 1 && changedKeys[0] === requesterId && validateWordSelection(nextMap[requesterId], deckWordIdsValue);
+}
+
+function getTurtleSoupFacilitatorId(state: Record<string, unknown>) {
+  const players = readRecordArray(state.players);
+  if (players.length === 0) return null;
+  const deckIndex = readNonnegativeInteger(state.deckIndex) ?? 0;
+  return readString(players[deckIndex % players.length]?.id);
+}
+
+function validateTurtleQuestionLogAppend(currentValue: unknown, nextValue: unknown) {
+  const currentLog = readRecordArray(currentValue);
+  const nextLog = readRecordArray(nextValue);
+  if (nextLog.length !== currentLog.length + 1) return false;
+  if (!currentLog.every((item, index) => isDeepEqual(item, nextLog[index]))) return false;
+
+  const added = nextLog[nextLog.length - 1];
+  return readString(added.id) !== null &&
+    readString(added.text) !== null &&
+    ["はい", "いいえ", "関係ありません", "補足あり"].includes(String(added.answer));
+}
+
+function validateTurtleNextCaseChange(currentBranch: Record<string, unknown>, nextBranch: Record<string, unknown>, completesGame: boolean) {
+  const currentDeckIndex = readNonnegativeInteger(currentBranch.deckIndex);
+  const currentSolvedCount = readNonnegativeInteger(currentBranch.solvedCount);
+  const nextSolvedCount = readNonnegativeInteger(nextBranch.solvedCount);
+  const deckCaseIds = Array.isArray(currentBranch.deckCaseIds) ? currentBranch.deckCaseIds : [];
+  if (currentDeckIndex === null || currentSolvedCount === null || nextSolvedCount === null) return false;
+  if (nextSolvedCount !== currentSolvedCount && nextSolvedCount !== currentSolvedCount + 1) return false;
+
+  const nextIndex = currentDeckIndex + 1;
+  if (completesGame) {
+    if (deckCaseIds[nextIndex]) return false;
+    const expectedBranch = {
+      ...currentBranch,
+      step: "complete",
+      caseId: null,
+      hintLevel: 0,
+      answerVisible: false,
+      solvedCount: nextSolvedCount,
+    };
+    return isDeepEqual(nextBranch, expectedBranch);
+  }
+
+  const nextCaseId = deckCaseIds[nextIndex];
+  if (typeof nextCaseId !== "string") return false;
+  const expectedBranch = {
+    ...currentBranch,
+    step: "play",
+    caseId: nextCaseId,
+    deckIndex: nextIndex,
+    hintLevel: 0,
+    answerVisible: false,
+    solvedCount: nextSolvedCount,
+    questionLog: [],
+  };
+  return isDeepEqual(nextBranch, expectedBranch);
 }
 
 function isOnlyChangedKeys(changedKeys: string[], allowedKeys: string[]) {
