@@ -1609,6 +1609,10 @@ function isAnswerSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
   return key === "truth-lie-game" || key === "value-meter-game" || key === "typing-speed-game";
 }
 
+function isActingSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
+  return key === "acting-phrase-game";
+}
+
 function isActionSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
   return key === "count-up-game" || key === "hazard-card-game" || key === "safe-random-draw" || key === "arm-wrestling-tournament";
 }
@@ -1620,6 +1624,7 @@ function isRoomSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
     isGuessSyncableUrlCandidateKey(key) ||
     isBoardSyncableUrlCandidateKey(key) ||
     isAnswerSyncableUrlCandidateKey(key) ||
+    isActingSyncableUrlCandidateKey(key) ||
     isActionSyncableUrlCandidateKey(key)
   );
 }
@@ -1688,6 +1693,14 @@ function describeUrlCandidateProgress(config: UrlCandidateGameConfig, state: Url
       }
       const answeredCount = state.players.filter((player) => state.guesses[player.id]?.trim() || state.votes[player.id]?.trim()).length;
       return `${config.title}: お題${progress}で回答中です (${answeredCount}/${state.players.length})`;
+    }
+    if (isActingSyncableUrlCandidateKey(config.key)) {
+      const actor = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+      const answerers = actor ? state.players.filter((player) => player.id !== actor.id) : state.players;
+      const votedCount = answerers.filter((player) => state.votes[player.id]).length;
+      return actor
+        ? `${config.title}: お題${progress}で${actor.name}さんが演じています (${votedCount}/${answerers.length})`
+        : `${config.title}: お題${progress}で感情を当てています (${votedCount}/${answerers.length})`;
     }
     if (isActionSyncableUrlCandidateKey(config.key)) {
       const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
@@ -1762,6 +1775,7 @@ function UrlCandidateGame({
   const usesGuessSync = isGuessSyncableUrlCandidateKey(config.key);
   const usesBoardSync = isBoardSyncableUrlCandidateKey(config.key);
   const usesAnswerSync = isAnswerSyncableUrlCandidateKey(config.key);
+  const usesActingSync = isActingSyncableUrlCandidateKey(config.key);
   const usesActionSync = isActionSyncableUrlCandidateKey(config.key);
   const promptPool = useMemo(
     () => config.prompts.filter((prompt) => state.includeAdultTopics || prompt.rating === "normal"),
@@ -1891,7 +1905,7 @@ function UrlCandidateGame({
 
   function moveToNextUrlPrompt() {
     const nextIndex = state.deckIndex + 1;
-    const shouldRotatePromptOwner = usesGuessSync || config.key === "truth-lie-game";
+    const shouldRotatePromptOwner = usesGuessSync || usesActingSync || config.key === "truth-lie-game";
     if (nextIndex >= state.deckPromptIds.length) {
       setState({ ...state, step: "complete", answerVisible: false, actionLog: [] });
       return;
@@ -1935,8 +1949,10 @@ function UrlCandidateGame({
                     ? "この端末が進行役です。参加者取り込み、親、回答、正解表示、次のお題を同期します。"
                     : usesBoardSync
                       ? "この端末が進行役です。参加者取り込み、手番、盤面、コマ、資源、次のお題を同期します。"
-                      : usesAnswerSync
-                        ? "この端末が進行役です。参加者取り込み、回答、集計、得点、次のお題を同期します。"
+                    : usesAnswerSync
+                      ? "この端末が進行役です。参加者取り込み、回答、集計、得点、次のお題を同期します。"
+                      : usesActingSync
+                        ? "この端末が進行役です。参加者取り込み、演者、感情、回答、結果表示、次のお題を同期します。"
                         : usesActionSync
                           ? "この端末が進行役です。参加者取り込み、手番、数字、カード、対戦結果、次のお題を同期します。"
                   : "この端末が進行役です。参加者取り込み、次のお題、完了を同期します。"
@@ -1948,6 +1964,8 @@ function UrlCandidateGame({
                       ? "この端末では自分の番や自分の資源操作を行えます。盤面とお題切り替えは同期されます。"
                       : usesAnswerSync
                         ? "この端末では自分の回答だけ操作できます。集計とお題切り替えは同期されます。"
+                        : usesActingSync
+                          ? "この端末では演者の番なら感情を選び、回答者の番なら自分の回答だけ操作できます。"
                         : usesActionSync
                           ? "この端末では自分の番や自分が入っている対戦だけ操作できます。お題切り替えは同期されます。"
                   : "この端末では自分の投票だけ操作できます。集計とお題の進行は同期されます。"}
@@ -1980,6 +1998,8 @@ function UrlCandidateGame({
                       ? "手番、盤面、コマ、資源を端末ごとに同期するには、ルーム参加者を取り込んでください。"
                       : usesAnswerSync
                         ? "回答、集計、得点を端末ごとに同期するには、ルーム参加者を取り込んでください。"
+                        : usesActingSync
+                          ? "演者、感情選択、回答、結果表示を端末ごとに同期するには、ルーム参加者を取り込んでください。"
                         : usesActionSync
                           ? "手番、数字、カード、対戦結果を端末ごとに同期するには、ルーム参加者を取り込んでください。"
                   : "参加者それぞれの端末で自分の投票をするには、ルーム参加者を取り込んでください。"}
@@ -2137,6 +2157,8 @@ function UrlCandidateGame({
                       ? "ホストが参加者を取り込み、お題を開始すると、この端末で自分の番や資源操作ができます。"
                       : usesAnswerSync
                         ? "ホストが参加者を取り込み、お題を開始すると、この端末で自分の回答を操作できます。"
+                        : usesActingSync
+                          ? "ホストが参加者を取り込み、お題を開始すると、演者は感情を選び、回答者は自分の回答を操作できます。"
                         : usesActionSync
                           ? "ホストが参加者を取り込み、お題を開始すると、この端末で自分の番を操作できます。"
                   : "ホストがお題を開始すると、この端末で自分の投票を選べます。"}
@@ -2321,6 +2343,15 @@ function UrlCandidateGame({
             </div>
           )}
           {usesGuessSync && (
+            <div className="score-list wide">
+              {state.players.map((player) => (
+                <span key={player.id}>
+                  {player.name}: 正解{state.scoreCounts[player.id] ?? 0}
+                </span>
+              ))}
+            </div>
+          )}
+          {usesActingSync && (
             <div className="score-list wide">
               {state.players.map((player) => (
                 <span key={player.id}>
@@ -2692,6 +2723,132 @@ function UrlCandidateInteractionPanel({
             </button>
           )}
         </div>
+
+        <div className="score-list wide">
+          {state.players.map((player) => (
+            <span key={player.id}>
+              {player.name}: 正解{state.scoreCounts[player.id] ?? 0}
+            </span>
+          ))}
+        </div>
+
+        <UrlActionLog logs={state.actionLog} />
+        {isRoomMode && !canControl && <p className="soft-note">次のお題へ進む操作はホスト端末で行います。</p>}
+      </div>
+    );
+  }
+
+  if (isActingSyncableUrlCandidateKey(config.key)) {
+    const actor = currentPlayer;
+    const answerers = actor ? state.players.filter((player) => player.id !== actor.id) : state.players;
+    const emotionOptions = prompt.options?.slice(0, 4) ?? ["うれしい", "照れている", "焦っている", "余裕がある"];
+    const emotionKey = "actingEmotion";
+    const selectedEmotion = state.guesses[emotionKey] ?? "";
+    const canSelectEmotion = canControl || canActForCurrentPlayer;
+    const votedPlayers = answerers.filter((player) => state.votes[player.id]);
+    const correctPlayers = selectedEmotion ? answerers.filter((player) => state.votes[player.id] === selectedEmotion) : [];
+    const missedPlayers = selectedEmotion
+      ? answerers.filter((player) => state.votes[player.id] && state.votes[player.id] !== selectedEmotion && state.votes[player.id] !== "skip")
+      : [];
+
+    function revealActingResult() {
+      if (!canSelectEmotion || !selectedEmotion || state.answerVisible) return;
+      const nextScoreCounts = { ...state.scoreCounts };
+      correctPlayers.forEach((player) => {
+        nextScoreCounts[player.id] = (nextScoreCounts[player.id] ?? 0) + 1;
+      });
+      const label = emotionOptions[Number(selectedEmotion)] ?? "選んだ感情";
+      pushLog(`正解は「${label}」。正解は${correctPlayers.length}人でした。`, {
+        answerVisible: true,
+        scoreCounts: nextScoreCounts,
+      });
+    }
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>演技同期</h3>
+          <ul className="rule-list">
+            <li>今回の演者だけが、演じる感情を選びます。</li>
+            <li>回答者は各自の端末で、どの感情だと思うかを選びます。</li>
+            <li>演者またはホストが結果を出すと、正解表示と得点が同期されます。</li>
+          </ul>
+        </div>
+
+        {actor && (
+          <div className="turn-callout">
+            <span>今回の演者</span>
+            <strong>{actor.name}</strong>
+          </div>
+        )}
+
+        <div className="answer-sync-list">
+          <div className="answer-sync-row">
+            <strong>演者の感情</strong>
+            <div className="vote-buttons">
+              {emotionOptions.map((option, index) => (
+                <button
+                  className={(canSelectEmotion || state.answerVisible) && selectedEmotion === String(index) ? "selected-choice" : "secondary-button"}
+                  disabled={!canSelectEmotion || state.answerVisible}
+                  key={option}
+                  type="button"
+                  onClick={() => setState({ ...state, guesses: { ...state.guesses, [emotionKey]: String(index) } })}
+                >
+                  {formatChoiceLabel(option, index)}
+                </button>
+              ))}
+            </div>
+            {!canSelectEmotion && !state.answerVisible && selectedEmotion && <span className="inline-status">選択済み</span>}
+          </div>
+
+          {answerers.map((player) => (
+            <div className="answer-sync-row" key={player.id}>
+              <strong>{player.name}</strong>
+              <div className="vote-buttons">
+                {emotionOptions.map((option, index) => (
+                  <button
+                    className={state.votes[player.id] === String(index) ? "selected-choice" : "secondary-button"}
+                    disabled={!canVoteForPlayer(player.id) || state.answerVisible}
+                    key={option}
+                    type="button"
+                    onClick={() => setState({ ...state, votes: { ...state.votes, [player.id]: String(index) } })}
+                  >
+                    {formatChoiceLabel(option, index)}
+                  </button>
+                ))}
+                <button
+                  className={state.votes[player.id] === "skip" ? "selected-choice muted" : "secondary-button"}
+                  disabled={!canVoteForPlayer(player.id) || state.answerVisible}
+                  type="button"
+                  onClick={() => setState({ ...state, votes: { ...state.votes, [player.id]: "skip" } })}
+                >
+                  パス
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="action-row">
+          <span className="inline-status">
+            回答 {votedPlayers.length}/{answerers.length}
+          </span>
+          {state.answerVisible && selectedEmotion && (
+            <span className="inline-status">正解: {emotionOptions[Number(selectedEmotion)] ?? "選んだ感情"}</span>
+          )}
+          <button className="primary-button" disabled={!canSelectEmotion || !selectedEmotion || state.answerVisible} type="button" onClick={revealActingResult}>
+            <Check size={18} />
+            結果を出す
+          </button>
+        </div>
+
+        {state.answerVisible && selectedEmotion && (
+          <div className="split-result">
+            <NameCluster title="正解" players={correctPlayers} />
+            <NameCluster title="惜しい" players={missedPlayers} />
+            <NameCluster title="パス" players={answerers.filter((player) => state.votes[player.id] === "skip")} />
+          </div>
+        )}
 
         <div className="score-list wide">
           {state.players.map((player) => (
