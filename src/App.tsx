@@ -481,6 +481,17 @@ function formatTime(totalSeconds: number) {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
+function formatClockTime(value: string | number | Date) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleTimeString("ja-JP", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+}
+
 type SyncedTimerFields = {
   remainingSeconds: number;
   timerRunning: boolean;
@@ -772,7 +783,10 @@ function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey, roomSess
 
 function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSession | null) => void }) {
   const [apiStatus, setApiStatus] = useState<"checking" | "ready" | "offline">("checking");
-  const [socketStatus, setSocketStatus] = useState<"idle" | "connecting" | "connected">("idle");
+  const [socketStatus, setSocketStatus] = useState<"idle" | "connecting" | "connected" | "disconnected">("idle");
+  const [savedSession, setSavedSession] = useState<RoomSession | null>(() => readRoomSession());
+  const [resumeStatus, setResumeStatus] = useState<"idle" | "checking" | "failed">("idle");
+  const [lastRoomSyncAt, setLastRoomSyncAt] = useState<string | null>(null);
   const [hostName, setHostName] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [joinName, setJoinName] = useState("");
@@ -783,6 +797,25 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const socketRef = useRef<Socket | null>(null);
+
+  function rememberRoomSession(roomCode: string, nextParticipant: RoomParticipant | null) {
+    if (!nextParticipant) {
+      clearRoomSession();
+      setSavedSession(null);
+      return;
+    }
+    saveRoomSession(roomCode, nextParticipant);
+    setSavedSession(readRoomSession());
+  }
+
+  function forgetRoomSession() {
+    clearRoomSession();
+    setSavedSession(null);
+  }
+
+  function markRoomSynced() {
+    setLastRoomSyncAt(new Date().toISOString());
+  }
 
   useEffect(() => {
     let ignore = false;
@@ -801,29 +834,8 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   useEffect(() => {
     const session = readRoomSession();
     if (!session) return;
-
-    let ignore = false;
-    setJoinCode(session.roomCode);
-    fetchRoomSnapshot(session.roomCode, session.participantId)
-      .then((roomSnapshot) => {
-        if (ignore) return;
-        const savedParticipant = roomSnapshot.participants.find((item) => item.id === session.participantId) ?? null;
-        if (!savedParticipant) {
-          clearRoomSession();
-          return;
-        }
-        setSnapshot(roomSnapshot);
-        setParticipant(savedParticipant);
-        saveRoomSession(roomSnapshot.room.code, savedParticipant);
-        setNotice("保存済みのルームに再接続しました。");
-      })
-      .catch((caught) => {
-        if (!ignore) setError(toErrorMessage(caught));
-      });
-
-    return () => {
-      ignore = true;
-    };
+    setSavedSession(session);
+    void restoreSavedRoomSession(session);
   }, []);
 
   useEffect(() => {
@@ -840,18 +852,36 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       transports: ["websocket", "polling"],
     });
     socketRef.current = socket;
+    let closedByEffect = false;
+    let hadConnectionDrop = false;
 
     socket.on("connect", () => {
+      if (hadConnectionDrop) {
+        setNotice("同期接続が復帰しました。");
+        hadConnectionDrop = false;
+      }
       setSocketStatus("connected");
+      setError("");
       socket.emit("room:join", { roomCode: snapshot.room.code, participantId: participant.id });
     });
 
     socket.on("disconnect", () => {
-      setSocketStatus("idle");
+      if (!closedByEffect) {
+        hadConnectionDrop = true;
+        setSocketStatus("disconnected");
+        setNotice("同期接続が切れました。自動再接続を待つか、更新で状態を取り直してください。");
+      }
+    });
+
+    socket.on("connect_error", () => {
+      hadConnectionDrop = true;
+      setSocketStatus("disconnected");
+      setError("同期サーバーへ接続できません。DockerのAPIが起動しているか確認してください。");
     });
 
     socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
       if (!nextSnapshot) return;
+      markRoomSynced();
       setSnapshot(nextSnapshot);
       const latestParticipant = nextSnapshot.participants.find((item) => item.id === participant.id) ?? null;
       if (!latestParticipant) {
@@ -859,14 +889,14 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
         socketRef.current = null;
         setParticipant(null);
         setSnapshot(null);
-        clearRoomSession();
+        forgetRoomSession();
         setSocketStatus("idle");
         setNotice("この端末の参加者はルームから退出しました。");
         return;
       }
       if (latestParticipant.role !== participant.role || latestParticipant.name !== participant.name) {
         setParticipant(latestParticipant);
-        saveRoomSession(nextSnapshot.room.code, latestParticipant);
+        rememberRoomSession(nextSnapshot.room.code, latestParticipant);
       }
     });
 
@@ -875,6 +905,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     });
 
     return () => {
+      closedByEffect = true;
       socket.disconnect();
       socketRef.current = null;
     };
@@ -883,8 +914,72 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   const isHost = participant?.role === "host";
   const progress = snapshot ? parseRoomProgress(snapshot) : null;
   const currentGame = progress?.gameKey ? findGameMeta(progress.gameKey) : null;
+  const connectedCount = snapshot?.participants.filter((item) => item.connected).length ?? 0;
+  const socketStatusLabel =
+    socketStatus === "connected"
+      ? "接続中"
+      : socketStatus === "connecting"
+        ? "接続中..."
+        : socketStatus === "disconnected"
+          ? "再接続中"
+          : "未接続";
+  const savedSessionRoleLabel = savedSession?.participantRole === "host" ? "ホスト" : "参加者";
+
+  async function restoreSavedRoomSession(session = savedSession) {
+    if (!session) {
+      setError("保存済みのルームがありません。コードで参加してください。");
+      return;
+    }
+
+    setIsBusy(true);
+    setResumeStatus("checking");
+    setError("");
+    setNotice("");
+    setJoinCode(session.roomCode);
+    try {
+      const roomSnapshot = await fetchRoomSnapshot(session.roomCode, session.participantId);
+      const savedParticipant = roomSnapshot.participants.find((item) => item.id === session.participantId) ?? null;
+      if (!savedParticipant) {
+        socketRef.current?.disconnect();
+        socketRef.current = null;
+        setSnapshot(null);
+        setParticipant(null);
+        forgetRoomSession();
+        setResumeStatus("failed");
+        setSocketStatus("idle");
+        setError("保存済みの参加者はこのルームに残っていません。もう一度コードで参加してください。");
+        return;
+      }
+
+      setSnapshot(roomSnapshot);
+      setParticipant(savedParticipant);
+      rememberRoomSession(roomSnapshot.room.code, savedParticipant);
+      markRoomSynced();
+      const runningGame = toGameKey(roomSnapshot.room.currentGame);
+      if (runningGame) setSelectedRoomGame(runningGame);
+      setResumeStatus("idle");
+      setNotice(`${savedParticipant.name}さんとして保存済みルームに再接続しました。`);
+    } catch (caught) {
+      setResumeStatus("failed");
+      setError(toErrorMessage(caught));
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  function discardSavedRoomSession() {
+    forgetRoomSession();
+    setSnapshot(null);
+    setParticipant(null);
+    setLastRoomSyncAt(null);
+    setResumeStatus("idle");
+    setSocketStatus("idle");
+    setNotice("保存済みのルーム情報を消しました。");
+    setError("");
+  }
 
   function applyRoomSnapshot(nextSnapshot: RoomSnapshot, nextNotice?: string) {
+    markRoomSynced();
     setSnapshot(nextSnapshot);
     if (!participant) {
       if (nextNotice) setNotice(nextNotice);
@@ -897,7 +992,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       socketRef.current = null;
       setSnapshot(null);
       setParticipant(null);
-      clearRoomSession();
+      forgetRoomSession();
       setSocketStatus("idle");
       setNotice("この端末の参加者はルームから退出しました。もう一度参加する場合はコードで入り直してください。");
       return;
@@ -905,7 +1000,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
 
     if (latestParticipant.role !== participant.role || latestParticipant.name !== participant.name) {
       setParticipant(latestParticipant);
-      saveRoomSession(nextSnapshot.room.code, latestParticipant);
+      rememberRoomSession(nextSnapshot.room.code, latestParticipant);
     }
     if (nextNotice) setNotice(nextNotice);
   }
@@ -928,7 +1023,8 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       const roomSnapshot = await fetchRoomSnapshot(result.room.code, result.host?.id);
       setSnapshot(roomSnapshot);
       setParticipant(result.host);
-      saveRoomSession(result.room.code, result.host);
+      rememberRoomSession(result.room.code, result.host);
+      markRoomSynced();
       setJoinCode(result.room.code);
       setNotice("ルームを作成しました。コードを参加者に共有してください。");
     } catch (caught) {
@@ -960,7 +1056,8 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       const roomSnapshot = await fetchRoomSnapshot(code, result.participant.id);
       setSnapshot(roomSnapshot);
       setParticipant(result.participant);
-      saveRoomSession(code, result.participant);
+      rememberRoomSession(code, result.participant);
+      markRoomSynced();
       setJoinCode(code);
       setNotice("ルームに参加しました。");
     } catch (caught) {
@@ -1053,7 +1150,8 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     socketRef.current = null;
     setSnapshot(null);
     setParticipant(null);
-    clearRoomSession();
+    forgetRoomSession();
+    setLastRoomSyncAt(null);
     setSocketStatus("idle");
     setNotice("");
     setError("");
@@ -1138,7 +1236,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
         participantName: participant.name,
         participantRole: participant.role,
       };
-      saveRoomSession(snapshot.room.code, participant);
+      rememberRoomSession(snapshot.room.code, participant);
       onStart(progress.gameKey, roomSession);
     }
   }
@@ -1153,7 +1251,9 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
         </div>
         <div className={`room-status status-${apiStatus}`}>
           <span>API: {apiStatus === "ready" ? "OK" : apiStatus === "checking" ? "確認中" : "停止中"}</span>
-          <span>同期: {socketStatus === "connected" ? "接続中" : socketStatus === "connecting" ? "接続中..." : "未接続"}</span>
+          <span>同期: {socketStatusLabel}</span>
+          {snapshot && <span>参加: {connectedCount}/{snapshot.participants.length} 接続</span>}
+          {lastRoomSyncAt && <span>最終同期: {formatClockTime(lastRoomSyncAt)}</span>}
         </div>
       </div>
 
@@ -1187,8 +1287,39 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
         </div>
       </div>
 
+      {savedSession && !snapshot && (
+        <div className="room-form room-resume-card">
+          <div>
+            <h3>前回のルームに戻る</h3>
+            <p className="soft-note">
+              {savedSession.roomCode} / {savedSession.participantName}（{savedSessionRoleLabel}）として保存されています。
+            </p>
+          </div>
+          <div className="room-game-controls">
+            <button
+              className="primary-button"
+              type="button"
+              disabled={isBusy || resumeStatus === "checking" || apiStatus !== "ready"}
+              onClick={() => restoreSavedRoomSession(savedSession)}
+            >
+              <RotateCcw size={18} />
+              {resumeStatus === "checking" ? "確認中..." : "再接続する"}
+            </button>
+            <button className="secondary-button" type="button" disabled={isBusy} onClick={discardSavedRoomSession}>
+              保存を消す
+            </button>
+          </div>
+        </div>
+      )}
+
       {snapshot && participant && (
         <>
+          {socketStatus === "disconnected" && (
+            <p className="room-message error">
+              同期接続が切れています。自動再接続を待つか、「更新」で現在の状態を取り直してください。
+            </p>
+          )}
+
           <div className="room-current">
             <div>
               <p className="eyebrow">ルームコード</p>

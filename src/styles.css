@@ -421,6 +421,17 @@ select:focus {
   margin-bottom: 10px;
 }
 
+.room-resume-card {
+  display: grid;
+  gap: 10px;
+  border-color: #b9d9ca;
+  background: #eff8f3;
+}
+
+.room-resume-card h3 {
+  margin-bottom: 6px;
+}
+
 .room-button-row {
   display: flex;
   flex-wrap: wrap;
