@@ -790,6 +790,8 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   const [hostName, setHostName] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [joinName, setJoinName] = useState("");
+  const [observerCode, setObserverCode] = useState("");
+  const [spectatorRoomCode, setSpectatorRoomCode] = useState<string | null>(null);
   const [selectedRoomGame, setSelectedRoomGame] = useState<GameKey>("werewolf-game");
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
   const [participant, setParticipant] = useState<RoomParticipant | null>(null);
@@ -839,7 +841,9 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   }, []);
 
   useEffect(() => {
-    if (!snapshot || !participant) {
+    const roomCode = snapshot?.room.code ?? null;
+    const isWatching = Boolean(roomCode && !participant && spectatorRoomCode === roomCode);
+    if (!roomCode || (!participant && !isWatching)) {
       socketRef.current?.disconnect();
       socketRef.current = null;
       setSocketStatus("idle");
@@ -862,7 +866,10 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       }
       setSocketStatus("connected");
       setError("");
-      socket.emit("room:join", { roomCode: snapshot.room.code, participantId: participant.id });
+      socket.emit("room:join", {
+        roomCode,
+        ...(participant ? { participantId: participant.id } : {}),
+      });
     });
 
     socket.on("disconnect", () => {
@@ -883,6 +890,10 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       if (!nextSnapshot) return;
       markRoomSynced();
       setSnapshot(nextSnapshot);
+      const runningGame = toGameKey(nextSnapshot.room.currentGame);
+      if (runningGame) setSelectedRoomGame(runningGame);
+      if (!participant) return;
+
       const latestParticipant = nextSnapshot.participants.find((item) => item.id === participant.id) ?? null;
       if (!latestParticipant) {
         socket.disconnect();
@@ -909,9 +920,10 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       socket.disconnect();
       socketRef.current = null;
     };
-  }, [participant, snapshot?.room.code]);
+  }, [participant?.id, participant?.name, participant?.role, snapshot?.room.code, spectatorRoomCode]);
 
   const isHost = participant?.role === "host";
+  const isSpectating = Boolean(snapshot && !participant && spectatorRoomCode === snapshot.room.code);
   const progress = snapshot ? parseRoomProgress(snapshot) : null;
   const currentGame = progress?.gameKey ? findGameMeta(progress.gameKey) : null;
   const connectedCount = snapshot?.participants.filter((item) => item.connected).length ?? 0;
@@ -936,6 +948,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     setError("");
     setNotice("");
     setJoinCode(session.roomCode);
+    setObserverCode(session.roomCode);
     try {
       const roomSnapshot = await fetchRoomSnapshot(session.roomCode, session.participantId);
       const savedParticipant = roomSnapshot.participants.find((item) => item.id === session.participantId) ?? null;
@@ -953,6 +966,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
 
       setSnapshot(roomSnapshot);
       setParticipant(savedParticipant);
+      setSpectatorRoomCode(null);
       rememberRoomSession(roomSnapshot.room.code, savedParticipant);
       markRoomSynced();
       const runningGame = toGameKey(roomSnapshot.room.currentGame);
@@ -971,6 +985,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     forgetRoomSession();
     setSnapshot(null);
     setParticipant(null);
+    setSpectatorRoomCode(null);
     setLastRoomSyncAt(null);
     setResumeStatus("idle");
     setSocketStatus("idle");
@@ -1023,9 +1038,11 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       const roomSnapshot = await fetchRoomSnapshot(result.room.code, result.host?.id);
       setSnapshot(roomSnapshot);
       setParticipant(result.host);
+      setSpectatorRoomCode(null);
       rememberRoomSession(result.room.code, result.host);
       markRoomSynced();
       setJoinCode(result.room.code);
+      setObserverCode(result.room.code);
       setNotice("ルームを作成しました。コードを参加者に共有してください。");
     } catch (caught) {
       setError(toErrorMessage(caught));
@@ -1056,10 +1073,40 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       const roomSnapshot = await fetchRoomSnapshot(code, result.participant.id);
       setSnapshot(roomSnapshot);
       setParticipant(result.participant);
+      setSpectatorRoomCode(null);
       rememberRoomSession(code, result.participant);
       markRoomSynced();
       setJoinCode(code);
+      setObserverCode(code);
       setNotice("ルームに参加しました。");
+    } catch (caught) {
+      setError(toErrorMessage(caught));
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function watchRoomAsSpectator() {
+    const code = normalizeInputRoomCode(observerCode || joinCode);
+    if (!code) {
+      setError("観戦するルームコードを入力してください。");
+      return;
+    }
+
+    setIsBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const roomSnapshot = await fetchRoomSnapshot(code);
+      setSnapshot(roomSnapshot);
+      setParticipant(null);
+      setSpectatorRoomCode(roomSnapshot.room.code);
+      markRoomSynced();
+      const runningGame = toGameKey(roomSnapshot.room.currentGame);
+      if (runningGame) setSelectedRoomGame(runningGame);
+      setJoinCode(roomSnapshot.room.code);
+      setObserverCode(roomSnapshot.room.code);
+      setNotice("観戦モードでルームを開きました。参加者としては追加されず、操作はできません。");
     } catch (caught) {
       setError(toErrorMessage(caught));
     } finally {
@@ -1146,11 +1193,13 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   }
 
   function leaveLocalRoom() {
+    const wasParticipant = Boolean(participant);
     socketRef.current?.disconnect();
     socketRef.current = null;
     setSnapshot(null);
     setParticipant(null);
-    forgetRoomSession();
+    setSpectatorRoomCode(null);
+    if (wasParticipant) forgetRoomSession();
     setLastRoomSyncAt(null);
     setSocketStatus("idle");
     setNotice("");
@@ -1177,7 +1226,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     setIsBusy(true);
     setError("");
     try {
-      const roomSnapshot = await fetchRoomSnapshot(code, participant?.id ?? readRoomSession()?.participantId);
+      const roomSnapshot = await fetchRoomSnapshot(code, participant?.id ?? (isSpectating ? null : readRoomSession()?.participantId));
       applyRoomSnapshot(roomSnapshot, "ルーム情報を更新しました。");
     } catch (caught) {
       setError(toErrorMessage(caught));
@@ -1252,6 +1301,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
         <div className={`room-status status-${apiStatus}`}>
           <span>API: {apiStatus === "ready" ? "OK" : apiStatus === "checking" ? "確認中" : "停止中"}</span>
           <span>同期: {socketStatusLabel}</span>
+          {isSpectating && <span>表示: 観戦中</span>}
           {snapshot && <span>参加: {connectedCount}/{snapshot.participants.length} 接続</span>}
           {lastRoomSyncAt && <span>最終同期: {formatClockTime(lastRoomSyncAt)}</span>}
         </div>
@@ -1285,6 +1335,22 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
             </button>
           </div>
         </div>
+
+        <div className="room-form">
+          <h3>観戦で見る</h3>
+          <div className="room-button-row">
+            <input
+              value={observerCode}
+              onChange={(event) => setObserverCode(event.currentTarget.value.toUpperCase())}
+              placeholder="ルームコード"
+              inputMode="text"
+            />
+            <button className="secondary-button" type="button" disabled={isBusy || apiStatus !== "ready"} onClick={watchRoomAsSpectator}>
+              <Eye size={18} />
+              観戦
+            </button>
+          </div>
+        </div>
       </div>
 
       {savedSession && !snapshot && (
@@ -1312,7 +1378,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
         </div>
       )}
 
-      {snapshot && participant && (
+      {snapshot && (participant || isSpectating) && (
         <>
           {socketStatus === "disconnected" && (
             <p className="room-message error">
@@ -1341,48 +1407,60 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
                 更新
               </button>
               <button className="secondary-button" type="button" onClick={leaveLocalRoom}>
-                この端末だけ退出
+                {isSpectating ? "観戦を終了" : "この端末だけ退出"}
               </button>
             </div>
           </div>
 
-          <div className="room-game-panel">
-            <label>
-              <span className="control-label">開始するゲーム</span>
-              <select
-                value={selectedRoomGame}
-                onChange={(event) => setSelectedRoomGame(event.currentTarget.value as GameKey)}
-                disabled={!isHost || isBusy}
-              >
-                {activeGames.map((game) => (
-                  <option value={game.key} key={game.key}>
-                    {game.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="room-game-controls">
-              <button className="primary-button" type="button" disabled={!isHost || isBusy} onClick={startRoomGame}>
-                <Play size={18} />
-                ルームで開始
-              </button>
-              <button className="secondary-button" type="button" disabled={!isHost || isBusy || !currentGame} onClick={advanceRoomGame}>
-                <ChevronRight size={18} />
-                次へ
-              </button>
-              <button className="secondary-button" type="button" disabled={!isHost || isBusy || !currentGame} onClick={completeRoomGame}>
-                <Trophy size={18} />
-                完了
-              </button>
-              <button className="secondary-button" type="button" disabled={!isHost || isBusy} onClick={resetRoomGame}>
-                <RotateCcw size={18} />
-                待機に戻す
-              </button>
+          {participant ? (
+            <div className="room-game-panel">
+              <label>
+                <span className="control-label">開始するゲーム</span>
+                <select
+                  value={selectedRoomGame}
+                  onChange={(event) => setSelectedRoomGame(event.currentTarget.value as GameKey)}
+                  disabled={!isHost || isBusy}
+                >
+                  {activeGames.map((game) => (
+                    <option value={game.key} key={game.key}>
+                      {game.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <div className="room-game-controls">
+                <button className="primary-button" type="button" disabled={!isHost || isBusy} onClick={startRoomGame}>
+                  <Play size={18} />
+                  ルームで開始
+                </button>
+                <button className="secondary-button" type="button" disabled={!isHost || isBusy || !currentGame} onClick={advanceRoomGame}>
+                  <ChevronRight size={18} />
+                  次へ
+                </button>
+                <button className="secondary-button" type="button" disabled={!isHost || isBusy || !currentGame} onClick={completeRoomGame}>
+                  <Trophy size={18} />
+                  完了
+                </button>
+                <button className="secondary-button" type="button" disabled={!isHost || isBusy} onClick={resetRoomGame}>
+                  <RotateCcw size={18} />
+                  待機に戻す
+                </button>
+              </div>
+              {!isHost && <p className="soft-note">ゲーム開始や進行操作はホスト端末で行います。</p>}
             </div>
-            {!isHost && <p className="soft-note">ゲーム開始や進行操作はホスト端末で行います。</p>}
-          </div>
+          ) : (
+            <div className="room-game-panel">
+              <div className="section-heading compact">
+                <Eye size={20} />
+                <h3>観戦中</h3>
+              </div>
+              <p className="soft-note">
+                参加者としては追加されません。現在のゲーム、進行メッセージ、参加者の接続状況だけを確認できます。
+              </p>
+            </div>
+          )}
 
-          {currentGame && (
+          {currentGame && participant && (
             <button className="primary-button room-open-game" type="button" onClick={openCurrentRoomGame}>
               <Play size={18} />
               この端末で開く
@@ -1396,7 +1474,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
             </div>
             <div className="room-participants">
               {snapshot.participants.map((item) => {
-                const isSelf = item.id === participant.id;
+                const isSelf = participant ? item.id === participant.id : false;
                 return (
                   <div className={`room-participant-card${isSelf ? " self" : ""}`} key={item.id}>
                     <div>
@@ -1427,7 +1505,11 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
                 );
               })}
             </div>
-            {!isHost && <p className="soft-note">ホスト交代や参加者整理はホスト端末から行います。</p>}
+            {isSpectating ? (
+              <p className="soft-note">観戦中は参加者として数えられず、ホスト交代や参加者整理もできません。</p>
+            ) : (
+              !isHost && <p className="soft-note">ホスト交代や参加者整理はホスト端末から行います。</p>
+            )}
           </div>
         </>
       )}
