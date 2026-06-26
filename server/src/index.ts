@@ -479,15 +479,14 @@ function validateStateUpdateAuthorization(
   if (nextState.updatedBy !== requester.id) {
     return "participant_update_mismatch";
   }
-  if (
-    currentState.phase !== nextState.phase ||
-    currentState.gameKey !== nextState.gameKey ||
-    currentState.gameTitle !== nextState.gameTitle ||
-    currentState.step !== nextState.step
-  ) {
+  if (currentState.gameKey !== nextState.gameKey || currentState.gameTitle !== nextState.gameTitle) {
     return "host_required";
   }
-  return validateParticipantScopedStateChange(activeGame, snapshot.room.state, nextStateValue, requester.id);
+  return validateParticipantScopedStateChange(activeGame, snapshot.room.state, nextStateValue, requester.id, {
+    current: currentState,
+    next: nextState,
+    phaseOrStepChanged: currentState.phase !== nextState.phase || currentState.step !== nextState.step,
+  });
 }
 
 function validateParticipantScopedStateChange(
@@ -495,20 +494,386 @@ function validateParticipantScopedStateChange(
   currentStateValue: unknown,
   nextStateValue: unknown,
   requesterId: string,
+  progress: ParticipantProgressChange,
 ) {
   switch (activeGame) {
+    case "werewolf-game":
+      return validateWerewolfParticipantVoteChange(currentStateValue, nextStateValue, requesterId, progress);
+    case "word-wolf":
+      return validateWordWolfParticipantVoteChange(currentStateValue, nextStateValue, requesterId, progress);
+    case "ng-word":
+      return validateNgWordPenaltyChange(currentStateValue, nextStateValue, progress);
     case "two-choice":
+      if (progress.phaseOrStepChanged) return "host_required";
       return validateOwnedMapBranchChange(currentStateValue, nextStateValue, "twoChoice", requesterId, ["votes"]);
     case "impression-ranking":
+      if (progress.phaseOrStepChanged) return "host_required";
       return validateOwnedMapBranchChange(currentStateValue, nextStateValue, "impression", requesterId, ["votes"]);
     case "majority-game":
     case "large-majority-game":
+      if (progress.phaseOrStepChanged) return "host_required";
       return validateUrlCandidateOwnedMapChange(currentStateValue, nextStateValue, activeGame, requesterId, ["votes"]);
     case "anonymous-box":
+      if (progress.phaseOrStepChanged) return "host_required";
       return validateAnonymousQuestionSubmission(currentStateValue, nextStateValue);
     default:
-      return null;
+      return progress.phaseOrStepChanged ? "host_required" : null;
   }
+}
+
+type ParticipantProgressChange = {
+  current: Omit<ProgressState, "updatedAt">;
+  next: Omit<ProgressState, "updatedAt">;
+  phaseOrStepChanged: boolean;
+};
+
+function validateWerewolfParticipantVoteChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  requesterId: string,
+  progress: ParticipantProgressChange,
+) {
+  const branchChange = readSingleBranchChange(currentStateValue, nextStateValue, "werewolf");
+  if ("error" in branchChange) return branchChange.error;
+
+  const expectedState = buildWerewolfParticipantVoteState(branchChange.currentState, branchChange.nextState, requesterId);
+  const expectedBranch = expectedState ? asRecord(expectedState.werewolf) : null;
+  if (!expectedState || !expectedBranch || !isDeepEqual(branchChange.nextBranch, expectedBranch)) {
+    return "participant_field_forbidden";
+  }
+
+  const expectedProgress = readProgressState(expectedState, "werewolf-game");
+  if (progress.next.phase !== expectedProgress.phase || progress.next.step !== expectedProgress.step) {
+    return "host_required";
+  }
+
+  return null;
+}
+
+function validateWordWolfParticipantVoteChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  requesterId: string,
+  progress: ParticipantProgressChange,
+) {
+  const branchChange = readSingleBranchChange(currentStateValue, nextStateValue, "wordWolf");
+  if ("error" in branchChange) return branchChange.error;
+
+  const expectedState = buildWordWolfParticipantVoteState(branchChange.currentState, branchChange.nextState, requesterId);
+  const expectedBranch = expectedState ? asRecord(expectedState.wordWolf) : null;
+  if (!expectedState || !expectedBranch || !isDeepEqual(branchChange.nextBranch, expectedBranch)) {
+    return "participant_field_forbidden";
+  }
+
+  const expectedProgress = readProgressState(expectedState, "word-wolf");
+  if (progress.next.phase !== expectedProgress.phase || progress.next.step !== expectedProgress.step) {
+    return "host_required";
+  }
+
+  return null;
+}
+
+function validateNgWordPenaltyChange(currentStateValue: unknown, nextStateValue: unknown, progress: ParticipantProgressChange) {
+  if (progress.phaseOrStepChanged) return "host_required";
+
+  const branchChange = readSingleBranchChange(currentStateValue, nextStateValue, "ngWord");
+  if ("error" in branchChange) return branchChange.error;
+  if (branchChange.currentBranch.step !== "play" || branchChange.nextBranch.step !== "play") {
+    return "host_required";
+  }
+
+  const currentWithoutAssignments = { ...branchChange.currentBranch };
+  const nextWithoutAssignments = { ...branchChange.nextBranch };
+  delete currentWithoutAssignments.assignments;
+  delete nextWithoutAssignments.assignments;
+  if (!isDeepEqual(currentWithoutAssignments, nextWithoutAssignments)) {
+    return "participant_field_forbidden";
+  }
+
+  const currentAssignments = readRecordArray(branchChange.currentBranch.assignments);
+  const nextAssignments = readRecordArray(branchChange.nextBranch.assignments);
+  if (currentAssignments.length === 0 || currentAssignments.length !== nextAssignments.length) {
+    return "participant_field_forbidden";
+  }
+
+  let incrementCount = 0;
+  for (const currentAssignment of currentAssignments) {
+    const playerId = readString(currentAssignment.playerId);
+    const nextAssignment = playerId ? nextAssignments.find((assignment) => assignment.playerId === playerId) : null;
+    if (!playerId || !nextAssignment) {
+      return "participant_field_forbidden";
+    }
+
+    const currentPenalty = readFiniteNumber(currentAssignment.penaltyCount);
+    const nextPenalty = readFiniteNumber(nextAssignment.penaltyCount);
+    if (currentPenalty === null || nextPenalty === null) {
+      return "participant_field_forbidden";
+    }
+
+    const expectedSame = { ...currentAssignment, penaltyCount: nextPenalty };
+    if (!isDeepEqual(nextAssignment, expectedSame)) {
+      return "participant_field_forbidden";
+    }
+
+    if (nextPenalty === currentPenalty + 1) {
+      incrementCount += 1;
+    } else if (nextPenalty !== currentPenalty) {
+      return "participant_field_forbidden";
+    }
+  }
+
+  return incrementCount === 1 ? null : "participant_field_forbidden";
+}
+
+function readSingleBranchChange(currentStateValue: unknown, nextStateValue: unknown, branchKey: string) {
+  const currentState = asRecord(currentStateValue);
+  const nextState = asRecord(nextStateValue);
+  if (!currentState || !nextState) return { error: "participant_field_forbidden" as const };
+
+  const changedTopLevelKeys = getChangedKeys(currentState, nextState).filter((key) => !progressStateKeys.has(key));
+  if (changedTopLevelKeys.length !== 1 || changedTopLevelKeys[0] !== branchKey) {
+    return { error: "participant_field_forbidden" as const };
+  }
+
+  const currentBranch = asRecord(currentState[branchKey]);
+  const nextBranch = asRecord(nextState[branchKey]);
+  if (!currentBranch || !nextBranch) return { error: "participant_field_forbidden" as const };
+
+  return { currentState, nextState, currentBranch, nextBranch };
+}
+
+function buildWordWolfParticipantVoteState(
+  currentState: Record<string, unknown>,
+  requestedState: Record<string, unknown>,
+  requesterId: string,
+) {
+  const currentBranch = asRecord(currentState.wordWolf);
+  const requestedBranch = asRecord(requestedState.wordWolf);
+  if (!currentBranch || !requestedBranch || currentBranch.step !== "vote") return null;
+
+  const playerIds = readRecordArray(currentBranch.players).map((player) => readString(player.id)).filter(isString);
+  const currentVoteIndex = readFiniteNumber(currentBranch.voteIndex);
+  if (currentVoteIndex === null || playerIds[currentVoteIndex] !== requesterId) return null;
+
+  const voteTargetId = readSingleOwnedVoteTarget(currentBranch.votes, requestedBranch.votes, requesterId);
+  if (!voteTargetId || voteTargetId === requesterId || !playerIds.includes(voteTargetId)) return null;
+
+  const expectedBranch = cloneJson(currentBranch) as Record<string, unknown>;
+  expectedBranch.votes = { ...(asRecord(currentBranch.votes) ?? {}), [requesterId]: voteTargetId };
+  const isFinalVote = currentVoteIndex + 1 >= playerIds.length;
+  if (isFinalVote) {
+    expectedBranch.step = "result";
+  } else {
+    expectedBranch.voteIndex = currentVoteIndex + 1;
+  }
+
+  return buildPreparedParticipantRoomState({
+    currentState,
+    requestedState,
+    branchKey: "wordWolf",
+    branch: expectedBranch,
+    gameKey: "word-wolf",
+    phase: isFinalVote ? "complete" : "playing",
+    step: isFinalVote ? 5 : 4,
+    requesterId,
+  });
+}
+
+function buildWerewolfParticipantVoteState(
+  currentState: Record<string, unknown>,
+  requestedState: Record<string, unknown>,
+  requesterId: string,
+) {
+  const currentBranch = asRecord(currentState.werewolf);
+  const requestedBranch = asRecord(requestedState.werewolf);
+  if (!currentBranch || !requestedBranch || currentBranch.phase !== "vote") return null;
+
+  const players = readRecordArray(currentBranch.players);
+  const assignments = readRecordArray(currentBranch.assignments);
+  const alivePlayerIds = getAliveWerewolfPlayerIds(players, assignments);
+  const currentVoteIndex = readFiniteNumber(currentBranch.voteIndex);
+  if (currentVoteIndex === null || alivePlayerIds[currentVoteIndex] !== requesterId) return null;
+
+  const voteTargetId = readSingleOwnedVoteTarget(currentBranch.votes, requestedBranch.votes, requesterId);
+  if (!voteTargetId || voteTargetId === requesterId || !alivePlayerIds.includes(voteTargetId)) return null;
+
+  const expectedBranch = cloneJson(currentBranch) as Record<string, unknown>;
+  const expectedVotes = { ...(asRecord(currentBranch.votes) ?? {}), [requesterId]: voteTargetId };
+  expectedBranch.votes = expectedVotes;
+
+  const isFinalVote = currentVoteIndex + 1 >= alivePlayerIds.length;
+  if (!isFinalVote) {
+    expectedBranch.voteIndex = currentVoteIndex + 1;
+    return buildPreparedParticipantRoomState({
+      currentState,
+      requestedState,
+      branchKey: "werewolf",
+      branch: expectedBranch,
+      gameKey: "werewolf-game",
+      phase: "playing",
+      step: 5,
+      requesterId,
+    });
+  }
+
+  const tally = tallyTargets(expectedVotes, alivePlayerIds);
+  expectedBranch.timerRunning = false;
+  if (tally.topTargetIds.length !== 1) {
+    expectedBranch.phase = "voteResult";
+    expectedBranch.tiedTargetIds = tally.topTargetIds;
+    expectedBranch.lastExecutedId = null;
+    expectedBranch.actionLog = buildWerewolfActionLog(`同票です。${tally.maxVotes}票で並びました。`, currentBranch.actionLog);
+    return buildPreparedParticipantRoomState({
+      currentState,
+      requestedState,
+      branchKey: "werewolf",
+      branch: expectedBranch,
+      gameKey: "werewolf-game",
+      phase: "playing",
+      step: 6,
+      requesterId,
+    });
+  }
+
+  const executedId = tally.topTargetIds[0];
+  const nextAssignments = markWerewolfAssignmentDead(assignments, executedId);
+  const executedName = getPlayerName(players, executedId);
+  const outcome = getWerewolfServerOutcome(nextAssignments);
+  const actionMessage = `${executedName}さんを追放しました。`;
+  expectedBranch.assignments = nextAssignments;
+  expectedBranch.tiedTargetIds = [];
+  expectedBranch.lastExecutedId = executedId;
+  expectedBranch.actionLog = buildWerewolfActionLog(actionMessage, currentBranch.actionLog);
+
+  if (outcome) {
+    expectedBranch.phase = "result";
+    expectedBranch.winner = outcome.winner;
+    expectedBranch.resultReason = `${actionMessage}${outcome.reason}`;
+    return buildPreparedParticipantRoomState({
+      currentState,
+      requestedState,
+      branchKey: "werewolf",
+      branch: expectedBranch,
+      gameKey: "werewolf-game",
+      phase: "complete",
+      step: 7,
+      requesterId,
+    });
+  }
+
+  expectedBranch.phase = "voteResult";
+  return buildPreparedParticipantRoomState({
+    currentState,
+    requestedState,
+    branchKey: "werewolf",
+    branch: expectedBranch,
+    gameKey: "werewolf-game",
+    phase: "playing",
+    step: 6,
+    requesterId,
+  });
+}
+
+function buildPreparedParticipantRoomState(input: {
+  currentState: Record<string, unknown>;
+  requestedState: Record<string, unknown>;
+  branchKey: string;
+  branch: Record<string, unknown>;
+  gameKey: string;
+  phase: "playing" | "complete";
+  step: number;
+  requesterId: string;
+}) {
+  const preparedState = cloneJson(input.requestedState) as Record<string, unknown>;
+  preparedState[input.branchKey] = input.branch;
+  preparedState.phase = input.phase;
+  preparedState.gameKey = input.gameKey;
+  preparedState.gameTitle = typeof input.currentState.gameTitle === "string" ? input.currentState.gameTitle : input.gameKey;
+  preparedState.step = input.step;
+  preparedState.updatedBy = input.requesterId;
+  preparedState.updatedAt = typeof input.requestedState.updatedAt === "string" ? input.requestedState.updatedAt : new Date().toISOString();
+  return preparedState;
+}
+
+function readSingleOwnedVoteTarget(currentVotesValue: unknown, nextVotesValue: unknown, requesterId: string) {
+  const currentVotes = asRecord(currentVotesValue) ?? {};
+  const nextVotes = asRecord(nextVotesValue) ?? {};
+  const changedVoteKeys = getChangedKeys(currentVotes, nextVotes);
+  if (changedVoteKeys.length !== 1 || changedVoteKeys[0] !== requesterId) return null;
+  return readString(nextVotes[requesterId]);
+}
+
+function getAliveWerewolfPlayerIds(players: Record<string, unknown>[], assignments: Record<string, unknown>[]) {
+  const aliveByPlayerId = new Map<string, boolean>();
+  for (const assignment of assignments) {
+    const playerId = readString(assignment.playerId);
+    if (playerId) {
+      aliveByPlayerId.set(playerId, assignment.alive === true);
+    }
+  }
+  return players
+    .map((player) => readString(player.id))
+    .filter((playerId): playerId is string => typeof playerId === "string" && aliveByPlayerId.get(playerId) === true);
+}
+
+function tallyTargets(votes: Record<string, unknown>, targetIds: string[]) {
+  const rows = targetIds.map((targetId) => ({
+    targetId,
+    count: Object.values(votes).filter((voteTargetId) => voteTargetId === targetId).length,
+  }));
+  const maxVotes = Math.max(0, ...rows.map((row) => row.count));
+  return {
+    maxVotes,
+    topTargetIds: rows.filter((row) => row.count === maxVotes && maxVotes > 0).map((row) => row.targetId),
+  };
+}
+
+function markWerewolfAssignmentDead(assignments: Record<string, unknown>[], playerId: string) {
+  return assignments.map((assignment) =>
+    assignment.playerId === playerId ? { ...assignment, alive: false } : assignment,
+  );
+}
+
+function getWerewolfServerOutcome(assignments: Record<string, unknown>[]) {
+  const alive = assignments.filter((assignment) => assignment.alive === true);
+  const werewolves = alive.filter((assignment) => assignment.role === "werewolf").length;
+  const villagers = alive.length - werewolves;
+  if (werewolves === 0) {
+    return { winner: "village", reason: "人狼を全員追放しました。" };
+  }
+  if (werewolves >= villagers) {
+    return { winner: "werewolves", reason: "人狼の数が村人側以上になりました。" };
+  }
+  return null;
+}
+
+function buildWerewolfActionLog(message: string, currentLogValue: unknown) {
+  const currentLog = Array.isArray(currentLogValue)
+    ? currentLogValue.filter((item): item is string => typeof item === "string")
+    : [];
+  return [message, ...currentLog].slice(0, 10);
+}
+
+function getPlayerName(players: Record<string, unknown>[], playerId: string) {
+  return players.find((player) => player.id === playerId && typeof player.name === "string")?.name ?? "該当者なし";
+}
+
+function readRecordArray(value: unknown) {
+  return Array.isArray(value)
+    ? value.map((item) => asRecord(item)).filter((item): item is Record<string, unknown> => Boolean(item))
+    : [];
+}
+
+function readString(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function isString(value: string | null): value is string {
+  return Boolean(value);
+}
+
+function readFiniteNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
 const progressStateKeys = new Set(["phase", "gameKey", "gameTitle", "step", "message", "updatedBy", "updatedAt"]);
@@ -759,9 +1124,13 @@ function restoreProtectedSecretFields(
   }
 
   if (currentGame === "werewolf-game") {
+    const preparedState = buildWerewolfParticipantVoteState(currentState, nextState, requester.id);
+    if (preparedState) return preparedState;
     restoreRecordFields(currentState, nextState, "werewolf", ["assignments", "werewolfTargetId", "seerTargetId", "knightTargetId"]);
   }
   if (currentGame === "word-wolf") {
+    const preparedState = buildWordWolfParticipantVoteState(currentState, nextState, requester.id);
+    if (preparedState) return preparedState;
     restoreRecordFields(currentState, nextState, "wordWolf", ["topicId", "assignments"]);
   }
   if (currentGame === "ng-word") {
