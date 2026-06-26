@@ -567,7 +567,7 @@ function App() {
   }
 
   if (activeGame === "yamanote") {
-    return <YamanoteGame onHome={goHome} onResetAll={resetAllGames} />;
+    return <YamanoteGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
   }
 
   if (activeGame === "two-choice") {
@@ -3426,10 +3426,68 @@ const initialYamanoteState: YamanoteState = {
   missCounts: {},
 };
 
-function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
-  const [storedState, setState] = useStoredState<YamanoteState>("yamanote", initialYamanoteState);
+type YamanoteRoomEnvelope = RoomProgressState & {
+  yamanote?: YamanoteState;
+};
+
+function parseYamanoteStateFromRoom(snapshot: RoomSnapshot | null) {
+  if (!snapshot || snapshot.room.currentGame !== "yamanote") return null;
+  const state = snapshot.room.state && typeof snapshot.room.state === "object" ? (snapshot.room.state as Partial<YamanoteRoomEnvelope>) : {};
+  return state.yamanote && typeof state.yamanote === "object" ? ({ ...initialYamanoteState, ...state.yamanote } as YamanoteState) : null;
+}
+
+function getYamanoteProgressStep(state: YamanoteState) {
+  const stepOrder: Record<YamanoteStep, number> = {
+    setup: 1,
+    play: 2,
+    complete: 3,
+  };
+  return stepOrder[state.step] ?? 1;
+}
+
+function describeYamanoteProgress(state: YamanoteState) {
+  if (state.step === "setup") return "山手線ゲームの設定中です";
+  if (state.step === "play") {
+    const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+    const progress = state.deckThemeIds.length > 0 ? `${state.deckIndex + 1}/${state.deckThemeIds.length}` : "準備中";
+    return currentPlayer ? `お題${progress}: ${currentPlayer.name}さんの番です` : `お題${progress}で進行中です`;
+  }
+  return "山手線ゲームが完了しました";
+}
+
+function buildYamanoteRoomEnvelope(yamanote: YamanoteState, updatedBy: string | null): YamanoteRoomEnvelope {
+  return {
+    phase: yamanote.step === "complete" ? "complete" : "playing",
+    gameKey: "yamanote",
+    gameTitle: findGameMeta("yamanote")?.title ?? "山手線ゲーム",
+    step: getYamanoteProgressStep(yamanote),
+    message: describeYamanoteProgress(yamanote),
+    updatedBy,
+    updatedAt: new Date().toISOString(),
+    yamanote,
+  };
+}
+
+function YamanoteGame({
+  onHome,
+  onResetAll,
+  roomSessionOverride = null,
+}: {
+  onHome: () => void;
+  onResetAll: () => void;
+  roomSessionOverride?: RoomSession | null;
+}) {
+  const storedRoomSession = useMemo(() => readRoomSession(), []);
+  const roomSession = roomSessionOverride ?? storedRoomSession;
+  const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
+  const [roomSyncError, setRoomSyncError] = useState("");
+  const roomSocketRef = useRef<Socket | null>(null);
+  const [storedState, setStoredState] = useStoredState<YamanoteState>("yamanote", initialYamanoteState);
   const [draftAnswer, setDraftAnswer] = useState("");
-  const state = { ...initialYamanoteState, ...storedState };
+  const roomYamanoteState = parseYamanoteStateFromRoom(roomSnapshot);
+  const isYamanoteRoom = Boolean(roomSession && (!roomSnapshot || roomSnapshot.room.currentGame === "yamanote"));
+  const activeYamanoteState = isYamanoteRoom ? (roomYamanoteState ?? initialYamanoteState) : storedState;
+  const state = { ...initialYamanoteState, ...activeYamanoteState };
   const activeYamanoteCategory = !state.includeAdultTopics && state.category === "adult" ? "all" : state.category;
   const availableYamanoteCategories = state.includeAdultTopics ? yamanoteCategories : normalYamanoteCategories;
   const themePool = useMemo(
@@ -3449,6 +3507,73 @@ function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
   const normalizedAnswers = new Set(state.answerLog.map((item) => item.answer.trim().toLowerCase()));
   const normalizedDraft = draftAnswer.trim().toLowerCase();
   const isDuplicateAnswer = Boolean(normalizedDraft && normalizedAnswers.has(normalizedDraft));
+  const isRoomHost = isYamanoteRoom && roomSession?.participantRole === "host";
+  const canControlYamanote = !isYamanoteRoom || (isRoomHost && Boolean(roomSnapshot));
+  const canActForCurrentYamanotePlayer = !isYamanoteRoom || canControlYamanote || currentPlayer?.id === roomSession?.participantId;
+
+  function setState(nextStateOrUpdater: YamanoteState | ((current: YamanoteState) => YamanoteState)) {
+    if (isYamanoteRoom && roomSession && !roomSnapshot) {
+      setRoomSyncError("ルーム情報を読み込み中です。少し待ってから操作してください。");
+      return;
+    }
+
+    if (!isYamanoteRoom || !roomSession || !roomSnapshot) {
+      setStoredState(nextStateOrUpdater);
+      return;
+    }
+
+    const nextState = typeof nextStateOrUpdater === "function" ? nextStateOrUpdater(state) : nextStateOrUpdater;
+    const nextRoomState = buildYamanoteRoomEnvelope(nextState, roomSession.participantId);
+    setRoomSnapshot({
+      ...roomSnapshot,
+      room: {
+        ...roomSnapshot.room,
+        status: nextRoomState.phase === "complete" ? "complete" : "playing",
+        currentGame: "yamanote",
+        state: nextRoomState,
+      },
+    });
+    roomSocketRef.current?.emit("room:state:update", {
+      roomCode: roomSession.roomCode,
+      currentGame: "yamanote",
+      state: nextRoomState,
+    });
+  }
+
+  useEffect(() => {
+    if (!roomSession) return;
+    let ignore = false;
+    fetchRoomSnapshot(roomSession.roomCode)
+      .then((snapshot) => {
+        if (!ignore) setRoomSnapshot(snapshot);
+      })
+      .catch((caught) => {
+        if (!ignore) setRoomSyncError(toErrorMessage(caught));
+      });
+
+    const socket = io(API_URL, {
+      transports: ["websocket", "polling"],
+    });
+    roomSocketRef.current = socket;
+
+    socket.on("connect", () => {
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+    });
+
+    socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
+      if (nextSnapshot) setRoomSnapshot(nextSnapshot);
+    });
+
+    socket.on("room:error", (payload: { error?: string }) => {
+      setRoomSyncError(toErrorMessage(payload.error ?? "room_error"));
+    });
+
+    return () => {
+      ignore = true;
+      socket.disconnect();
+      roomSocketRef.current = null;
+    };
+  }, [roomSession]);
 
   useEffect(() => {
     if (state.step === "play" && !activeTheme) {
@@ -3457,6 +3582,7 @@ function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
   }, [activeTheme, setState, state.step]);
 
   function startYamanote() {
+    if (!canControlYamanote) return;
     const deckThemeIds = shuffle(themePool)
       .slice(0, selectedThemeCount)
       .map((theme) => theme.id);
@@ -3473,6 +3599,7 @@ function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
   }
 
   function rotatePlayer(extraMissForPlayerId?: string) {
+    if (!canActForCurrentYamanotePlayer) return;
     setState({
       ...state,
       currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length),
@@ -3485,7 +3612,7 @@ function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
 
   function addYamanoteAnswer() {
     const answer = draftAnswer.trim();
-    if (!answer || !currentPlayer || isDuplicateAnswer) return;
+    if (!answer || !currentPlayer || isDuplicateAnswer || !canActForCurrentYamanotePlayer) return;
     setState({
       ...state,
       currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length),
@@ -3498,6 +3625,7 @@ function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
   }
 
   function moveToNextYamanoteTheme() {
+    if (!canControlYamanote) return;
     const nextIndex = state.deckIndex + 1;
     if (nextIndex >= state.deckThemeIds.length) {
       setState({ ...state, step: "complete", answerLog: [] });
@@ -3520,6 +3648,24 @@ function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
       onHome={onHome}
       onResetAll={onResetAll}
     >
+      {isYamanoteRoom && roomSession && (
+        <section className="tool-surface room-sync-strip">
+          <div>
+            <p className="eyebrow">ルーム同期中</p>
+            <h3>
+              {roomSession.roomCode} / {roomSession.participantName}
+              {isRoomHost ? " / ホスト" : ""}
+            </h3>
+            <p className="soft-note">
+              {isRoomHost
+                ? "この端末が進行役です。参加者取り込み、回答記録、アウト、次のお題を同期します。"
+                : "この端末では自分の番だけ回答・パス・アウト操作ができます。お題切り替えはホスト端末で行います。"}
+            </p>
+          </div>
+          {roomSyncError && <p className="room-message error">{roomSyncError}</p>}
+        </section>
+      )}
+
       {state.step === "setup" && (
         <section className="tool-surface">
           <div className="howto-panel">
@@ -3532,62 +3678,136 @@ function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
               <li>同じ答え、長すぎる沈黙、明らかに違う答えはアウトとして記録します。</li>
             </ol>
           </div>
-          <PlayerSetup
-            players={state.players}
-            minPlayers={2}
-            maxPlayers={20}
-            onChange={(players) => setState({ ...state, players })}
-          />
-          <ToggleSwitch
-            label="Hな話題"
-            description={
-              state.includeAdultTopics
-                ? "ON: 夜の話題・恋バナ寄りのお題も混ぜます。答えにくければスキップできます。"
-                : "OFF: 通常のお題だけで遊びます。"
-            }
-            checked={state.includeAdultTopics}
-            onChange={(includeAdultTopics) =>
-              setState({
-                ...state,
-                includeAdultTopics,
-                category: state.category === "adult" ? "all" : state.category,
-                deckThemeIds: [],
-                deckIndex: 0,
-                answerLog: [],
-              })
-            }
-          />
-          <SegmentedControl
-            label="カテゴリ"
-            options={availableYamanoteCategories}
-            value={activeYamanoteCategory}
-            onChange={(category) => setState({ ...state, category, deckThemeIds: [], deckIndex: 0, answerLog: [] })}
-          />
-          <SegmentedControl
-            label="今回のお題数"
-            options={yamanoteThemeCountOptions}
-            value={String(state.themeCount)}
-            onChange={(themeCount) =>
-              setState({
-                ...state,
-                themeCount: Number(themeCount) as YamanoteThemeCount,
-                deckThemeIds: [],
-                deckIndex: 0,
-                answerLog: [],
-              })
-            }
-          />
-          <SegmentedControl
-            label="1人の持ち時間"
-            options={yamanoteSecondsOptions}
-            value={String(state.secondsPerTurn)}
-            onChange={(secondsPerTurn) =>
-              setState({ ...state, secondsPerTurn: Number(secondsPerTurn) as YamanoteSeconds })
-            }
-          />
-          <p className="soft-note">
-            この条件では{themePool.length}問から、今回は{selectedThemeCount}問をランダムに使います。通常300問、大人向け30問です。
-          </p>
+
+          {isYamanoteRoom && roomSnapshot && (
+            <div className="notice-panel calm">
+              <strong>ルーム参加者を山手線ゲームのメンバーに使えます</strong>
+              <p>各端末で自分の番を操作するには、ルーム参加者を取り込んでください。</p>
+              <div className="action-row">
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, false),
+                      step: "setup",
+                      deckThemeIds: [],
+                      deckIndex: 0,
+                      currentPlayerIndex: 0,
+                      answerLog: [],
+                      missCounts: {},
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  ホスト以外を使う
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, true),
+                      step: "setup",
+                      deckThemeIds: [],
+                      deckIndex: 0,
+                      currentPlayerIndex: 0,
+                      answerLog: [],
+                      missCounts: {},
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  全員を使う
+                </button>
+              </div>
+            </div>
+          )}
+
+          {canControlYamanote ? (
+            <>
+              <PlayerSetup
+                players={state.players}
+                minPlayers={2}
+                maxPlayers={20}
+                onChange={(players) =>
+                  setState({
+                    ...state,
+                    players,
+                    deckThemeIds: [],
+                    deckIndex: 0,
+                    currentPlayerIndex: 0,
+                    answerLog: [],
+                    missCounts: {},
+                  })
+                }
+              />
+              <ToggleSwitch
+                label="Hな話題"
+                description={
+                  state.includeAdultTopics
+                    ? "ON: 夜の話題・恋バナ寄りのお題も混ぜます。答えにくければスキップできます。"
+                    : "OFF: 通常のお題だけで遊びます。"
+                }
+                checked={state.includeAdultTopics}
+                onChange={(includeAdultTopics) =>
+                  setState({
+                    ...state,
+                    includeAdultTopics,
+                    category: state.category === "adult" ? "all" : state.category,
+                    deckThemeIds: [],
+                    deckIndex: 0,
+                    answerLog: [],
+                    missCounts: {},
+                  })
+                }
+              />
+              <SegmentedControl
+                label="カテゴリ"
+                options={availableYamanoteCategories}
+                value={activeYamanoteCategory}
+                onChange={(category) =>
+                  setState({ ...state, category, deckThemeIds: [], deckIndex: 0, answerLog: [], missCounts: {} })
+                }
+              />
+              <SegmentedControl
+                label="今回のお題数"
+                options={yamanoteThemeCountOptions}
+                value={String(state.themeCount)}
+                onChange={(themeCount) =>
+                  setState({
+                    ...state,
+                    themeCount: Number(themeCount) as YamanoteThemeCount,
+                    deckThemeIds: [],
+                    deckIndex: 0,
+                    answerLog: [],
+                    missCounts: {},
+                  })
+                }
+              />
+              <SegmentedControl
+                label="1人の持ち時間"
+                options={yamanoteSecondsOptions}
+                value={String(state.secondsPerTurn)}
+                onChange={(secondsPerTurn) =>
+                  setState({ ...state, secondsPerTurn: Number(secondsPerTurn) as YamanoteSeconds })
+                }
+              />
+              <p className="soft-note">
+                この条件では{themePool.length}問から、今回は{selectedThemeCount}問をランダムに使います。通常300問、大人向け30問です。
+              </p>
+            </>
+          ) : (
+            <div className="howto-panel compact">
+              <h3>ホストの準備待ち</h3>
+              <p className="soft-note">ホストが参加者を取り込み、山手線ゲームを開始すると、この端末でも自分の番を操作できます。</p>
+            </div>
+          )}
+
           {state.includeAdultTopics && (
             <div className="notice-panel">
               <strong>Hな話題がONです</strong>
@@ -3602,11 +3822,11 @@ function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
             </p>
           </div>
           <div className="action-row">
-            <button className="primary-button" disabled={!canStart || selectedThemeCount === 0} onClick={startYamanote}>
+            <button className="primary-button" disabled={!canStart || selectedThemeCount === 0 || !canControlYamanote} onClick={startYamanote}>
               <Play size={18} />
               はじめる
             </button>
-            <button className="secondary-button" onClick={() => setState(initialYamanoteState)}>
+            <button className="secondary-button" disabled={!canControlYamanote} onClick={() => setState(initialYamanoteState)}>
               <RotateCcw size={18} />
               リセット
             </button>
@@ -3629,30 +3849,39 @@ function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
             ))}
           </div>
           <div className="answer-input-panel">
-            <label>
-              答えを記録
-              <input
-                value={draftAnswer}
-                onChange={(event) => setDraftAnswer(event.target.value)}
-                placeholder="答えを入力"
-                maxLength={32}
-              />
-            </label>
-            {isDuplicateAnswer && <p className="warning-text">同じ答えがすでに出ています。アウトにするか、別の答えにしてください。</p>}
-            <div className="action-row">
-              <button className="primary-button" disabled={!draftAnswer.trim() || isDuplicateAnswer} onClick={addYamanoteAnswer}>
-                <Check size={18} />
-                セーフで次へ
-              </button>
-              <button className="secondary-button" onClick={() => rotatePlayer()}>
-                <ChevronRight size={18} />
-                パスで次へ
-              </button>
-              <button className="danger-button" onClick={() => rotatePlayer(currentPlayer.id)}>
-                <ShieldAlert size={18} />
-                アウト
-              </button>
-            </div>
+            {canActForCurrentYamanotePlayer ? (
+              <>
+                <label>
+                  答えを記録
+                  <input
+                    value={draftAnswer}
+                    onChange={(event) => setDraftAnswer(event.target.value)}
+                    placeholder="答えを入力"
+                    maxLength={32}
+                  />
+                </label>
+                {isDuplicateAnswer && <p className="warning-text">同じ答えがすでに出ています。アウトにするか、別の答えにしてください。</p>}
+                <div className="action-row">
+                  <button className="primary-button" disabled={!draftAnswer.trim() || isDuplicateAnswer} onClick={addYamanoteAnswer}>
+                    <Check size={18} />
+                    セーフで次へ
+                  </button>
+                  <button className="secondary-button" onClick={() => rotatePlayer()}>
+                    <ChevronRight size={18} />
+                    パスで次へ
+                  </button>
+                  <button className="danger-button" onClick={() => rotatePlayer(currentPlayer.id)}>
+                    <ShieldAlert size={18} />
+                    アウト
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="howto-panel compact">
+                <h3>{currentPlayer.name}さんの番です</h3>
+                <p className="soft-note">この端末では待機中です。自分の番になると回答・パス・アウトを操作できます。</p>
+              </div>
+            )}
           </div>
           <div className="yamanote-board">
             <div>
@@ -3689,15 +3918,16 @@ function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
             </ul>
           </div>
           <div className="action-row">
-            <button className="primary-button" onClick={moveToNextYamanoteTheme}>
+            <button className="primary-button" disabled={!canControlYamanote} onClick={moveToNextYamanoteTheme}>
               {state.deckIndex + 1 >= state.deckThemeIds.length ? <Check size={18} /> : <ChevronRight size={18} />}
               {state.deckIndex + 1 >= state.deckThemeIds.length ? "完了" : "次のお題"}
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup" })}>
+            <button className="secondary-button" disabled={!canControlYamanote} onClick={() => setState({ ...state, step: "setup" })}>
               <Users size={18} />
               設定へ
             </button>
           </div>
+          {!canControlYamanote && <p className="soft-note">次のお題へ進む操作はホスト端末で行います。</p>}
         </section>
       )}
 
@@ -3715,11 +3945,11 @@ function YamanoteGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: 
           </div>
           <p className="talk-cue">場が温まっていたら、カテゴリを変えてもう一度遊べます。</p>
           <div className="action-row centered">
-            <button className="primary-button" onClick={startYamanote}>
+            <button className="primary-button" disabled={!canControlYamanote} onClick={startYamanote}>
               <RotateCcw size={18} />
               もう一度
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup" })}>
+            <button className="secondary-button" disabled={!canControlYamanote} onClick={() => setState({ ...state, step: "setup" })}>
               <Users size={18} />
               設定へ
             </button>
