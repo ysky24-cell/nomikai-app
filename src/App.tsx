@@ -1308,6 +1308,7 @@ function toErrorMessage(error: unknown) {
     room_join_required: "ルームへの接続が切れています。更新または再参加してください。",
     game_mismatch: "現在のゲームと更新内容が一致しません。画面を更新してください。",
     participant_update_mismatch: "別の参加者としての更新はできません。",
+    participant_field_forbidden: "この端末では、その回答欄や投票欄は変更できません。",
     Failed_to_fetch: "APIに接続できません。Docker版が起動しているか確認してください。",
   };
   return messages[value] ?? "処理に失敗しました。APIサーバーの状態を確認してください。";

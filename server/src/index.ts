@@ -482,7 +482,190 @@ function validateStateUpdateAuthorization(
   ) {
     return "host_required";
   }
+  return validateParticipantScopedStateChange(activeGame, snapshot.room.state, nextStateValue, requester.id);
+}
+
+function validateParticipantScopedStateChange(
+  activeGame: string,
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  requesterId: string,
+) {
+  switch (activeGame) {
+    case "two-choice":
+      return validateOwnedMapBranchChange(currentStateValue, nextStateValue, "twoChoice", requesterId, ["votes"]);
+    case "impression-ranking":
+      return validateOwnedMapBranchChange(currentStateValue, nextStateValue, "impression", requesterId, ["votes"]);
+    case "majority-game":
+    case "large-majority-game":
+      return validateUrlCandidateOwnedMapChange(currentStateValue, nextStateValue, activeGame, requesterId, ["votes"]);
+    case "anonymous-box":
+      return validateAnonymousQuestionSubmission(currentStateValue, nextStateValue);
+    default:
+      return null;
+  }
+}
+
+const progressStateKeys = new Set(["phase", "gameKey", "gameTitle", "step", "message", "updatedBy", "updatedAt"]);
+
+function validateOwnedMapBranchChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  branchKey: string,
+  requesterId: string,
+  mapKeys: string[],
+) {
+  const currentState = asRecord(currentStateValue);
+  const nextState = asRecord(nextStateValue);
+  if (!currentState || !nextState) return "participant_field_forbidden";
+
+  const changedTopLevelKeys = getChangedKeys(currentState, nextState).filter((key) => !progressStateKeys.has(key));
+  if (changedTopLevelKeys.length !== 1 || changedTopLevelKeys[0] !== branchKey) {
+    return "participant_field_forbidden";
+  }
+
+  const currentBranch = asRecord(currentState[branchKey]);
+  const nextBranch = asRecord(nextState[branchKey]);
+  if (!currentBranch || !nextBranch) return "participant_field_forbidden";
+
+  const allowedMapKeys = new Set(mapKeys);
+  const changedBranchKeys = getChangedKeys(currentBranch, nextBranch);
+  if (changedBranchKeys.length === 0 || changedBranchKeys.some((key) => !allowedMapKeys.has(key))) {
+    return "participant_field_forbidden";
+  }
+
+  for (const mapKey of changedBranchKeys) {
+    const currentMap = asRecord(currentBranch[mapKey]) ?? {};
+    const nextMap = asRecord(nextBranch[mapKey]) ?? {};
+    const changedParticipantKeys = getChangedKeys(currentMap, nextMap);
+    if (changedParticipantKeys.length === 0 || changedParticipantKeys.some((key) => key !== requesterId)) {
+      return "participant_field_forbidden";
+    }
+  }
+
   return null;
+}
+
+function validateUrlCandidateOwnedMapChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  gameKey: string,
+  requesterId: string,
+  mapKeys: string[],
+) {
+  const currentState = asRecord(currentStateValue);
+  const nextState = asRecord(nextStateValue);
+  if (!currentState || !nextState) return "participant_field_forbidden";
+
+  const currentBranch = currentState ? asRecord(currentState.urlCandidate) : null;
+  const nextBranch = nextState ? asRecord(nextState.urlCandidate) : null;
+  if (!currentBranch || !nextBranch || currentBranch.key !== gameKey || nextBranch.key !== gameKey) {
+    return "participant_field_forbidden";
+  }
+
+  const changedTopLevelKeys = getChangedKeys(currentState, nextState).filter((key) => !progressStateKeys.has(key));
+  if (changedTopLevelKeys.length !== 1 || changedTopLevelKeys[0] !== "urlCandidate") {
+    return "participant_field_forbidden";
+  }
+
+  const changedUrlCandidateKeys = getChangedKeys(currentBranch, nextBranch);
+  if (changedUrlCandidateKeys.length !== 1 || changedUrlCandidateKeys[0] !== "state") {
+    return "participant_field_forbidden";
+  }
+
+  return validateOwnedStateMaps(currentBranch.state, nextBranch.state, requesterId, mapKeys);
+}
+
+function validateOwnedStateMaps(currentValue: unknown, nextValue: unknown, requesterId: string, mapKeys: string[]) {
+  const currentState = asRecord(currentValue);
+  const nextState = asRecord(nextValue);
+  if (!currentState || !nextState) return "participant_field_forbidden";
+
+  const allowedMapKeys = new Set(mapKeys);
+  const changedKeys = getChangedKeys(currentState, nextState);
+  if (changedKeys.length === 0 || changedKeys.some((key) => !allowedMapKeys.has(key))) {
+    return "participant_field_forbidden";
+  }
+
+  for (const mapKey of changedKeys) {
+    const currentMap = asRecord(currentState[mapKey]) ?? {};
+    const nextMap = asRecord(nextState[mapKey]) ?? {};
+    const changedParticipantKeys = getChangedKeys(currentMap, nextMap);
+    if (changedParticipantKeys.length === 0 || changedParticipantKeys.some((key) => key !== requesterId)) {
+      return "participant_field_forbidden";
+    }
+  }
+
+  return null;
+}
+
+function validateAnonymousQuestionSubmission(currentStateValue: unknown, nextStateValue: unknown) {
+  const currentState = asRecord(currentStateValue);
+  const nextState = asRecord(nextStateValue);
+  if (!currentState || !nextState) return "participant_field_forbidden";
+
+  const changedTopLevelKeys = getChangedKeys(currentState, nextState).filter((key) => !progressStateKeys.has(key));
+  if (changedTopLevelKeys.length !== 1 || changedTopLevelKeys[0] !== "anonymousQuestion") {
+    return "participant_field_forbidden";
+  }
+
+  const currentBranch = asRecord(currentState.anonymousQuestion);
+  const nextBranch = asRecord(nextState.anonymousQuestion);
+  if (!currentBranch || !nextBranch) return "participant_field_forbidden";
+  if (currentBranch.step !== "setup" || nextBranch.step !== "setup") {
+    return "host_required";
+  }
+
+  const changedBranchKeys = getChangedKeys(currentBranch, nextBranch);
+  if (changedBranchKeys.length !== 1 || changedBranchKeys[0] !== "customQuestions") {
+    return "participant_field_forbidden";
+  }
+
+  const currentQuestions = Array.isArray(currentBranch.customQuestions) ? currentBranch.customQuestions : [];
+  const nextQuestions = Array.isArray(nextBranch.customQuestions) ? nextBranch.customQuestions : [];
+  if (nextQuestions.length !== currentQuestions.length + 1) {
+    return "participant_field_forbidden";
+  }
+  for (let index = 0; index < currentQuestions.length; index += 1) {
+    if (!isDeepEqual(currentQuestions[index], nextQuestions[index])) {
+      return "participant_field_forbidden";
+    }
+  }
+
+  const addedQuestion = asRecord(nextQuestions[nextQuestions.length - 1]);
+  if (!addedQuestion || typeof addedQuestion.id !== "string" || typeof addedQuestion.text !== "string" || !addedQuestion.text.trim()) {
+    return "participant_field_forbidden";
+  }
+
+  return null;
+}
+
+function getChangedKeys(currentValue: Record<string, unknown>, nextValue: Record<string, unknown>) {
+  const keys = new Set([...Object.keys(currentValue), ...Object.keys(nextValue)]);
+  return [...keys].filter((key) => !isDeepEqual(currentValue[key], nextValue[key]));
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function isDeepEqual(left: unknown, right: unknown) {
+  return canonicalJson(left) === canonicalJson(right);
+}
+
+function canonicalJson(value: unknown): string {
+  return JSON.stringify(sortJsonValue(value));
+}
+
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sortJsonValue(item));
+  }
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(record).sort().map((key) => [key, sortJsonValue(record[key])]));
+  }
+  return value;
 }
 
 async function emitRoomSnapshot(roomCode: string) {
