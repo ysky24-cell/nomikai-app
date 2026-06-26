@@ -62,7 +62,8 @@ app.get("/rooms/:code", async (request, response, next) => {
       response.status(404).json({ error: "room_not_found" });
       return;
     }
-    response.json(snapshot);
+    const participantId = readOptionalString(request.query.participantId);
+    response.json(sanitizeRoomSnapshotForParticipant(snapshot, findParticipant(snapshot, participantId)));
   } catch (error) {
     next(error);
   }
@@ -79,10 +80,11 @@ app.post("/rooms/:code/join", async (request, response, next) => {
 
     const snapshot = await findRoomByCode(request.params.code);
     if (snapshot) {
-      io.to(snapshot.room.code).emit("room:updated", snapshot);
+      await emitRoomSnapshot(snapshot.room.code);
     }
 
-    response.status(201).json({ participant, room: snapshot?.room ?? null });
+    const participantSnapshot = snapshot ? sanitizeRoomSnapshotForParticipant(snapshot, participant) : null;
+    response.status(201).json({ participant, room: participantSnapshot?.room ?? null });
   } catch (error) {
     next(error);
   }
@@ -99,7 +101,7 @@ app.post("/rooms/:code/host/transfer", async (request, response, next) => {
     }
 
     await emitRoomSnapshot(snapshot.room.code);
-    response.json(snapshot);
+    response.json(sanitizeRoomSnapshotForParticipant(snapshot, findParticipant(snapshot, requesterParticipantId)));
   } catch (error) {
     next(error);
   }
@@ -115,7 +117,7 @@ app.delete("/rooms/:code/participants/:targetParticipantId", async (request, res
     }
 
     await emitRoomSnapshot(snapshot.room.code);
-    response.json(snapshot);
+    response.json(sanitizeRoomSnapshotForParticipant(snapshot, findParticipant(snapshot, requesterParticipantId)));
   } catch (error) {
     next(error);
   }
@@ -160,7 +162,7 @@ app.post("/rooms/:code/game/start", async (request, response, next) => {
     }
 
     await emitRoomSnapshot(snapshot.room.code);
-    response.json(snapshot);
+    response.json(sanitizeRoomSnapshotForParticipant(snapshot, findParticipant(snapshot, participantId)));
   } catch (error) {
     next(error);
   }
@@ -209,7 +211,7 @@ app.post("/rooms/:code/game/advance", async (request, response, next) => {
     }
 
     await emitRoomSnapshot(updatedSnapshot.room.code);
-    response.json(updatedSnapshot);
+    response.json(sanitizeRoomSnapshotForParticipant(updatedSnapshot, findParticipant(updatedSnapshot, participantId)));
   } catch (error) {
     next(error);
   }
@@ -257,7 +259,7 @@ app.post("/rooms/:code/game/complete", async (request, response, next) => {
     }
 
     await emitRoomSnapshot(updatedSnapshot.room.code);
-    response.json(updatedSnapshot);
+    response.json(sanitizeRoomSnapshotForParticipant(updatedSnapshot, findParticipant(updatedSnapshot, participantId)));
   } catch (error) {
     next(error);
   }
@@ -300,7 +302,7 @@ app.post("/rooms/:code/game/reset", async (request, response, next) => {
     }
 
     await emitRoomSnapshot(snapshot.room.code);
-    response.json(snapshot);
+    response.json(sanitizeRoomSnapshotForParticipant(snapshot, findParticipant(snapshot, participantId)));
   } catch (error) {
     next(error);
   }
@@ -334,8 +336,7 @@ io.on("connection", (socket) => {
       await setParticipantConnected(participantId, true);
     }
 
-    const latestSnapshot = await findRoomByCode(roomCode);
-    io.to(snapshot.room.code).emit("room:updated", latestSnapshot);
+    await emitRoomSnapshot(snapshot.room.code);
   });
 
   socket.on("room:state:update", async (payload: { roomCode?: string; state?: unknown; currentGame?: string | null }) => {
@@ -364,7 +365,13 @@ io.on("connection", (socket) => {
     }
 
     const currentGame = payload.currentGame ?? currentSnapshot.room.currentGame;
-    const authorizationError = validateStateUpdateAuthorization(currentSnapshot, requester, currentGame, payload.state);
+    const stateToPersist = restoreProtectedSecretFields(
+      currentGame,
+      currentSnapshot.room.state,
+      payload.state ?? {},
+      requester,
+    );
+    const authorizationError = validateStateUpdateAuthorization(currentSnapshot, requester, currentGame, stateToPersist);
     if (authorizationError) {
       socket.emit("room:error", { error: authorizationError });
       return;
@@ -372,9 +379,9 @@ io.on("connection", (socket) => {
 
     const room = await updateRoomState(
       roomCode,
-      payload.state ?? {},
+      stateToPersist,
       currentGame,
-      readRoomStatusFromState(payload.state, currentGame),
+      readRoomStatusFromState(stateToPersist, currentGame),
     );
     if (!room) {
       socket.emit("room:error", { error: "room_not_found" });
@@ -382,8 +389,7 @@ io.on("connection", (socket) => {
     }
 
     await redis.set(`room:${room.code}:state`, JSON.stringify(room.state));
-    const snapshot = await findRoomByCode(room.code);
-    io.to(room.code).emit("room:updated", snapshot);
+    await emitRoomSnapshot(room.code);
   });
 
   socket.on("disconnect", async () => {
@@ -395,8 +401,7 @@ io.on("connection", (socket) => {
     }
 
     if (roomCode) {
-      const snapshot = await findRoomByCode(roomCode);
-      io.to(roomCode).emit("room:updated", snapshot);
+      await emitRoomSnapshot(roomCode);
     }
   });
 });
@@ -668,9 +673,172 @@ function sortJsonValue(value: unknown): unknown {
   return value;
 }
 
+function sanitizeRoomSnapshotForParticipant(snapshot: RoomSnapshot, requester: RoomParticipant | null): RoomSnapshot {
+  if (requester?.role === "host") {
+    return snapshot;
+  }
+
+  const nextSnapshot = cloneJson(snapshot) as RoomSnapshot;
+  const state = asRecord(nextSnapshot.room.state);
+  if (!state) {
+    return nextSnapshot;
+  }
+
+  const currentGame = nextSnapshot.room.currentGame ?? readProgressState(state, null).gameKey;
+  if (currentGame === "werewolf-game") {
+    maskWerewolfState(state, requester?.id ?? null);
+  }
+  if (currentGame === "word-wolf") {
+    maskWordWolfState(state, requester?.id ?? null);
+  }
+  if (currentGame === "ng-word") {
+    maskNgWordState(state, requester?.id ?? null);
+  }
+
+  return nextSnapshot;
+}
+
+function maskWerewolfState(state: Record<string, unknown>, participantId: string | null) {
+  const werewolf = asRecord(state.werewolf);
+  if (!werewolf || werewolf.phase === "result") return;
+
+  werewolf.assignments = maskAssignments(werewolf.assignments, (assignment) => {
+    if (assignment.playerId === participantId) return assignment;
+    return {
+      ...assignment,
+      role: "hidden",
+    };
+  });
+  werewolf.werewolfTargetId = null;
+  werewolf.seerTargetId = null;
+  werewolf.knightTargetId = null;
+}
+
+function maskWordWolfState(state: Record<string, unknown>, participantId: string | null) {
+  const wordWolf = asRecord(state.wordWolf);
+  if (!wordWolf || wordWolf.step === "result") return;
+
+  wordWolf.topicId = null;
+  wordWolf.assignments = maskAssignments(wordWolf.assignments, (assignment) => {
+    if (assignment.playerId === participantId) return assignment;
+    return {
+      ...assignment,
+      role: "hidden",
+      word: "",
+    };
+  });
+}
+
+function maskNgWordState(state: Record<string, unknown>, participantId: string | null) {
+  const ngWord = asRecord(state.ngWord);
+  if (!ngWord || ngWord.step === "result") return;
+
+  ngWord.assignments = maskAssignments(ngWord.assignments, (assignment) => {
+    if (participantId && assignment.playerId !== participantId) return assignment;
+    return {
+      ...assignment,
+      word: "",
+    };
+  });
+}
+
+function restoreProtectedSecretFields(
+  currentGame: string | null,
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  requester: RoomParticipant,
+) {
+  if (requester.role === "host") {
+    return nextStateValue ?? {};
+  }
+
+  const nextState = cloneJson(nextStateValue ?? {}) as Record<string, unknown>;
+  const currentState = asRecord(currentStateValue);
+  if (!currentState || !asRecord(nextState)) {
+    return nextState;
+  }
+
+  if (currentGame === "werewolf-game") {
+    restoreRecordFields(currentState, nextState, "werewolf", ["assignments", "werewolfTargetId", "seerTargetId", "knightTargetId"]);
+  }
+  if (currentGame === "word-wolf") {
+    restoreRecordFields(currentState, nextState, "wordWolf", ["topicId", "assignments"]);
+  }
+  if (currentGame === "ng-word") {
+    restoreNgWordAssignmentWords(currentState, nextState);
+  }
+
+  return nextState;
+}
+
+function restoreRecordFields(
+  currentState: Record<string, unknown>,
+  nextState: Record<string, unknown>,
+  branchKey: string,
+  fieldKeys: string[],
+) {
+  const currentBranch = asRecord(currentState[branchKey]);
+  const nextBranch = asRecord(nextState[branchKey]);
+  if (!currentBranch || !nextBranch) return;
+
+  for (const fieldKey of fieldKeys) {
+    nextBranch[fieldKey] = cloneJson(currentBranch[fieldKey]);
+  }
+}
+
+function restoreNgWordAssignmentWords(currentState: Record<string, unknown>, nextState: Record<string, unknown>) {
+  const currentBranch = asRecord(currentState.ngWord);
+  const nextBranch = asRecord(nextState.ngWord);
+  if (!currentBranch || !nextBranch) return;
+
+  const currentAssignments = Array.isArray(currentBranch.assignments) ? currentBranch.assignments : [];
+  const nextAssignments = Array.isArray(nextBranch.assignments) ? nextBranch.assignments : [];
+  const currentWords = new Map<string, unknown>();
+  for (const assignment of currentAssignments) {
+    const currentAssignment = asRecord(assignment);
+    if (currentAssignment && typeof currentAssignment.playerId === "string") {
+      currentWords.set(currentAssignment.playerId, currentAssignment.word);
+    }
+  }
+
+  nextBranch.assignments = nextAssignments.map((assignment) => {
+    const nextAssignment = asRecord(assignment);
+    if (!nextAssignment || typeof nextAssignment.playerId !== "string") return assignment;
+    return {
+      ...nextAssignment,
+      word: currentWords.get(nextAssignment.playerId) ?? nextAssignment.word,
+    };
+  });
+}
+
+function maskAssignments(value: unknown, mask: (assignment: Record<string, unknown>) => Record<string, unknown>) {
+  if (!Array.isArray(value)) return [];
+  return value.map((assignment) => {
+    const record = asRecord(assignment);
+    return record ? mask(record) : assignment;
+  });
+}
+
+function cloneJson(value: unknown): unknown {
+  if (typeof value === "undefined") return undefined;
+  return JSON.parse(JSON.stringify(value));
+}
+
 async function emitRoomSnapshot(roomCode: string) {
   const snapshot = await findRoomByCode(roomCode);
-  io.to(roomCode).emit("room:updated", snapshot);
+  if (!snapshot) {
+    io.to(roomCode).emit("room:updated", null);
+    return;
+  }
+
+  const sockets = await io.in(snapshot.room.code).fetchSockets();
+  await Promise.all(
+    sockets.map(async (socket) => {
+      const participantId = typeof socket.data.participantId === "string" ? socket.data.participantId : null;
+      const requester = findParticipant(snapshot, participantId);
+      socket.emit("room:updated", sanitizeRoomSnapshotForParticipant(snapshot, requester));
+    }),
+  );
 }
 
 type ProgressPhase = "lobby" | "playing" | "complete";

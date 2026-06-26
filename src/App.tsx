@@ -743,7 +743,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
 
     let ignore = false;
     setJoinCode(session.roomCode);
-    fetchRoomSnapshot(session.roomCode)
+    fetchRoomSnapshot(session.roomCode, session.participantId)
       .then((roomSnapshot) => {
         if (ignore) return;
         const savedParticipant = roomSnapshot.participants.find((item) => item.id === session.participantId) ?? null;
@@ -864,7 +864,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
         method: "POST",
         body: { hostName: name },
       });
-      const roomSnapshot = await fetchRoomSnapshot(result.room.code);
+      const roomSnapshot = await fetchRoomSnapshot(result.room.code, result.host?.id);
       setSnapshot(roomSnapshot);
       setParticipant(result.host);
       saveRoomSession(result.room.code, result.host);
@@ -896,7 +896,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
           body: { name },
         },
       );
-      const roomSnapshot = await fetchRoomSnapshot(code);
+      const roomSnapshot = await fetchRoomSnapshot(code, result.participant.id);
       setSnapshot(roomSnapshot);
       setParticipant(result.participant);
       saveRoomSession(code, result.participant);
@@ -1018,7 +1018,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     setIsBusy(true);
     setError("");
     try {
-      const roomSnapshot = await fetchRoomSnapshot(code);
+      const roomSnapshot = await fetchRoomSnapshot(code, participant?.id ?? readRoomSession()?.participantId);
       applyRoomSnapshot(roomSnapshot, "ルーム情報を更新しました。");
     } catch (caught) {
       setError(toErrorMessage(caught));
@@ -1261,8 +1261,9 @@ async function requestJson<T>(path: string, options: { method?: string; body?: u
   return payload as T;
 }
 
-async function fetchRoomSnapshot(code: string) {
-  return requestJson<RoomSnapshot>(`/rooms/${encodeURIComponent(code)}`);
+async function fetchRoomSnapshot(code: string, participantId?: string | null) {
+  const query = participantId ? `?participantId=${encodeURIComponent(participantId)}` : "";
+  return requestJson<RoomSnapshot>(`/rooms/${encodeURIComponent(code)}${query}`);
 }
 
 function parseRoomProgress(snapshot: RoomSnapshot): RoomProgressState {
@@ -1831,7 +1832,7 @@ function UrlCandidateGame({
   useEffect(() => {
     if (!supportsRoomSync || !roomSession) return;
     let ignore = false;
-    fetchRoomSnapshot(roomSession.roomCode)
+    fetchRoomSnapshot(roomSession.roomCode, roomSession.participantId)
       .then((snapshot) => {
         if (!ignore) setRoomSnapshot(snapshot);
       })
@@ -3855,7 +3856,7 @@ function WerewolfGame({
   useEffect(() => {
     if (!roomSession) return;
     let ignore = false;
-    fetchRoomSnapshot(roomSession.roomCode)
+    fetchRoomSnapshot(roomSession.roomCode, roomSession.participantId)
       .then((snapshot) => {
         if (!ignore) setRoomSnapshot(snapshot);
       })
@@ -4720,7 +4721,7 @@ function YamanoteGame({
   useEffect(() => {
     if (!roomSession) return;
     let ignore = false;
-    fetchRoomSnapshot(roomSession.roomCode)
+    fetchRoomSnapshot(roomSession.roomCode, roomSession.participantId)
       .then((snapshot) => {
         if (!ignore) setRoomSnapshot(snapshot);
       })
@@ -5331,7 +5332,7 @@ function JohariWindowGame({
   useEffect(() => {
     if (!roomSession) return;
     let ignore = false;
-    fetchRoomSnapshot(roomSession.roomCode)
+    fetchRoomSnapshot(roomSession.roomCode, roomSession.participantId)
       .then((snapshot) => {
         if (!ignore) setRoomSnapshot(snapshot);
       })
@@ -5890,7 +5891,7 @@ function TurtleSoupGame({
   useEffect(() => {
     if (!roomSession) return;
     let ignore = false;
-    fetchRoomSnapshot(roomSession.roomCode)
+    fetchRoomSnapshot(roomSession.roomCode, roomSession.participantId)
       .then((snapshot) => {
         if (!ignore) setRoomSnapshot(snapshot);
       })
@@ -6438,7 +6439,7 @@ function AnonymousQuestionBoxGame({
   useEffect(() => {
     if (!roomSession) return;
     let ignore = false;
-    fetchRoomSnapshot(roomSession.roomCode)
+    fetchRoomSnapshot(roomSession.roomCode, roomSession.participantId)
       .then((snapshot) => {
         if (!ignore) setRoomSnapshot(snapshot);
       })
@@ -6910,7 +6911,7 @@ function TwoChoiceGame({
   useEffect(() => {
     if (!roomSession) return;
     let ignore = false;
-    fetchRoomSnapshot(roomSession.roomCode)
+    fetchRoomSnapshot(roomSession.roomCode, roomSession.participantId)
       .then((snapshot) => {
         if (!ignore) setRoomSnapshot(snapshot);
       })
@@ -7453,7 +7454,7 @@ function ImpressionRankingGame({
   useEffect(() => {
     if (!roomSession) return;
     let ignore = false;
-    fetchRoomSnapshot(roomSession.roomCode)
+    fetchRoomSnapshot(roomSession.roomCode, roomSession.participantId)
       .then((snapshot) => {
         if (!ignore) setRoomSnapshot(snapshot);
       })
@@ -8036,7 +8037,7 @@ function PartyPackGame({
   useEffect(() => {
     if (!roomSession) return;
     let ignore = false;
-    fetchRoomSnapshot(roomSession.roomCode)
+    fetchRoomSnapshot(roomSession.roomCode, roomSession.participantId)
       .then((snapshot) => {
         if (!ignore) setRoomSnapshot(snapshot);
       })
@@ -9174,7 +9175,7 @@ function WordWolfGame({
   useEffect(() => {
     if (!roomSession) return;
     let ignore = false;
-    fetchRoomSnapshot(roomSession.roomCode)
+    fetchRoomSnapshot(roomSession.roomCode, roomSession.participantId)
       .then((snapshot) => {
         if (!ignore) setRoomSnapshot(snapshot);
       })
@@ -9742,7 +9743,7 @@ function NgWordGame({
   useEffect(() => {
     if (!roomSession) return;
     let ignore = false;
-    fetchRoomSnapshot(roomSession.roomCode)
+    fetchRoomSnapshot(roomSession.roomCode, roomSession.participantId)
       .then((snapshot) => {
         if (!ignore) setRoomSnapshot(snapshot);
       })
