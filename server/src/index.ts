@@ -513,6 +513,27 @@ function validateParticipantScopedStateChange(
     case "large-majority-game":
       if (progress.phaseOrStepChanged) return "host_required";
       return validateUrlCandidateOwnedMapChange(currentStateValue, nextStateValue, activeGame, requesterId, ["votes"]);
+    case "song-association-quiz":
+    case "drawing-quiz":
+    case "memory-logo-drawing":
+    case "weird-karuta-game":
+    case "emo-hint-game":
+    case "person-hint-quiz":
+    case "humming-intro-quiz":
+      if (progress.phaseOrStepChanged) return "host_required";
+      return validateUrlCandidateGuessGameChange(currentStateValue, nextStateValue, activeGame, requesterId);
+    case "truth-lie-game":
+      if (progress.phaseOrStepChanged) return "host_required";
+      return validateUrlCandidateTruthLieChange(currentStateValue, nextStateValue, activeGame, requesterId);
+    case "value-meter-game":
+      if (progress.phaseOrStepChanged) return "host_required";
+      return validateUrlCandidateValueMeterChange(currentStateValue, nextStateValue, activeGame, requesterId);
+    case "typing-speed-game":
+      if (progress.phaseOrStepChanged) return "host_required";
+      return validateUrlCandidateTypingChange(currentStateValue, nextStateValue, activeGame, requesterId);
+    case "acting-phrase-game":
+      if (progress.phaseOrStepChanged) return "host_required";
+      return validateUrlCandidateActingChange(currentStateValue, nextStateValue, activeGame, requesterId);
     case "anonymous-box":
       if (progress.phaseOrStepChanged) return "host_required";
       return validateAnonymousQuestionSubmission(currentStateValue, nextStateValue);
@@ -967,6 +988,248 @@ function validateOwnedStateMaps(currentValue: unknown, nextValue: unknown, reque
   }
 
   return null;
+}
+
+function validateUrlCandidateGuessGameChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  gameKey: string,
+  requesterId: string,
+) {
+  const change = readUrlCandidateStateChange(currentStateValue, nextStateValue, gameKey);
+  if ("error" in change) return change.error;
+  if (change.currentInnerState.step !== "play" || change.nextInnerState.step !== "play") return "host_required";
+
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(change.currentInnerState);
+  const changedKeys = getChangedKeys(change.currentInnerState, change.nextInnerState);
+
+  if (isOnlyChangedKeys(changedKeys, ["guesses"])) {
+    if (requesterId === currentPlayerId) return "participant_field_forbidden";
+    return validateOwnedStateMaps(change.currentInnerState, change.nextInnerState, requesterId, ["guesses"]);
+  }
+
+  if (requesterId === currentPlayerId && validateUrlCandidateJudgeChange(change.currentInnerState, change.nextInnerState)) {
+    return null;
+  }
+
+  return "participant_field_forbidden";
+}
+
+function validateUrlCandidateTruthLieChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  gameKey: string,
+  requesterId: string,
+) {
+  const change = readUrlCandidateStateChange(currentStateValue, nextStateValue, gameKey);
+  if ("error" in change) return change.error;
+  if (change.currentInnerState.step !== "play" || change.nextInnerState.step !== "play") return "host_required";
+
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(change.currentInnerState);
+  const changedKeys = getChangedKeys(change.currentInnerState, change.nextInnerState);
+
+  if (requesterId !== currentPlayerId && isOnlyChangedKeys(changedKeys, ["votes"])) {
+    return validateOwnedStateMaps(change.currentInnerState, change.nextInnerState, requesterId, ["votes"]);
+  }
+
+  if (requesterId === currentPlayerId && validateUrlCandidateOwnerAnswerChange(change.currentInnerState, change.nextInnerState, "truthLieAnswer")) {
+    return null;
+  }
+
+  return "participant_field_forbidden";
+}
+
+function validateUrlCandidateValueMeterChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  gameKey: string,
+  requesterId: string,
+) {
+  const change = readUrlCandidateStateChange(currentStateValue, nextStateValue, gameKey);
+  if ("error" in change) return change.error;
+  if (change.currentInnerState.step !== "play" || change.nextInnerState.step !== "play") return "host_required";
+  return validateOwnedStateMaps(change.currentInnerState, change.nextInnerState, requesterId, ["guesses", "votes"]);
+}
+
+function validateUrlCandidateTypingChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  gameKey: string,
+  requesterId: string,
+) {
+  const change = readUrlCandidateStateChange(currentStateValue, nextStateValue, gameKey);
+  if ("error" in change) return change.error;
+  if (change.currentInnerState.step !== "play" || change.nextInnerState.step !== "play") return "host_required";
+
+  const changedKeys = getChangedKeys(change.currentInnerState, change.nextInnerState);
+  if (isOnlyChangedKeys(changedKeys, ["guesses"])) {
+    return validateOwnedStateMaps(change.currentInnerState, change.nextInnerState, requesterId, ["guesses"]);
+  }
+  if (validateUrlCandidateSelfCorrectChange(change.currentInnerState, change.nextInnerState, requesterId)) {
+    return null;
+  }
+
+  return "participant_field_forbidden";
+}
+
+function validateUrlCandidateActingChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  gameKey: string,
+  requesterId: string,
+) {
+  const change = readUrlCandidateStateChange(currentStateValue, nextStateValue, gameKey);
+  if ("error" in change) return change.error;
+  if (change.currentInnerState.step !== "play" || change.nextInnerState.step !== "play") return "host_required";
+
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(change.currentInnerState);
+  const changedKeys = getChangedKeys(change.currentInnerState, change.nextInnerState);
+
+  if (requesterId !== currentPlayerId && isOnlyChangedKeys(changedKeys, ["votes"])) {
+    return validateOwnedStateMaps(change.currentInnerState, change.nextInnerState, requesterId, ["votes"]);
+  }
+
+  if (requesterId === currentPlayerId && validateUrlCandidateOwnerAnswerChange(change.currentInnerState, change.nextInnerState, "actingEmotion")) {
+    return null;
+  }
+
+  return "participant_field_forbidden";
+}
+
+function readUrlCandidateStateChange(currentStateValue: unknown, nextStateValue: unknown, gameKey: string) {
+  const currentState = asRecord(currentStateValue);
+  const nextState = asRecord(nextStateValue);
+  if (!currentState || !nextState) return { error: "participant_field_forbidden" as const };
+
+  const changedTopLevelKeys = getChangedKeys(currentState, nextState).filter((key) => !progressStateKeys.has(key));
+  if (changedTopLevelKeys.length !== 1 || changedTopLevelKeys[0] !== "urlCandidate") {
+    return { error: "participant_field_forbidden" as const };
+  }
+
+  const currentBranch = asRecord(currentState.urlCandidate);
+  const nextBranch = asRecord(nextState.urlCandidate);
+  if (!currentBranch || !nextBranch || currentBranch.key !== gameKey || nextBranch.key !== gameKey) {
+    return { error: "participant_field_forbidden" as const };
+  }
+
+  const changedBranchKeys = getChangedKeys(currentBranch, nextBranch);
+  if (changedBranchKeys.length !== 1 || changedBranchKeys[0] !== "state") {
+    return { error: "participant_field_forbidden" as const };
+  }
+
+  const currentInnerState = asRecord(currentBranch.state);
+  const nextInnerState = asRecord(nextBranch.state);
+  if (!currentInnerState || !nextInnerState) return { error: "participant_field_forbidden" as const };
+
+  return { currentState, nextState, currentBranch, nextBranch, currentInnerState, nextInnerState };
+}
+
+function validateUrlCandidateJudgeChange(currentState: Record<string, unknown>, nextState: Record<string, unknown>) {
+  const changedKeys = getChangedKeys(currentState, nextState);
+  const allowedKeys = ["answerVisible", "votes", "scoreCounts", "actionLog"];
+  if (!changedKeys.every((key) => allowedKeys.includes(key))) return false;
+  if (!validateAnswerVisibleChange(currentState.answerVisible, nextState.answerVisible)) return false;
+  if (!validatePrependedActionLog(currentState.actionLog, nextState.actionLog)) return false;
+
+  const currentVotes = asRecord(currentState.votes) ?? {};
+  const nextVotes = asRecord(nextState.votes) ?? {};
+  const changedVoteKeys = getChangedKeys(currentVotes, nextVotes);
+  if (changedVoteKeys.length === 0) {
+    if (currentState.answerVisible === true || nextState.answerVisible !== true) return false;
+    return getChangedKeys(asRecord(currentState.scoreCounts) ?? {}, asRecord(nextState.scoreCounts) ?? {}).length === 0;
+  }
+  if (changedVoteKeys.length !== 1) return false;
+  if (currentState.answerVisible !== true && nextState.answerVisible !== true) return false;
+
+  const judgedPlayerId = changedVoteKeys[0];
+  if (nextVotes[judgedPlayerId] !== "correct") return false;
+  return validateScoreIncrement(currentState.scoreCounts, nextState.scoreCounts, judgedPlayerId);
+}
+
+function validateUrlCandidateOwnerAnswerChange(currentState: Record<string, unknown>, nextState: Record<string, unknown>, answerKey: string) {
+  const changedKeys = getChangedKeys(currentState, nextState);
+  if (isOnlyChangedKeys(changedKeys, ["guesses"])) {
+    return validateSpecialGuessChange(currentState.guesses, nextState.guesses, answerKey);
+  }
+  const allowedKeys = ["answerVisible", "scoreCounts", "actionLog"];
+  if (!changedKeys.every((key) => allowedKeys.includes(key))) return false;
+  if (currentState.answerVisible === true || nextState.answerVisible !== true) return false;
+  if (!validatePrependedActionLog(currentState.actionLog, nextState.actionLog)) return false;
+
+  const answerChoice = readString((asRecord(currentState.guesses) ?? {})[answerKey]);
+  if (!answerChoice) return false;
+  return validateScoreIncrementsForCorrectVotes(currentState.votes, currentState.scoreCounts, nextState.scoreCounts, answerChoice);
+}
+
+function validateUrlCandidateSelfCorrectChange(currentState: Record<string, unknown>, nextState: Record<string, unknown>, requesterId: string) {
+  const changedKeys = getChangedKeys(currentState, nextState);
+  if (!changedKeys.every((key) => ["votes", "scoreCounts", "actionLog"].includes(key))) return false;
+  if (!validatePrependedActionLog(currentState.actionLog, nextState.actionLog)) return false;
+
+  const currentVotes = asRecord(currentState.votes) ?? {};
+  const nextVotes = asRecord(nextState.votes) ?? {};
+  const changedVoteKeys = getChangedKeys(currentVotes, nextVotes);
+  if (changedVoteKeys.length !== 1 || changedVoteKeys[0] !== requesterId || nextVotes[requesterId] !== "correct") return false;
+  return validateScoreIncrement(currentState.scoreCounts, nextState.scoreCounts, requesterId);
+}
+
+function validateSpecialGuessChange(currentValue: unknown, nextValue: unknown, key: string) {
+  const currentMap = asRecord(currentValue) ?? {};
+  const nextMap = asRecord(nextValue) ?? {};
+  const changedKeys = getChangedKeys(currentMap, nextMap);
+  return changedKeys.length === 1 && changedKeys[0] === key && typeof nextMap[key] === "string";
+}
+
+function validateAnswerVisibleChange(currentValue: unknown, nextValue: unknown) {
+  return currentValue === nextValue || (nextValue === true && currentValue !== true);
+}
+
+function validatePrependedActionLog(currentValue: unknown, nextValue: unknown) {
+  const currentLog = Array.isArray(currentValue) ? currentValue.filter((item): item is string => typeof item === "string") : [];
+  const nextLog = Array.isArray(nextValue) ? nextValue.filter((item): item is string => typeof item === "string") : [];
+  if (currentLog.length === 0 && nextLog.length === 0) return true;
+  if (nextLog.length !== Math.min(currentLog.length + 1, 8)) return false;
+  return currentLog.slice(0, 7).every((item, index) => nextLog[index + 1] === item);
+}
+
+function validateScoreIncrement(currentValue: unknown, nextValue: unknown, playerId: string) {
+  const currentScores = asRecord(currentValue) ?? {};
+  const nextScores = asRecord(nextValue) ?? {};
+  const changedScoreKeys = getChangedKeys(currentScores, nextScores);
+  if (changedScoreKeys.length !== 1 || changedScoreKeys[0] !== playerId) return false;
+  return readFiniteNumber(nextScores[playerId]) === (readFiniteNumber(currentScores[playerId]) ?? 0) + 1;
+}
+
+function validateScoreIncrementsForCorrectVotes(
+  votesValue: unknown,
+  currentScoresValue: unknown,
+  nextScoresValue: unknown,
+  answerChoice: string,
+) {
+  const votes = asRecord(votesValue) ?? {};
+  const currentScores = asRecord(currentScoresValue) ?? {};
+  const nextScores = asRecord(nextScoresValue) ?? {};
+  const changedScoreKeys = getChangedKeys(currentScores, nextScores);
+  const expectedScoreKeys = Object.entries(votes)
+    .filter(([, vote]) => vote === answerChoice)
+    .map(([playerId]) => playerId);
+  if (changedScoreKeys.length !== expectedScoreKeys.length) return false;
+  return expectedScoreKeys.every(
+    (playerId) =>
+      changedScoreKeys.includes(playerId) &&
+      readFiniteNumber(nextScores[playerId]) === (readFiniteNumber(currentScores[playerId]) ?? 0) + 1,
+  );
+}
+
+function getUrlCandidateCurrentPlayerId(state: Record<string, unknown>) {
+  const players = readRecordArray(state.players);
+  const currentPlayerIndex = readFiniteNumber(state.currentPlayerIndex) ?? 0;
+  const currentPlayer = players[currentPlayerIndex % Math.max(1, players.length)] ?? null;
+  return currentPlayer ? readString(currentPlayer.id) : null;
+}
+
+function isOnlyChangedKeys(changedKeys: string[], allowedKeys: string[]) {
+  return changedKeys.length > 0 && changedKeys.every((key) => allowedKeys.includes(key));
 }
 
 function validateAnonymousQuestionSubmission(currentStateValue: unknown, nextStateValue: unknown) {
