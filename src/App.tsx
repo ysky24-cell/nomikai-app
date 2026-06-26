@@ -1609,13 +1609,18 @@ function isAnswerSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
   return key === "truth-lie-game" || key === "value-meter-game" || key === "typing-speed-game";
 }
 
+function isActionSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
+  return key === "count-up-game" || key === "hazard-card-game" || key === "safe-random-draw" || key === "arm-wrestling-tournament";
+}
+
 function isRoomSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
   return (
     isVoteSyncableUrlCandidateKey(key) ||
     isTurnSyncableUrlCandidateKey(key) ||
     isGuessSyncableUrlCandidateKey(key) ||
     isBoardSyncableUrlCandidateKey(key) ||
-    isAnswerSyncableUrlCandidateKey(key)
+    isAnswerSyncableUrlCandidateKey(key) ||
+    isActionSyncableUrlCandidateKey(key)
   );
 }
 
@@ -1684,6 +1689,25 @@ function describeUrlCandidateProgress(config: UrlCandidateGameConfig, state: Url
       const answeredCount = state.players.filter((player) => state.guesses[player.id]?.trim() || state.votes[player.id]?.trim()).length;
       return `${config.title}: お題${progress}で回答中です (${answeredCount}/${state.players.length})`;
     }
+    if (isActionSyncableUrlCandidateKey(config.key)) {
+      const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+      const secondPlayer = state.players[(state.currentPlayerIndex + 1) % Math.max(1, state.players.length)] ?? null;
+      if (config.key === "count-up-game") {
+        const prompt = config.prompts.find((item) => item.id === state.deckPromptIds[state.deckIndex]);
+        const target = prompt?.targetNumber ?? 30;
+        return currentPlayer
+          ? `${config.title}: ${state.numberValue}/${target}まで進行中、${currentPlayer.name}さんの番です`
+          : `${config.title}: ${state.numberValue}/${target}まで進行中です`;
+      }
+      if (config.key === "arm-wrestling-tournament") {
+        return currentPlayer && secondPlayer
+          ? `${config.title}: ${state.completedPairs}試合完了、${currentPlayer.name}さん VS ${secondPlayer.name}さん`
+          : `${config.title}: ${state.completedPairs}試合完了です`;
+      }
+      return currentPlayer
+        ? `${config.title}: ${state.drawnCount}/8枚、${currentPlayer.name}さんの番です`
+        : `${config.title}: ${state.drawnCount}/8枚まで引きました`;
+    }
     return `${config.title}: お題${progress}で進行中です`;
   }
   return `${config.title}が完了しました`;
@@ -1738,6 +1762,7 @@ function UrlCandidateGame({
   const usesGuessSync = isGuessSyncableUrlCandidateKey(config.key);
   const usesBoardSync = isBoardSyncableUrlCandidateKey(config.key);
   const usesAnswerSync = isAnswerSyncableUrlCandidateKey(config.key);
+  const usesActionSync = isActionSyncableUrlCandidateKey(config.key);
   const promptPool = useMemo(
     () => config.prompts.filter((prompt) => state.includeAdultTopics || prompt.rating === "normal"),
     [config.prompts, state.includeAdultTopics],
@@ -1912,6 +1937,8 @@ function UrlCandidateGame({
                       ? "この端末が進行役です。参加者取り込み、手番、盤面、コマ、資源、次のお題を同期します。"
                       : usesAnswerSync
                         ? "この端末が進行役です。参加者取り込み、回答、集計、得点、次のお題を同期します。"
+                        : usesActionSync
+                          ? "この端末が進行役です。参加者取り込み、手番、数字、カード、対戦結果、次のお題を同期します。"
                   : "この端末が進行役です。参加者取り込み、次のお題、完了を同期します。"
                 : usesTurnSync
                   ? "この端末では自分の番だけセーフ、パス、アウト操作ができます。お題切り替えはホスト端末で行います。"
@@ -1921,6 +1948,8 @@ function UrlCandidateGame({
                       ? "この端末では自分の番や自分の資源操作を行えます。盤面とお題切り替えは同期されます。"
                       : usesAnswerSync
                         ? "この端末では自分の回答だけ操作できます。集計とお題切り替えは同期されます。"
+                        : usesActionSync
+                          ? "この端末では自分の番や自分が入っている対戦だけ操作できます。お題切り替えは同期されます。"
                   : "この端末では自分の投票だけ操作できます。集計とお題の進行は同期されます。"}
             </p>
           </div>
@@ -1951,6 +1980,8 @@ function UrlCandidateGame({
                       ? "手番、盤面、コマ、資源を端末ごとに同期するには、ルーム参加者を取り込んでください。"
                       : usesAnswerSync
                         ? "回答、集計、得点を端末ごとに同期するには、ルーム参加者を取り込んでください。"
+                        : usesActionSync
+                          ? "手番、数字、カード、対戦結果を端末ごとに同期するには、ルーム参加者を取り込んでください。"
                   : "参加者それぞれの端末で自分の投票をするには、ルーム参加者を取り込んでください。"}
               </p>
               <div className="action-row">
@@ -2106,6 +2137,8 @@ function UrlCandidateGame({
                       ? "ホストが参加者を取り込み、お題を開始すると、この端末で自分の番や資源操作ができます。"
                       : usesAnswerSync
                         ? "ホストが参加者を取り込み、お題を開始すると、この端末で自分の回答を操作できます。"
+                        : usesActionSync
+                          ? "ホストが参加者を取り込み、お題を開始すると、この端末で自分の番を操作できます。"
                   : "ホストがお題を開始すると、この端末で自分の投票を選べます。"}
               </p>
             </div>
@@ -2292,6 +2325,24 @@ function UrlCandidateGame({
               {state.players.map((player) => (
                 <span key={player.id}>
                   {player.name}: 正解{state.scoreCounts[player.id] ?? 0}
+                </span>
+              ))}
+            </div>
+          )}
+          {usesActionSync && (config.kind === "hazard" || config.kind === "draw" || config.kind === "count-up") && (
+            <div className="score-list wide">
+              {state.players.map((player) => (
+                <span key={player.id}>
+                  {player.name}: セーフ{state.safeCounts[player.id] ?? 0} / アウト{state.missCounts[player.id] ?? 0}
+                </span>
+              ))}
+            </div>
+          )}
+          {usesActionSync && config.kind === "tournament" && (
+            <div className="score-list wide">
+              {state.players.map((player) => (
+                <span key={player.id}>
+                  {player.name}: 勝利{state.scoreCounts[player.id] ?? 0}
                 </span>
               ))}
             </div>
@@ -2998,6 +3049,20 @@ function UrlCandidateInteractionPanel({
     const target = prompt.targetNumber ?? 30;
     return (
       <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>数字同期</h3>
+          <ul className="rule-list">
+            <li>各自の端末では自分の番だけ数字を進められます。</li>
+            <li>ホスト端末では全員分を代行入力できます。</li>
+            <li>現在の数字、アウト、次の番は全端末に同期されます。</li>
+          </ul>
+        </div>
+        {currentPlayer && (
+          <div className="turn-callout">
+            <span>現在の番</span>
+            <strong>{currentPlayer.name}</strong>
+          </div>
+        )}
         <div className="url-counter">
           <span>現在</span>
           <strong>{state.numberValue}</strong>
@@ -3007,29 +3072,48 @@ function UrlCandidateInteractionPanel({
           {[1, 2, 3].map((step) => (
             <button
               className="secondary-button"
+              disabled={!currentPlayer || !canActForCurrentPlayer || state.numberValue >= target}
               key={step}
+              type="button"
               onClick={() => {
                 if (!currentPlayer) return;
                 const nextValue = state.numberValue + step;
+                const nextIndex = (state.currentPlayerIndex + 1) % Math.max(1, state.players.length);
+                const isMiss = nextValue >= target;
                 const message =
-                  nextValue >= target
+                  isMiss
                     ? `${currentPlayer.name}さんが${target}以上に到達。アウトとして笑って次へ。`
                     : `${currentPlayer.name}さんが${nextValue}まで進めました。`;
                 pushLog(message, {
                   numberValue: Math.min(nextValue, target),
-                  currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length),
+                  currentPlayerIndex: nextIndex,
+                  safeCounts: isMiss ? state.safeCounts : { ...state.safeCounts, [currentPlayer.id]: (state.safeCounts[currentPlayer.id] ?? 0) + 1 },
+                  missCounts: isMiss ? { ...state.missCounts, [currentPlayer.id]: (state.missCounts[currentPlayer.id] ?? 0) + 1 } : state.missCounts,
                 });
               }}
             >
               +{step}
             </button>
           ))}
-          <button className="secondary-button" onClick={() => pushLog("数字を0に戻しました。", { numberValue: 0 })}>
+          <button
+            className="secondary-button"
+            disabled={!canControl && isRoomMode}
+            type="button"
+            onClick={() => pushLog("数字を0に戻しました。", { numberValue: 0 })}
+          >
             <RotateCcw size={18} />
             数字を戻す
           </button>
         </div>
+        <div className="score-list wide">
+          {state.players.map((player) => (
+            <span key={player.id}>
+              {player.name}: セーフ{state.safeCounts[player.id] ?? 0} / アウト{state.missCounts[player.id] ?? 0}
+            </span>
+          ))}
+        </div>
         <UrlActionLog logs={state.actionLog} />
+        {isRoomMode && !canControl && <p className="soft-note">数字リセットと次のお題へ進む操作はホスト端末で行います。</p>}
       </div>
     );
   }
@@ -3039,6 +3123,20 @@ function UrlCandidateInteractionPanel({
     const isHazard = nextDraw === state.hazardIndex;
     return (
       <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>カード同期</h3>
+          <ul className="rule-list">
+            <li>各自の端末では自分の番だけカードを引けます。</li>
+            <li>はずれ位置、引いた枚数、セーフ/アウトの記録は全端末に同期されます。</li>
+            <li>混ぜ直しは進行役が行います。</li>
+          </ul>
+        </div>
+        {currentPlayer && (
+          <div className="turn-callout">
+            <span>現在の番</span>
+            <strong>{currentPlayer.name}</strong>
+          </div>
+        )}
         <div className="draw-status">
           <strong>{state.drawnCount}/8枚</strong>
           <span>1枚だけはずれがあります</span>
@@ -3046,15 +3144,19 @@ function UrlCandidateInteractionPanel({
         <div className="action-row centered">
           <button
             className={isHazard ? "danger-button" : "primary-button"}
-            disabled={state.drawnCount >= 8}
+            disabled={!currentPlayer || !canActForCurrentPlayer || state.drawnCount >= 8}
+            type="button"
             onClick={() => {
               if (!currentPlayer) return;
+              const nextIndex = (state.currentPlayerIndex + 1) % Math.max(1, state.players.length);
               const message = isHazard
                 ? `${currentPlayer.name}さんがはずれ。安全な一言お題で場を温めます。`
                 : `${currentPlayer.name}さんはセーフ。`;
               pushLog(message, {
                 drawnCount: nextDraw,
-                currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length),
+                currentPlayerIndex: nextIndex,
+                safeCounts: isHazard ? state.safeCounts : { ...state.safeCounts, [currentPlayer.id]: (state.safeCounts[currentPlayer.id] ?? 0) + 1 },
+                missCounts: isHazard ? { ...state.missCounts, [currentPlayer.id]: (state.missCounts[currentPlayer.id] ?? 0) + 1 } : state.missCounts,
               });
             }}
           >
@@ -3063,13 +3165,23 @@ function UrlCandidateInteractionPanel({
           </button>
           <button
             className="secondary-button"
+            disabled={!canControl && isRoomMode}
+            type="button"
             onClick={() => pushLog("カードを混ぜ直しました。", { drawnCount: 0, hazardIndex: createHazardIndex() })}
           >
             <RotateCcw size={18} />
             混ぜ直す
           </button>
         </div>
+        <div className="score-list wide">
+          {state.players.map((player) => (
+            <span key={player.id}>
+              {player.name}: セーフ{state.safeCounts[player.id] ?? 0} / はずれ{state.missCounts[player.id] ?? 0}
+            </span>
+          ))}
+        </div>
         <UrlActionLog logs={state.actionLog} />
+        {isRoomMode && !canControl && <p className="soft-note">混ぜ直しと次のお題へ進む操作はホスト端末で行います。</p>}
       </div>
     );
   }
@@ -3170,8 +3282,21 @@ function UrlCandidateInteractionPanel({
   }
 
   if (config.kind === "tournament") {
+    const canRecordMatch = Boolean(
+      currentPlayer &&
+        secondPlayer &&
+        (canControl || canVoteForPlayer(currentPlayer.id) || canVoteForPlayer(secondPlayer.id))
+    );
     return (
       <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>対戦同期</h3>
+          <ul className="rule-list">
+            <li>現在の対戦カードと勝者は全端末に同期されます。</li>
+            <li>参加者端末では、自分が入っている対戦だけ結果を記録できます。</li>
+            <li>痛みや違和感があれば、勝敗より中止を優先します。</li>
+          </ul>
+        </div>
         <div className="matchup-panel">
           <span>{currentPlayer?.name ?? "参加者A"}</span>
           <strong>VS</strong>
@@ -3181,11 +3306,14 @@ function UrlCandidateInteractionPanel({
           {[currentPlayer, secondPlayer].filter(Boolean).map((player) => (
             <button
               className="primary-button"
+              disabled={!canRecordMatch}
               key={player!.id}
+              type="button"
               onClick={() =>
                 pushLog(`${player!.name}さんが勝ち。無理なく拍手で次の対戦へ。`, {
                   currentPlayerIndex: (state.currentPlayerIndex + 2) % Math.max(1, state.players.length),
                   completedPairs: state.completedPairs + 1,
+                  scoreCounts: { ...state.scoreCounts, [player!.id]: (state.scoreCounts[player!.id] ?? 0) + 1 },
                 })
               }
             >
@@ -3193,7 +3321,15 @@ function UrlCandidateInteractionPanel({
             </button>
           ))}
         </div>
+        <div className="score-list wide">
+          {state.players.map((player) => (
+            <span key={player.id}>
+              {player.name}: 勝利{state.scoreCounts[player.id] ?? 0}
+            </span>
+          ))}
+        </div>
         <UrlActionLog logs={state.actionLog} />
+        {isRoomMode && !canControl && <p className="soft-note">次のお題へ進む操作はホスト端末で行います。</p>}
       </div>
     );
   }
