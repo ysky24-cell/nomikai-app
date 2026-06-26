@@ -1338,6 +1338,30 @@ select:focus {
   gap: 7px;
 }
 
+.guess-list {
+  display: grid;
+  gap: 10px;
+}
+
+.guess-row {
+  display: grid;
+  grid-template-columns: minmax(88px, 0.35fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+}
+
+.guess-row input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+}
+
 .ranking-vote-row {
   grid-template-columns: minmax(96px, 0.35fr) minmax(0, 1.65fr);
 }
@@ -1607,6 +1631,7 @@ select:focus {
   }
 
   .vote-row,
+  .guess-row,
   .split-result,
   .choice-display,
   .result-row,

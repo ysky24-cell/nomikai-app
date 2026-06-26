@@ -1506,6 +1506,8 @@ type UrlCandidateState = {
   votes: Record<string, string>;
   safeCounts: Record<string, number>;
   missCounts: Record<string, number>;
+  guesses: Record<string, string>;
+  scoreCounts: Record<string, number>;
 };
 
 const urlCandidateQuestionCountOptions: SegmentedOption<string>[] = [
@@ -1537,6 +1539,8 @@ const initialUrlCandidateState: UrlCandidateState = {
   votes: {},
   safeCounts: {},
   missCounts: {},
+  guesses: {},
+  scoreCounts: {},
 };
 
 function createPlayerPositions(players: Player[]) {
@@ -1555,6 +1559,10 @@ function formatChoiceLabel(option: string, index: number) {
   return /^[A-ZＡ-Ｚ]\s*[:：.．]/.test(option) ? option : `${String.fromCharCode(65 + index)}. ${option}`;
 }
 
+function deriveAnswerFromPromptTitle(title: string) {
+  return title.replace(/^[^:：]+[:：]\s*/, "").replace(/\s*\([^()]*\)\s*$/, "");
+}
+
 type UrlCandidateRoomEnvelope = RoomProgressState & {
   urlCandidate?: {
     key: UrlCandidateGameKey;
@@ -1570,8 +1578,20 @@ function isTurnSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
   return key === "reverse-word-game" || key === "loanword-ban-game";
 }
 
+function isGuessSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
+  return (
+    key === "song-association-quiz" ||
+    key === "drawing-quiz" ||
+    key === "memory-logo-drawing" ||
+    key === "weird-karuta-game" ||
+    key === "emo-hint-game" ||
+    key === "person-hint-quiz" ||
+    key === "humming-intro-quiz"
+  );
+}
+
 function isRoomSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
-  return isVoteSyncableUrlCandidateKey(key) || isTurnSyncableUrlCandidateKey(key);
+  return isVoteSyncableUrlCandidateKey(key) || isTurnSyncableUrlCandidateKey(key) || isGuessSyncableUrlCandidateKey(key);
 }
 
 function parseUrlCandidateStateFromRoom(snapshot: RoomSnapshot | null, key: UrlCandidateGameKey) {
@@ -1605,6 +1625,14 @@ function describeUrlCandidateProgress(config: UrlCandidateGameConfig, state: Url
     if (isTurnSyncableUrlCandidateKey(config.key)) {
       const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
       return currentPlayer ? `${config.title}: お題${progress}で${currentPlayer.name}さんの番です` : `${config.title}: お題${progress}で進行中です`;
+    }
+    if (isGuessSyncableUrlCandidateKey(config.key)) {
+      const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+      const answerers = currentPlayer ? state.players.filter((player) => player.id !== currentPlayer.id) : state.players;
+      const guessedCount = answerers.filter((player) => state.guesses[player.id]?.trim()).length;
+      return currentPlayer
+        ? `${config.title}: お題${progress}で${currentPlayer.name}さんが出題中です (${guessedCount}/${answerers.length})`
+        : `${config.title}: お題${progress}で回答中です (${guessedCount}/${answerers.length})`;
     }
     return `${config.title}: お題${progress}で進行中です`;
   }
@@ -1647,6 +1675,7 @@ function UrlCandidateGame({
   const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
   const [roomSyncError, setRoomSyncError] = useState("");
   const roomSocketRef = useRef<Socket | null>(null);
+  const [privateAnswerVisible, setPrivateAnswerVisible] = useState(false);
   const [storedState, setStoredState] = useStoredState<UrlCandidateState>(config.key, initialUrlCandidateState);
   const supportsRoomSync = isRoomSyncableUrlCandidateKey(config.key);
   const roomUrlCandidateState = supportsRoomSync ? parseUrlCandidateStateFromRoom(roomSnapshot, config.key) : null;
@@ -1656,6 +1685,7 @@ function UrlCandidateGame({
   const isRoomHost = isUrlCandidateRoom && roomSession?.participantRole === "host";
   const canControlUrlCandidate = !isUrlCandidateRoom || (isRoomHost && Boolean(roomSnapshot));
   const usesTurnSync = isTurnSyncableUrlCandidateKey(config.key);
+  const usesGuessSync = isGuessSyncableUrlCandidateKey(config.key);
   const promptPool = useMemo(
     () => config.prompts.filter((prompt) => state.includeAdultTopics || prompt.rating === "normal"),
     [config.prompts, state.includeAdultTopics],
@@ -1663,7 +1693,10 @@ function UrlCandidateGame({
   const selectedQuestionCount = Math.min(state.questionCount, promptPool.length);
   const prompt = config.prompts.find((item) => item.id === state.deckPromptIds[state.deckIndex]) ?? null;
   const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+  const hiddenAnswerText = prompt ? (prompt.answer ?? (usesGuessSync ? deriveAnswerFromPromptTitle(prompt.title) : undefined)) : undefined;
   const canActForCurrentUrlPlayer = !isUrlCandidateRoom || canControlUrlCandidate || roomSession?.participantId === currentPlayer?.id;
+  const canPeekUrlAnswer = !isUrlCandidateRoom || canControlUrlCandidate || (usesGuessSync && roomSession?.participantId === currentPlayer?.id);
+  const canRevealUrlAnswer = !isUrlCandidateRoom || canControlUrlCandidate || (usesGuessSync && canActForCurrentUrlPlayer);
   const canStart = state.players.length >= config.minPlayers && state.players.every((player) => player.name.trim());
   const progressLabel = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "";
   const normalCount = config.prompts.filter((item) => item.rating === "normal").length;
@@ -1734,8 +1767,12 @@ function UrlCandidateGame({
   }, [roomSession, supportsRoomSync]);
 
   useEffect(() => {
+    setPrivateAnswerVisible(false);
+  }, [config.key, prompt?.id, roomSession?.participantId]);
+
+  useEffect(() => {
     if (state.step === "play" && !prompt) {
-      setState({ ...state, step: "setup", deckPromptIds: [], deckIndex: 0, answerVisible: false, votes: {} });
+      setState({ ...state, step: "setup", deckPromptIds: [], deckIndex: 0, answerVisible: false, votes: {}, guesses: {} });
     }
   }, [prompt, setState, state.step]);
 
@@ -1760,6 +1797,8 @@ function UrlCandidateGame({
       votes: {},
       safeCounts: createPlayerCountMap(state.players),
       missCounts: createPlayerCountMap(state.players),
+      guesses: {},
+      scoreCounts: createPlayerCountMap(state.players),
     });
   }
 
@@ -1778,8 +1817,11 @@ function UrlCandidateGame({
       hazardIndex: createHazardIndex(),
       actionLog: [],
       votes: {},
+      guesses: {},
+      currentPlayerIndex: usesGuessSync ? (state.currentPlayerIndex + 1) % Math.max(1, state.players.length) : state.currentPlayerIndex,
       safeCounts: state.safeCounts,
       missCounts: state.missCounts,
+      scoreCounts: state.scoreCounts,
     });
   }
 
@@ -1800,9 +1842,13 @@ function UrlCandidateGame({
               {isRoomHost
                 ? usesTurnSync
                   ? "この端末が進行役です。参加者取り込み、手番、セーフ、アウト、次のお題を同期します。"
+                  : usesGuessSync
+                    ? "この端末が進行役です。参加者取り込み、親、回答、正解表示、次のお題を同期します。"
                   : "この端末が進行役です。参加者取り込み、次のお題、完了を同期します。"
                 : usesTurnSync
                   ? "この端末では自分の番だけセーフ、パス、アウト操作ができます。お題切り替えはホスト端末で行います。"
+                  : usesGuessSync
+                    ? "この端末では自分の回答を入力できます。親の番では答え確認と正解表示ができます。"
                   : "この端末では自分の投票だけ操作できます。集計とお題の進行は同期されます。"}
             </p>
           </div>
@@ -1827,6 +1873,8 @@ function UrlCandidateGame({
               <p>
                 {usesTurnSync
                   ? "参加者それぞれの端末で自分の番を操作するには、ルーム参加者を取り込んでください。"
+                  : usesGuessSync
+                    ? "親、回答者、正解表示を端末ごとに同期するには、ルーム参加者を取り込んでください。"
                   : "参加者それぞれの端末で自分の投票をするには、ルーム参加者を取り込んでください。"}
               </p>
               <div className="action-row">
@@ -1847,6 +1895,8 @@ function UrlCandidateGame({
                       actionLog: [],
                       safeCounts: {},
                       missCounts: {},
+                      guesses: {},
+                      scoreCounts: {},
                     })
                   }
                 >
@@ -1870,6 +1920,8 @@ function UrlCandidateGame({
                       actionLog: [],
                       safeCounts: {},
                       missCounts: {},
+                      guesses: {},
+                      scoreCounts: {},
                     })
                   }
                 >
@@ -1895,6 +1947,8 @@ function UrlCandidateGame({
                     actionLog: [],
                     safeCounts: {},
                     missCounts: {},
+                    guesses: {},
+                    scoreCounts: {},
                   })
                 }
               />
@@ -1919,6 +1973,8 @@ function UrlCandidateGame({
                     actionLog: [],
                     safeCounts: {},
                     missCounts: {},
+                    guesses: {},
+                    scoreCounts: {},
                   })
                 }
               />
@@ -1939,6 +1995,8 @@ function UrlCandidateGame({
                     actionLog: [],
                     safeCounts: {},
                     missCounts: {},
+                    guesses: {},
+                    scoreCounts: {},
                   })
                 }
               />
@@ -1961,6 +2019,8 @@ function UrlCandidateGame({
               <p className="soft-note">
                 {usesTurnSync
                   ? "ホストが参加者を取り込み、お題を開始すると、この端末でも自分の番を操作できます。"
+                  : usesGuessSync
+                    ? "ホストが参加者を取り込み、お題を開始すると、この端末で回答できます。親の番では答えを確認できます。"
                   : "ホストがお題を開始すると、この端末で自分の投票を選べます。"}
               </p>
             </div>
@@ -2026,23 +2086,53 @@ function UrlCandidateGame({
             </div>
           )}
 
-          {config.answerMode === "hidden" && prompt.answer && (
+          {config.answerMode === "hidden" && hiddenAnswerText && (
             <div className="action-row">
-              <button
-                className="secondary-button"
-                disabled={isUrlCandidateRoom && !canControlUrlCandidate}
-                onClick={() => setState({ ...state, answerVisible: !state.answerVisible })}
-              >
-                {state.answerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
-                {state.answerVisible ? "答えを隠す" : "出題者だけ答えを見る"}
-              </button>
+              {usesGuessSync && isUrlCandidateRoom ? (
+                <>
+                  <button
+                    className="secondary-button"
+                    disabled={!canPeekUrlAnswer}
+                    type="button"
+                    onClick={() => setPrivateAnswerVisible(!privateAnswerVisible)}
+                  >
+                    {privateAnswerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+                    {privateAnswerVisible ? "自分の答え確認を閉じる" : "出題者だけ答えを見る"}
+                  </button>
+                  <button
+                    className="secondary-button"
+                    disabled={!canRevealUrlAnswer}
+                    type="button"
+                    onClick={() => setState({ ...state, answerVisible: !state.answerVisible })}
+                  >
+                    {state.answerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+                    {state.answerVisible ? "正解を隠す" : "正解を全員に表示"}
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="secondary-button"
+                  disabled={isUrlCandidateRoom && !canControlUrlCandidate}
+                  onClick={() => setState({ ...state, answerVisible: !state.answerVisible })}
+                >
+                  {state.answerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+                  {state.answerVisible ? "答えを隠す" : "出題者だけ答えを見る"}
+                </button>
+              )}
             </div>
           )}
 
-          {config.answerMode === "hidden" && prompt.answer && state.answerVisible && (
+          {usesGuessSync && config.answerMode === "hidden" && hiddenAnswerText && privateAnswerVisible && canPeekUrlAnswer && !state.answerVisible && (
             <div className="answer-panel">
-              <strong>答え</strong>
-              <p>{prompt.answer}</p>
+              <strong>出題者用の答え</strong>
+              <p>{hiddenAnswerText}</p>
+            </div>
+          )}
+
+          {config.answerMode === "hidden" && hiddenAnswerText && state.answerVisible && (
+            <div className="answer-panel">
+              <strong>{usesGuessSync && isUrlCandidateRoom ? "全員に表示中の正解" : "答え"}</strong>
+              <p>{hiddenAnswerText}</p>
             </div>
           )}
 
@@ -2084,6 +2174,8 @@ function UrlCandidateGame({
                   actionLog: [],
                   safeCounts: {},
                   missCounts: {},
+                  guesses: {},
+                  scoreCounts: {},
                 })
               }
             >
@@ -2109,6 +2201,15 @@ function UrlCandidateGame({
               ))}
             </div>
           )}
+          {usesGuessSync && (
+            <div className="score-list wide">
+              {state.players.map((player) => (
+                <span key={player.id}>
+                  {player.name}: 正解{state.scoreCounts[player.id] ?? 0}
+                </span>
+              ))}
+            </div>
+          )}
           <p className="talk-cue">違う設問数やHな話題ON/OFFに変えると、同じゲームでも雰囲気を変えて遊べます。</p>
           <div className="action-row centered">
             <button className="primary-button" disabled={!canControlUrlCandidate} onClick={startUrlCandidateGame}>
@@ -2127,6 +2228,8 @@ function UrlCandidateGame({
                   actionLog: [],
                   safeCounts: {},
                   missCounts: {},
+                  guesses: {},
+                  scoreCounts: {},
                 })
               }
             >
@@ -2330,6 +2433,105 @@ function UrlCandidateInteractionPanel({
           {scoreRows.map(({ player, safe, miss }) => (
             <span key={player.id}>
               {player.name}: セーフ{safe} / アウト{miss}
+            </span>
+          ))}
+        </div>
+
+        <UrlActionLog logs={state.actionLog} />
+        {isRoomMode && !canControl && <p className="soft-note">次のお題へ進む操作はホスト端末で行います。</p>}
+      </div>
+    );
+  }
+
+  if (isGuessSyncableUrlCandidateKey(config.key)) {
+    const parent = currentPlayer;
+    const answerers = parent ? state.players.filter((player) => player.id !== parent.id) : state.players;
+    const answeredPlayers = answerers.filter((player) => state.guesses[player.id]?.trim());
+    const correctPlayers = answerers.filter((player) => state.votes[player.id] === "correct");
+    const canJudgeGuess = canControl || canActForCurrentPlayer;
+
+    function updateGuess(playerId: string, guess: string) {
+      if (!canVoteForPlayer(playerId)) return;
+      setState({ ...state, guesses: { ...state.guesses, [playerId]: guess } });
+    }
+
+    function markGuessCorrect(player: Player) {
+      if (!canJudgeGuess || state.votes[player.id] === "correct") return;
+      const guess = state.guesses[player.id]?.trim();
+      pushLog(`${player.name}さんが正解${guess ? `: ${guess}` : ""}。`, {
+        answerVisible: true,
+        votes: { ...state.votes, [player.id]: "correct" },
+        scoreCounts: { ...state.scoreCounts, [player.id]: (state.scoreCounts[player.id] ?? 0) + 1 },
+      });
+    }
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>回答同期</h3>
+          <ul className="rule-list">
+            <li>今回の親だけが答えを確認し、絵、鼻歌、ヒントで伝えます。</li>
+            <li>回答者は各自の端末で自分の回答を入力できます。</li>
+            <li>ホストまたは親が正解を付けると、得点と正解表示が同期されます。</li>
+          </ul>
+        </div>
+
+        {parent && (
+          <div className="turn-callout">
+            <span>今回の親</span>
+            <strong>{parent.name}</strong>
+          </div>
+        )}
+
+        <div className="guess-list">
+          {answerers.map((player) => {
+            const guess = state.guesses[player.id] ?? "";
+            const isCorrect = state.votes[player.id] === "correct";
+            return (
+              <div className="guess-row" key={player.id}>
+                <strong>{player.name}</strong>
+                <input
+                  aria-label={`${player.name}の回答`}
+                  disabled={!canVoteForPlayer(player.id) || isCorrect}
+                  onChange={(event) => updateGuess(player.id, event.currentTarget.value)}
+                  placeholder="回答を入力"
+                  value={guess}
+                />
+                <button
+                  className={isCorrect ? "selected-choice" : "secondary-button"}
+                  disabled={!canJudgeGuess || isCorrect || !guess.trim()}
+                  type="button"
+                  onClick={() => markGuessCorrect(player)}
+                >
+                  {isCorrect ? "正解済み" : "正解"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="action-row">
+          <span className="inline-status">
+            回答 {answeredPlayers.length}/{answerers.length}
+          </span>
+          <span className="inline-status">
+            正解 {correctPlayers.length}
+          </span>
+          {canJudgeGuess && (
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => pushLog("このお題は正解なしで流しました。", { answerVisible: true })}
+            >
+              正解なしで流す
+            </button>
+          )}
+        </div>
+
+        <div className="score-list wide">
+          {state.players.map((player) => (
+            <span key={player.id}>
+              {player.name}: 正解{state.scoreCounts[player.id] ?? 0}
             </span>
           ))}
         </div>
