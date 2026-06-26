@@ -125,7 +125,17 @@ app.post("/rooms/:code/game/start", async (request, response, next) => {
   try {
     const gameKey = readRequiredString(request.body?.gameKey, "game_key");
     const gameTitle = readRequiredString(request.body?.gameTitle, "game_title");
-    const participantId = readOptionalString(request.body?.participantId) ?? null;
+    const participantId = readRequiredString(request.body?.participantId, "participant_id");
+    const currentSnapshot = await findRoomByCode(request.params.code);
+    if (!currentSnapshot) {
+      response.status(404).json({ error: "room_not_found" });
+      return;
+    }
+    if (!isHostParticipant(currentSnapshot, participantId)) {
+      response.status(403).json({ error: "host_required" });
+      return;
+    }
+
     const nextState = buildProgressState({
       phase: "playing",
       gameKey,
@@ -136,7 +146,7 @@ app.post("/rooms/:code/game/start", async (request, response, next) => {
     });
 
     const snapshot = await updateRoomProgress({
-      code: request.params.code,
+      code: currentSnapshot.room.code,
       status: "playing",
       currentGame: gameKey,
       state: nextState,
@@ -170,7 +180,12 @@ app.post("/rooms/:code/game/advance", async (request, response, next) => {
       return;
     }
 
-    const participantId = readOptionalString(request.body?.participantId) ?? null;
+    const participantId = readRequiredString(request.body?.participantId, "participant_id");
+    if (!isHostParticipant(snapshot, participantId)) {
+      response.status(403).json({ error: "host_required" });
+      return;
+    }
+
     const nextState = buildProgressState({
       ...currentState,
       phase: "playing",
@@ -214,7 +229,12 @@ app.post("/rooms/:code/game/complete", async (request, response, next) => {
       return;
     }
 
-    const participantId = readOptionalString(request.body?.participantId) ?? null;
+    const participantId = readRequiredString(request.body?.participantId, "participant_id");
+    if (!isHostParticipant(snapshot, participantId)) {
+      response.status(403).json({ error: "host_required" });
+      return;
+    }
+
     const nextState = buildProgressState({
       ...currentState,
       phase: "complete",
@@ -245,7 +265,17 @@ app.post("/rooms/:code/game/complete", async (request, response, next) => {
 
 app.post("/rooms/:code/game/reset", async (request, response, next) => {
   try {
-    const participantId = readOptionalString(request.body?.participantId) ?? null;
+    const participantId = readRequiredString(request.body?.participantId, "participant_id");
+    const currentSnapshot = await findRoomByCode(request.params.code);
+    if (!currentSnapshot) {
+      response.status(404).json({ error: "room_not_found" });
+      return;
+    }
+    if (!isHostParticipant(currentSnapshot, participantId)) {
+      response.status(403).json({ error: "host_required" });
+      return;
+    }
+
     const nextState = buildProgressState({
       phase: "lobby",
       gameKey: null,
@@ -256,7 +286,7 @@ app.post("/rooms/:code/game/reset", async (request, response, next) => {
     });
 
     const snapshot = await updateRoomProgress({
-      code: request.params.code,
+      code: currentSnapshot.room.code,
       status: "waiting",
       currentGame: null,
       state: nextState,
@@ -290,12 +320,18 @@ io.on("connection", (socket) => {
       return;
     }
 
+    const participantId = readOptionalString(payload.participantId) ?? null;
+    if (participantId && !findParticipant(snapshot, participantId)) {
+      socket.emit("room:error", { error: "participant_not_found" });
+      return;
+    }
+
     socket.join(snapshot.room.code);
     socket.data.roomCode = snapshot.room.code;
-    socket.data.participantId = payload.participantId;
+    socket.data.participantId = participantId;
 
-    if (payload.participantId) {
-      await setParticipantConnected(payload.participantId, true);
+    if (participantId) {
+      await setParticipantConnected(participantId, true);
     }
 
     const latestSnapshot = await findRoomByCode(roomCode);
@@ -315,7 +351,25 @@ io.on("connection", (socket) => {
       return;
     }
 
+    if (socket.data.roomCode !== currentSnapshot.room.code || !socket.rooms.has(currentSnapshot.room.code)) {
+      socket.emit("room:error", { error: "room_join_required" });
+      return;
+    }
+
+    const participantId = typeof socket.data.participantId === "string" ? socket.data.participantId : null;
+    const requester = findParticipant(currentSnapshot, participantId);
+    if (!requester) {
+      socket.emit("room:error", { error: "participant_required" });
+      return;
+    }
+
     const currentGame = payload.currentGame ?? currentSnapshot.room.currentGame;
+    const authorizationError = validateStateUpdateAuthorization(currentSnapshot, requester, currentGame, payload.state);
+    if (authorizationError) {
+      socket.emit("room:error", { error: authorizationError });
+      return;
+    }
+
     const room = await updateRoomState(
       roomCode,
       payload.state ?? {},
@@ -384,6 +438,51 @@ function readRoomStatusFromState(stateValue: unknown, currentGame: string | null
     if (state.phase === "lobby") return "waiting";
   }
   return currentGame ? "playing" : "waiting";
+}
+
+type RoomSnapshot = NonNullable<Awaited<ReturnType<typeof findRoomByCode>>>;
+type RoomParticipant = RoomSnapshot["participants"][number];
+
+function findParticipant(snapshot: RoomSnapshot, participantId: string | null | undefined) {
+  if (!participantId) return null;
+  return snapshot.participants.find((participant) => participant.id === participantId) ?? null;
+}
+
+function isHostParticipant(snapshot: RoomSnapshot, participantId: string | null | undefined) {
+  return findParticipant(snapshot, participantId)?.role === "host";
+}
+
+function validateStateUpdateAuthorization(
+  snapshot: RoomSnapshot,
+  requester: RoomParticipant,
+  requestedGame: string | null,
+  nextStateValue: unknown,
+) {
+  const activeGame = snapshot.room.currentGame;
+  if (activeGame !== requestedGame) {
+    return "game_mismatch";
+  }
+  if (requester.role === "host") {
+    return null;
+  }
+  if (!activeGame) {
+    return "host_required";
+  }
+
+  const currentState = readProgressState(snapshot.room.state, activeGame);
+  const nextState = readProgressState(nextStateValue, requestedGame);
+  if (nextState.updatedBy !== requester.id) {
+    return "participant_update_mismatch";
+  }
+  if (
+    currentState.phase !== nextState.phase ||
+    currentState.gameKey !== nextState.gameKey ||
+    currentState.gameTitle !== nextState.gameTitle ||
+    currentState.step !== nextState.step
+  ) {
+    return "host_required";
+  }
+  return null;
 }
 
 async function emitRoomSnapshot(roomCode: string) {

@@ -1302,8 +1302,12 @@ function toErrorMessage(error: unknown) {
     game_not_started: "先にゲームを開始してください。",
     host_required: "この操作はホストだけが実行できます。",
     participant_id_required: "参加者情報が取得できません。",
+    participant_required: "ルーム参加者として接続してから操作してください。",
     target_participant_id_required: "対象の参加者が取得できません。",
     participant_not_found: "参加者が見つかりません。",
+    room_join_required: "ルームへの接続が切れています。更新または再参加してください。",
+    game_mismatch: "現在のゲームと更新内容が一致しません。画面を更新してください。",
+    participant_update_mismatch: "別の参加者としての更新はできません。",
     Failed_to_fetch: "APIに接続できません。Docker版が起動しているか確認してください。",
   };
   return messages[value] ?? "処理に失敗しました。APIサーバーの状態を確認してください。";
