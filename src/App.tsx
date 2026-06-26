@@ -43,6 +43,7 @@ import {
   partyPackModes,
   partyPackPrompts,
   type PartyPackMode,
+  type PartyPackPrompt,
   type PartyPackPromptMode,
 } from "./data/partyPackPrompts";
 import {
@@ -587,7 +588,7 @@ function App() {
   }
 
   if (activeGame === "party-pack") {
-    return <PartyPackGame onHome={goHome} onResetAll={resetAllGames} />;
+    return <PartyPackGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
   }
 
   if (activeGame === "johari-window") {
@@ -7843,6 +7844,13 @@ type PartyPackState = {
   deckPromptIds: string[];
   deckIndex: number;
   answerVisible: boolean;
+  currentPlayerIndex: number;
+  votes: Record<string, string>;
+  guesses: Record<string, string>;
+  scoreCounts: Record<string, number>;
+  safeCounts: Record<string, number>;
+  missCounts: Record<string, number>;
+  actionLog: string[];
 };
 
 const partyPackQuestionCountOptions: SegmentedOption<string>[] = [
@@ -7864,6 +7872,13 @@ const initialPartyPackState: PartyPackState = {
   deckPromptIds: [],
   deckIndex: 0,
   answerVisible: false,
+  currentPlayerIndex: 0,
+  votes: {},
+  guesses: {},
+  scoreCounts: {},
+  safeCounts: {},
+  missCounts: {},
+  actionLog: [],
 };
 
 function PartyModeGuide({ mode, compact = false }: { mode: PartyPackPromptMode; compact?: boolean }) {
@@ -7886,9 +7901,86 @@ function PartyModeGuide({ mode, compact = false }: { mode: PartyPackPromptMode; 
   );
 }
 
-function PartyPackGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
-  const [storedState, setState] = useStoredState<PartyPackState>("party-pack", initialPartyPackState);
-  const state = { ...initialPartyPackState, ...storedState };
+type PartyPackRoomEnvelope = RoomProgressState & {
+  partyPack?: PartyPackState;
+};
+
+function parsePartyPackStateFromRoom(snapshot: RoomSnapshot | null) {
+  if (!snapshot || snapshot.room.currentGame !== "party-pack") return null;
+  const state =
+    snapshot.room.state && typeof snapshot.room.state === "object"
+      ? (snapshot.room.state as Partial<PartyPackRoomEnvelope>)
+      : {};
+  return state.partyPack && typeof state.partyPack === "object"
+    ? ({ ...initialPartyPackState, ...state.partyPack } as PartyPackState)
+    : null;
+}
+
+function getPartyPackProgressStep(state: PartyPackState) {
+  const stepOrder: Record<PartyPackStep, number> = {
+    setup: 1,
+    prompt: 2,
+    complete: 3,
+  };
+  return stepOrder[state.step] ?? 1;
+}
+
+function isPartyPackTurnMode(mode: PartyPackPromptMode) {
+  return mode === "yamanote" || mode === "reverse-word" || mode === "loanword-ban";
+}
+
+function isPartyPackOwnerMode(mode: PartyPackPromptMode) {
+  return mode === "truth-lie" || mode === "acting" || mode === "hint-quiz";
+}
+
+function describePartyPackProgress(state: PartyPackState) {
+  if (state.step === "setup") return `定番ゲームパックの設定中です: ${state.players.length}人`;
+  if (state.step === "prompt") {
+    const prompt = partyPackPrompts.find((item) => item.id === state.promptId) ?? null;
+    const progress = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "準備中";
+    const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+    const label = prompt ? partyPackModeGuides[prompt.mode].label : "定番ゲーム";
+    if (prompt && (isPartyPackTurnMode(prompt.mode) || isPartyPackOwnerMode(prompt.mode)) && currentPlayer) {
+      return `定番ゲームパック: ${label} ${progress}で${currentPlayer.name}さんの番です`;
+    }
+    return `定番ゲームパック: ${label} ${progress}を進行中です`;
+  }
+  return `定番ゲームパックが完了しました: ${state.deckPromptIds.length}問`;
+}
+
+function buildPartyPackRoomEnvelope(partyPack: PartyPackState, updatedBy: string | null): PartyPackRoomEnvelope {
+  return {
+    phase: partyPack.step === "complete" ? "complete" : "playing",
+    gameKey: "party-pack",
+    gameTitle: findGameMeta("party-pack")?.title ?? "定番ゲームパック",
+    step: getPartyPackProgressStep(partyPack),
+    message: describePartyPackProgress(partyPack),
+    updatedBy,
+    updatedAt: new Date().toISOString(),
+    partyPack,
+  };
+}
+
+function PartyPackGame({
+  onHome,
+  onResetAll,
+  roomSessionOverride = null,
+}: {
+  onHome: () => void;
+  onResetAll: () => void;
+  roomSessionOverride?: RoomSession | null;
+}) {
+  const storedRoomSession = useMemo(() => readRoomSession(), []);
+  const roomSession = roomSessionOverride ?? storedRoomSession;
+  const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
+  const [roomSyncError, setRoomSyncError] = useState("");
+  const roomSocketRef = useRef<Socket | null>(null);
+  const [privateAnswerVisible, setPrivateAnswerVisible] = useState(false);
+  const [storedState, setStoredState] = useStoredState<PartyPackState>("party-pack", initialPartyPackState);
+  const roomPartyPackState = parsePartyPackStateFromRoom(roomSnapshot);
+  const isPartyPackRoom = Boolean(roomSession && (!roomSnapshot || roomSnapshot.room.currentGame === "party-pack"));
+  const activePartyPackState = isPartyPackRoom ? (roomPartyPackState ?? initialPartyPackState) : storedState;
+  const state = { ...initialPartyPackState, ...activePartyPackState };
   const prompt = partyPackPrompts.find((item) => item.id === state.promptId) ?? null;
   const selectedGuide = state.mode === "all" ? null : partyPackModeGuides[state.mode];
   const minPlayers = selectedGuide?.minPlayers ?? 3;
@@ -7899,11 +7991,96 @@ function PartyPackGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
   );
   const selectedQuestionCount = Math.min(state.questionCount, promptPool.length);
   const progressLabel = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "";
-  const currentHost = state.players.length > 0 ? state.players[state.deckIndex % state.players.length] : null;
+  const currentHost = state.players.length > 0 ? state.players[state.currentPlayerIndex % state.players.length] : null;
+  const isRoomHost = isPartyPackRoom && roomSession?.participantRole === "host";
+  const canControlPartyPack = !isPartyPackRoom || (isRoomHost && Boolean(roomSnapshot));
+  const canActForCurrentPartyPlayer = !isPartyPackRoom || canControlPartyPack || roomSession?.participantId === currentHost?.id;
+  const canVoteForPartyPlayer = (playerId: string) => !isPartyPackRoom || canControlPartyPack || roomSession?.participantId === playerId;
+  const canPeekPartyAnswer = !isPartyPackRoom || canControlPartyPack || roomSession?.participantId === currentHost?.id;
+  const canRevealPartyAnswer = canPeekPartyAnswer;
+
+  function setState(nextStateOrUpdater: PartyPackState | ((current: PartyPackState) => PartyPackState)) {
+    if (isPartyPackRoom && roomSession && !roomSnapshot) {
+      setRoomSyncError("ルーム情報を読み込み中です。少し待ってから操作してください。");
+      return;
+    }
+
+    if (!isPartyPackRoom || !roomSession || !roomSnapshot) {
+      setStoredState(nextStateOrUpdater);
+      return;
+    }
+
+    const nextState = typeof nextStateOrUpdater === "function" ? nextStateOrUpdater(state) : nextStateOrUpdater;
+    const nextRoomState = buildPartyPackRoomEnvelope(nextState, roomSession.participantId);
+    setRoomSnapshot({
+      ...roomSnapshot,
+      room: {
+        ...roomSnapshot.room,
+        status: nextRoomState.phase === "complete" ? "complete" : "playing",
+        currentGame: "party-pack",
+        state: nextRoomState,
+      },
+    });
+    roomSocketRef.current?.emit("room:state:update", {
+      roomCode: roomSession.roomCode,
+      currentGame: "party-pack",
+      state: nextRoomState,
+    });
+  }
+
+  useEffect(() => {
+    if (!roomSession) return;
+    let ignore = false;
+    fetchRoomSnapshot(roomSession.roomCode)
+      .then((snapshot) => {
+        if (!ignore) setRoomSnapshot(snapshot);
+      })
+      .catch((caught) => {
+        if (!ignore) setRoomSyncError(toErrorMessage(caught));
+      });
+
+    const socket = io(API_URL, {
+      transports: ["websocket", "polling"],
+    });
+    roomSocketRef.current = socket;
+
+    socket.on("connect", () => {
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+    });
+
+    socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
+      if (nextSnapshot) setRoomSnapshot(nextSnapshot);
+    });
+
+    socket.on("room:error", (payload: { error?: string }) => {
+      setRoomSyncError(toErrorMessage(payload.error ?? "room_error"));
+    });
+
+    return () => {
+      ignore = true;
+      socket.disconnect();
+      roomSocketRef.current = null;
+    };
+  }, [roomSession]);
+
+  useEffect(() => {
+    setPrivateAnswerVisible(false);
+  }, [prompt?.id, roomSession?.participantId]);
 
   useEffect(() => {
     if (state.step === "prompt" && !prompt) {
-      setState({ ...state, step: "setup", promptId: null, deckPromptIds: [], deckIndex: 0, answerVisible: false });
+      setState({
+        ...state,
+        step: "setup",
+        promptId: null,
+        deckPromptIds: [],
+        deckIndex: 0,
+        answerVisible: false,
+        currentPlayerIndex: 0,
+        votes: {},
+        guesses: {},
+        actionLog: [],
+      });
     }
   }, [prompt, setState, state.step]);
 
@@ -7918,6 +8095,13 @@ function PartyPackGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
       deckPromptIds,
       deckIndex: 0,
       answerVisible: false,
+      currentPlayerIndex: 0,
+      votes: {},
+      guesses: {},
+      scoreCounts: createPlayerCountMap(state.players),
+      safeCounts: createPlayerCountMap(state.players),
+      missCounts: createPlayerCountMap(state.players),
+      actionLog: [],
     });
   }
 
@@ -7925,10 +8109,22 @@ function PartyPackGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
     const nextIndex = state.deckIndex + 1;
     const nextPromptId = state.deckPromptIds[nextIndex];
     if (!nextPromptId) {
-      setState({ ...state, step: "complete", promptId: null, answerVisible: false });
+      setState({ ...state, step: "complete", promptId: null, answerVisible: false, actionLog: [] });
       return;
     }
-    setState({ ...state, step: "prompt", promptId: nextPromptId, deckIndex: nextIndex, answerVisible: false });
+    const currentPrompt = partyPackPrompts.find((item) => item.id === state.promptId) ?? null;
+    const shouldRotateOwner = currentPrompt ? isPartyPackOwnerMode(currentPrompt.mode) : false;
+    setState({
+      ...state,
+      step: "prompt",
+      promptId: nextPromptId,
+      deckIndex: nextIndex,
+      answerVisible: false,
+      currentPlayerIndex: shouldRotateOwner ? (state.currentPlayerIndex + 1) % Math.max(1, state.players.length) : state.currentPlayerIndex,
+      votes: {},
+      guesses: {},
+      actionLog: [],
+    });
   }
 
   const promptGuide = prompt ? partyPackModeGuides[prompt.mode] : null;
@@ -7942,6 +8138,24 @@ function PartyPackGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
       onHome={onHome}
       onResetAll={onResetAll}
     >
+      {isPartyPackRoom && roomSession && (
+        <section className="tool-surface room-sync-strip">
+          <div>
+            <p className="eyebrow">ルーム同期中</p>
+            <h3>
+              {roomSession.roomCode} / {roomSession.participantName}
+              {isRoomHost ? " / ホスト" : ""}
+            </h3>
+            <p className="soft-note">
+              {isRoomHost
+                ? "この端末が進行役です。参加者取り込み、パック内ミニゲーム、手番、回答、投票、結果、次のお題を同期します。"
+                : "この端末では自分の番や自分の回答だけ操作できます。次のお題へ進む操作はホスト端末で行います。"}
+            </p>
+          </div>
+          {roomSyncError && <p className="room-message error">{roomSyncError}</p>}
+        </section>
+      )}
+
       {state.step === "setup" && (
         <section className="tool-surface">
           <div className="howto-panel">
@@ -7955,28 +8169,114 @@ function PartyPackGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
             </ol>
           </div>
 
-          <PlayerSetup
-            players={state.players}
-            minPlayers={minPlayers}
-            maxPlayers={20}
-            onChange={(players) => setState({ ...state, players })}
-          />
+          {isPartyPackRoom && roomSnapshot && (
+            <div className="notice-panel calm">
+              <strong>ルーム参加者を定番ゲームパックメンバーに使えます</strong>
+              <p>参加者を取り込むと、パック内の手番、回答、投票、結果を端末ごとに同期できます。</p>
+              <div className="action-row">
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, false),
+                      step: "setup",
+                      promptId: null,
+                      deckPromptIds: [],
+                      deckIndex: 0,
+                      answerVisible: false,
+                      currentPlayerIndex: 0,
+                      votes: {},
+                      guesses: {},
+                      scoreCounts: {},
+                      safeCounts: {},
+                      missCounts: {},
+                      actionLog: [],
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  ホスト以外を使う
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, true),
+                      step: "setup",
+                      promptId: null,
+                      deckPromptIds: [],
+                      deckIndex: 0,
+                      answerVisible: false,
+                      currentPlayerIndex: 0,
+                      votes: {},
+                      guesses: {},
+                      scoreCounts: {},
+                      safeCounts: {},
+                      missCounts: {},
+                      actionLog: [],
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  全員を使う
+                </button>
+              </div>
+            </div>
+          )}
 
-          <SegmentedControl
-            label="ゲームの種類"
-            options={partyPackModes}
-            value={state.mode}
-            onChange={(mode) =>
-              setState({
-                ...state,
-                mode,
-                deckPromptIds: [],
-                deckIndex: 0,
-                promptId: null,
-                answerVisible: false,
-              })
-            }
-          />
+          {canControlPartyPack ? (
+            <>
+              <PlayerSetup
+                players={state.players}
+                minPlayers={minPlayers}
+                maxPlayers={20}
+                onChange={(players) =>
+                  setState({
+                    ...state,
+                    players,
+                    currentPlayerIndex: 0,
+                    votes: {},
+                    guesses: {},
+                    scoreCounts: {},
+                    safeCounts: {},
+                    missCounts: {},
+                    actionLog: [],
+                  })
+                }
+              />
+
+              <SegmentedControl
+                label="ゲームの種類"
+                options={partyPackModes}
+                value={state.mode}
+                onChange={(mode) =>
+                  setState({
+                    ...state,
+                    mode,
+                    deckPromptIds: [],
+                    deckIndex: 0,
+                    promptId: null,
+                    answerVisible: false,
+                    currentPlayerIndex: 0,
+                    votes: {},
+                    guesses: {},
+                    actionLog: [],
+                  })
+                }
+              />
+            </>
+          ) : (
+            <div className="howto-panel compact">
+              <h3>ホストの準備待ち</h3>
+              <p className="soft-note">ホストが参加者とミニゲームの種類を決めると、この端末にも同期されます。</p>
+            </div>
+          )}
 
           {state.mode === "all" ? (
             <div className="notice-panel calm">
@@ -7985,36 +8285,41 @@ function PartyPackGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
                 10種類の定番ゲームを混ぜて出します。必要人数が多いカードも入るため、3人以上での開始にしています。
               </p>
             </div>
-          ) : (
+          ) : canControlPartyPack ? (
             <PartyModeGuide mode={state.mode} />
-          )}
+          ) : null}
 
-          <SegmentedControl
-            label="今回の設問数"
-            options={partyPackQuestionCountOptions}
-            value={String(state.questionCount)}
-            onChange={(questionCount) =>
-              setState({
-                ...state,
-                questionCount: Number(questionCount) as PartyPackQuestionCount,
-                deckPromptIds: [],
-                deckIndex: 0,
-                promptId: null,
-                answerVisible: false,
-              })
-            }
-          />
+          {canControlPartyPack && (
+            <SegmentedControl
+              label="今回の設問数"
+              options={partyPackQuestionCountOptions}
+              value={String(state.questionCount)}
+              onChange={(questionCount) =>
+                setState({
+                  ...state,
+                  questionCount: Number(questionCount) as PartyPackQuestionCount,
+                  deckPromptIds: [],
+                  deckIndex: 0,
+                  promptId: null,
+                  answerVisible: false,
+                  votes: {},
+                  guesses: {},
+                  actionLog: [],
+                })
+              }
+            />
+          )}
 
           <p className="soft-note">
             この条件では{promptPool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。全体のお題は300問です。
           </p>
 
           <div className="action-row">
-            <button className="primary-button" disabled={!canStart || selectedQuestionCount === 0} onClick={startPartyPack}>
+            <button className="primary-button" disabled={!canStart || selectedQuestionCount === 0 || !canControlPartyPack} onClick={startPartyPack}>
               <Play size={18} />
               はじめる
             </button>
-            <button className="secondary-button" onClick={() => setState(initialPartyPackState)}>
+            <button className="secondary-button" disabled={!canControlPartyPack} onClick={() => setState(initialPartyPackState)}>
               <RotateCcw size={18} />
               リセット
             </button>
@@ -8060,38 +8365,80 @@ function PartyPackGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
 
           {hiddenAnswer && (
             <div className="action-row">
-              <button
-                className="secondary-button"
-                onClick={() => setState({ ...state, answerVisible: !state.answerVisible })}
-              >
-                {state.answerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
-                {state.answerVisible ? "答えを隠す" : prompt.mode === "hint-quiz" ? "出題者だけ答えを見る" : "答えを見る"}
-              </button>
+              {isPartyPackRoom ? (
+                <>
+                  <button
+                    className="secondary-button"
+                    disabled={!canPeekPartyAnswer}
+                    type="button"
+                    onClick={() => setPrivateAnswerVisible(!privateAnswerVisible)}
+                  >
+                    {privateAnswerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+                    {privateAnswerVisible ? "自分の答え確認を閉じる" : prompt.mode === "hint-quiz" ? "出題者だけ答えを見る" : "自分だけ答えを見る"}
+                  </button>
+                  <button
+                    className="secondary-button"
+                    disabled={!canRevealPartyAnswer}
+                    type="button"
+                    onClick={() => setState({ ...state, answerVisible: !state.answerVisible })}
+                  >
+                    {state.answerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+                    {state.answerVisible ? "全員の答えを隠す" : "答えを全員に表示"}
+                  </button>
+                </>
+              ) : (
+                <button
+                  className="secondary-button"
+                  onClick={() => setState({ ...state, answerVisible: !state.answerVisible })}
+                >
+                  {state.answerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+                  {state.answerVisible ? "答えを隠す" : prompt.mode === "hint-quiz" ? "出題者だけ答えを見る" : "答えを見る"}
+                </button>
+              )}
+            </div>
+          )}
+
+          {hiddenAnswer && privateAnswerVisible && canPeekPartyAnswer && !state.answerVisible && (
+            <div className="answer-panel">
+              <strong>自分用の答え</strong>
+              <p>{prompt.answer}</p>
             </div>
           )}
 
           {hiddenAnswer && state.answerVisible && (
             <div className="answer-panel">
-              <strong>答え</strong>
+              <strong>{isPartyPackRoom ? "全員に表示中の答え" : "答え"}</strong>
               <p>{prompt.answer}</p>
             </div>
           )}
 
+          <PartyPackInteractionPanel
+            prompt={prompt}
+            state={state}
+            setState={setState}
+            canControl={canControlPartyPack}
+            canActForCurrentPlayer={canActForCurrentPartyPlayer}
+            canVoteForPlayer={canVoteForPartyPlayer}
+            isRoomMode={isPartyPackRoom}
+          />
+
           <PartyModeGuide mode={prompt.mode} compact />
 
           <div className="action-row">
-            <button className="primary-button" onClick={moveToNextPartyPrompt}>
+            <button className="primary-button" disabled={!canControlPartyPack} onClick={moveToNextPartyPrompt}>
               {state.deckIndex + 1 >= state.deckPromptIds.length ? <Check size={18} /> : <ChevronRight size={18} />}
               {state.deckIndex + 1 >= state.deckPromptIds.length ? "完了" : "次のお題"}
             </button>
             <button
               className="secondary-button"
+              disabled={!canControlPartyPack}
               onClick={() => setState({ ...state, step: "setup", promptId: null, answerVisible: false })}
             >
               <Users size={18} />
               設定へ
             </button>
           </div>
+          {!canControlPartyPack && <p className="soft-note">次のお題へ進む操作はホスト端末で行います。</p>}
         </section>
       )}
 
@@ -8101,19 +8448,537 @@ function PartyPackGame({ onHome, onResetAll }: { onHome: () => void; onResetAll:
           <p className="eyebrow">終了</p>
           <h2>{state.deckPromptIds.length}問おつかれさまでした</h2>
           <p className="talk-cue">場が温まっていたら、種類を変えるか「全部」でテンポよくもう一周できます。</p>
+          <div className="score-list wide">
+            {state.players.map((player) => (
+              <span key={player.id}>
+                {player.name}: 得点{state.scoreCounts[player.id] ?? 0} / セーフ{state.safeCounts[player.id] ?? 0} / アウト{state.missCounts[player.id] ?? 0}
+              </span>
+            ))}
+          </div>
           <div className="action-row centered">
-            <button className="primary-button" onClick={startPartyPack}>
+            <button className="primary-button" disabled={!canControlPartyPack} onClick={startPartyPack}>
               <RotateCcw size={18} />
               もう一度
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", promptId: null })}>
+            <button className="secondary-button" disabled={!canControlPartyPack} onClick={() => setState({ ...state, step: "setup", promptId: null })}>
               <Users size={18} />
               設定へ
             </button>
           </div>
+          {!canControlPartyPack && <p className="soft-note">もう一度遊ぶ操作はホスト端末で行います。</p>}
         </section>
       )}
     </GameFrame>
+  );
+}
+
+function PartyPackInteractionPanel({
+  prompt,
+  state,
+  setState,
+  canControl,
+  canActForCurrentPlayer,
+  canVoteForPlayer,
+  isRoomMode,
+}: {
+  prompt: PartyPackPrompt;
+  state: PartyPackState;
+  setState: (state: PartyPackState) => void;
+  canControl: boolean;
+  canActForCurrentPlayer: boolean;
+  canVoteForPlayer: (playerId: string) => boolean;
+  isRoomMode: boolean;
+}) {
+  const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+
+  function pushLog(message: string, nextState: Partial<PartyPackState> = {}) {
+    setState({
+      ...state,
+      ...nextState,
+      actionLog: [message, ...state.actionLog].slice(0, 8),
+    });
+  }
+
+  function advanceTurn(message: string, nextState: Partial<PartyPackState> = {}) {
+    pushLog(message, {
+      ...nextState,
+      currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length),
+    });
+  }
+
+  function recordTurnResult(kind: "safe" | "miss" | "skip") {
+    if (!currentPlayer || !canActForCurrentPlayer) return;
+    if (kind === "safe") {
+      advanceTurn(`${currentPlayer.name}さんはセーフ。次の人へ進みます。`, {
+        safeCounts: { ...state.safeCounts, [currentPlayer.id]: (state.safeCounts[currentPlayer.id] ?? 0) + 1 },
+      });
+      return;
+    }
+    if (kind === "miss") {
+      advanceTurn(`${currentPlayer.name}さんはアウト。笑って次の人へ進みます。`, {
+        missCounts: { ...state.missCounts, [currentPlayer.id]: (state.missCounts[currentPlayer.id] ?? 0) + 1 },
+      });
+      return;
+    }
+    advanceTurn(`${currentPlayer.name}さんはパスしました。`);
+  }
+
+  if (prompt.mode === "majority" && prompt.options?.length) {
+    const voteOptions = prompt.options.slice(0, 4);
+    const tallyRows = voteOptions.map((option, index) => ({
+      option,
+      value: String(index),
+      players: state.players.filter((player) => state.votes[player.id] === String(index)),
+    }));
+    const votedPlayers = state.players.filter((player) => state.votes[player.id]);
+    const topCount = Math.max(0, ...tallyRows.map((row) => row.players.length));
+    const winners = topCount === 0 ? [] : tallyRows.filter((row) => row.players.length === topCount);
+    const winningPlayerIds = new Set(winners.flatMap((row) => row.players.map((player) => player.id)));
+
+    function revealMajorityResult() {
+      if ((!canControl && isRoomMode) || state.answerVisible) return;
+      const nextScoreCounts = { ...state.scoreCounts };
+      winningPlayerIds.forEach((playerId) => {
+        nextScoreCounts[playerId] = (nextScoreCounts[playerId] ?? 0) + 1;
+      });
+      pushLog(`多数派は${winners.map((row) => row.option).join(" / ")}でした。`, {
+        answerVisible: true,
+        scoreCounts: nextScoreCounts,
+      });
+    }
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>多数派同期</h3>
+          <ul className="rule-list">
+            <li>各自の端末では自分の行だけ投票できます。</li>
+            <li>ホストは全員分を代行入力できます。</li>
+            <li>結果を出すと多数派と得点が同期されます。</li>
+          </ul>
+        </div>
+        <div className="vote-list">
+          {state.players.map((player) => (
+            <div className="vote-row" key={player.id}>
+              <strong>{player.name}</strong>
+              <div className="vote-buttons">
+                {voteOptions.map((option, index) => (
+                  <button
+                    className={state.votes[player.id] === String(index) ? "selected-choice" : ""}
+                    disabled={!canVoteForPlayer(player.id) || state.answerVisible}
+                    key={option}
+                    type="button"
+                    onClick={() => setState({ ...state, votes: { ...state.votes, [player.id]: String(index) } })}
+                  >
+                    {formatChoiceLabel(option, index)}
+                  </button>
+                ))}
+                <button
+                  className={state.votes[player.id] === "skip" ? "selected-choice muted" : ""}
+                  disabled={!canVoteForPlayer(player.id) || state.answerVisible}
+                  type="button"
+                  onClick={() => setState({ ...state, votes: { ...state.votes, [player.id]: "skip" } })}
+                >
+                  パス
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="action-row">
+          <span className="inline-status">
+            投票 {votedPlayers.length}/{state.players.length}
+          </span>
+          <button className="primary-button" disabled={(!canControl && isRoomMode) || state.answerVisible || votedPlayers.length === 0} onClick={revealMajorityResult}>
+            <Check size={18} />
+            結果を出す
+          </button>
+        </div>
+        {state.answerVisible && <div className="split-result">{tallyRows.map((row, index) => <NameCluster key={row.value} title={formatChoiceLabel(row.option, index)} players={row.players} />)}</div>}
+        <div className="score-list wide">
+          {state.players.map((player) => (
+            <span key={player.id}>
+              {player.name}: 得点{state.scoreCounts[player.id] ?? 0}
+            </span>
+          ))}
+        </div>
+        <UrlActionLog logs={state.actionLog} />
+      </div>
+    );
+  }
+
+  if (isPartyPackTurnMode(prompt.mode)) {
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>手番同期</h3>
+          <ul className="rule-list">
+            <li>自分の番だけ、セーフ、パス、アウトを押せます。</li>
+            <li>ホストは全員分を代行入力できます。</li>
+            <li>判定は厳しくしすぎず、テンポよく次へ進みます。</li>
+          </ul>
+        </div>
+        {currentPlayer && (
+          <div className="turn-callout">
+            <span>現在の番</span>
+            <strong>{currentPlayer.name}</strong>
+          </div>
+        )}
+        <div className="action-row centered">
+          <button className="primary-button" disabled={!currentPlayer || !canActForCurrentPlayer} onClick={() => recordTurnResult("safe")}>
+            <Check size={18} />
+            セーフ
+          </button>
+          <button className="secondary-button" disabled={!currentPlayer || !canActForCurrentPlayer} onClick={() => recordTurnResult("skip")}>
+            <ChevronRight size={18} />
+            パス
+          </button>
+          <button className="danger-button" disabled={!currentPlayer || !canActForCurrentPlayer} onClick={() => recordTurnResult("miss")}>
+            <ShieldAlert size={18} />
+            アウト
+          </button>
+        </div>
+        <div className="score-list wide">
+          {state.players.map((player) => (
+            <span key={player.id}>
+              {player.name}: セーフ{state.safeCounts[player.id] ?? 0} / アウト{state.missCounts[player.id] ?? 0}
+            </span>
+          ))}
+        </div>
+        <UrlActionLog logs={state.actionLog} />
+      </div>
+    );
+  }
+
+  if (prompt.mode === "truth-lie") {
+    const speaker = currentPlayer;
+    const voters = speaker ? state.players.filter((player) => player.id !== speaker.id) : state.players;
+    const lieOptions = ["1つ目が嘘", "2つ目が嘘", "3つ目が嘘"];
+    const answerKey = "truthLieAnswer";
+    const answerChoice = state.guesses[answerKey] ?? "";
+    const canJudge = canControl || canActForCurrentPlayer;
+    const votedPlayers = voters.filter((player) => state.votes[player.id]);
+    const correctPlayers = answerChoice ? voters.filter((player) => state.votes[player.id] === answerChoice) : [];
+
+    function revealTruthLieResult() {
+      if (!canJudge || !answerChoice || state.answerVisible) return;
+      const nextScoreCounts = { ...state.scoreCounts };
+      correctPlayers.forEach((player) => {
+        nextScoreCounts[player.id] = (nextScoreCounts[player.id] ?? 0) + 1;
+      });
+      pushLog(`嘘は${Number(answerChoice) + 1}つ目。正解は${correctPlayers.length}人でした。`, {
+        answerVisible: true,
+        scoreCounts: nextScoreCounts,
+      });
+    }
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>嘘当て同期</h3>
+          <ul className="rule-list">
+            <li>話し手が正解を設定し、聞き手が投票します。</li>
+            <li>結果を出すと正解者と得点が同期されます。</li>
+          </ul>
+        </div>
+        {speaker && (
+          <div className="turn-callout">
+            <span>今回の話し手</span>
+            <strong>{speaker.name}</strong>
+          </div>
+        )}
+        <div className="answer-sync-list">
+          <div className="answer-sync-row">
+            <strong>正解設定</strong>
+            <div className="vote-buttons">
+              {lieOptions.map((option, index) => (
+                <button
+                  className={answerChoice === String(index) ? "selected-choice" : "secondary-button"}
+                  disabled={!canJudge || state.answerVisible}
+                  key={option}
+                  type="button"
+                  onClick={() => setState({ ...state, guesses: { ...state.guesses, [answerKey]: String(index) } })}
+                >
+                  {formatChoiceLabel(option, index)}
+                </button>
+              ))}
+            </div>
+          </div>
+          {voters.map((player) => (
+            <div className="answer-sync-row" key={player.id}>
+              <strong>{player.name}</strong>
+              <div className="vote-buttons">
+                {lieOptions.map((option, index) => (
+                  <button
+                    className={state.votes[player.id] === String(index) ? "selected-choice" : "secondary-button"}
+                    disabled={!canVoteForPlayer(player.id) || state.answerVisible}
+                    key={option}
+                    type="button"
+                    onClick={() => setState({ ...state, votes: { ...state.votes, [player.id]: String(index) } })}
+                  >
+                    {formatChoiceLabel(option, index)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+        <div className="action-row">
+          <span className="inline-status">
+            投票 {votedPlayers.length}/{voters.length}
+          </span>
+          <button className="primary-button" disabled={!canJudge || !answerChoice || state.answerVisible} onClick={revealTruthLieResult}>
+            <Check size={18} />
+            結果を出す
+          </button>
+        </div>
+        {state.answerVisible && <div className="split-result"><NameCluster title="正解" players={correctPlayers} /><NameCluster title="惜しい" players={voters.filter((player) => state.votes[player.id] && state.votes[player.id] !== answerChoice)} /></div>}
+        <div className="score-list wide">
+          {state.players.map((player) => (
+            <span key={player.id}>{player.name}: 得点{state.scoreCounts[player.id] ?? 0}</span>
+          ))}
+        </div>
+        <UrlActionLog logs={state.actionLog} />
+      </div>
+    );
+  }
+
+  if (prompt.mode === "typing") {
+    const answeredPlayers = state.players.filter((player) => state.guesses[player.id]?.trim());
+    const correctPlayers = state.players.filter((player) => state.votes[player.id] === "correct");
+
+    function markTypingCorrect(player: Player) {
+      if ((!canVoteForPlayer(player.id) && !canControl) || state.votes[player.id] === "correct") return;
+      pushLog(`${player.name}さんは誤字なしで入力完了。`, {
+        votes: { ...state.votes, [player.id]: "correct" },
+        scoreCounts: { ...state.scoreCounts, [player.id]: (state.scoreCounts[player.id] ?? 0) + 1 },
+      });
+    }
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>早打ち同期</h3>
+          <ul className="rule-list">
+            <li>各自が入力できた文を自分の欄に入れます。</li>
+            <li>誤字なしなら、本人またはホストが誤字なしを押します。</li>
+          </ul>
+        </div>
+        <div className="typing-sync-list">
+          {state.players.map((player) => {
+            const answer = state.guesses[player.id] ?? "";
+            const isCorrect = state.votes[player.id] === "correct";
+            return (
+              <div className="typing-sync-row" key={player.id}>
+                <strong>{player.name}</strong>
+                <input
+                  aria-label={`${player.name}の入力文`}
+                  disabled={!canVoteForPlayer(player.id) || isCorrect}
+                  onChange={(event) => setState({ ...state, guesses: { ...state.guesses, [player.id]: event.currentTarget.value } })}
+                  placeholder="入力した文"
+                  value={answer}
+                />
+                <button className={isCorrect ? "selected-choice" : "secondary-button"} disabled={isCorrect || !answer.trim() || (!canVoteForPlayer(player.id) && !canControl)} onClick={() => markTypingCorrect(player)}>
+                  誤字なし
+                </button>
+              </div>
+            );
+          })}
+        </div>
+        <div className="action-row">
+          <span className="inline-status">入力 {answeredPlayers.length}/{state.players.length}</span>
+          <span className="inline-status">誤字なし {correctPlayers.length}</span>
+        </div>
+        <div className="score-list wide">{state.players.map((player) => <span key={player.id}>{player.name}: 得点{state.scoreCounts[player.id] ?? 0}</span>)}</div>
+        <UrlActionLog logs={state.actionLog} />
+      </div>
+    );
+  }
+
+  if (prompt.mode === "value-meter") {
+    const rows = state.players.map((player) => ({
+      player,
+      clue: state.guesses[player.id] ?? "",
+      value: state.votes[player.id] ?? "",
+    }));
+    const answeredRows = rows.filter((row) => row.clue.trim() || row.value.trim());
+    const sortedRows = rows
+      .filter((row) => row.value.trim() && Number.isFinite(Number(row.value)))
+      .sort((a, b) => Number(a.value) - Number(b.value));
+
+    function updateMeter(playerId: string, nextValue: string, nextClue: string) {
+      if (!canVoteForPlayer(playerId)) return;
+      setState({
+        ...state,
+        votes: { ...state.votes, [playerId]: nextValue },
+        guesses: { ...state.guesses, [playerId]: nextClue },
+      });
+    }
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>メーター同期</h3>
+          <ul className="rule-list">
+            <li>数字と、数字を言わない例えを各自で入力します。</li>
+            <li>ホストが並び順を表示すると全端末に出ます。</li>
+          </ul>
+        </div>
+        <div className="meter-sync-list">
+          {rows.map(({ player, clue, value }) => (
+            <div className="meter-sync-row" key={player.id}>
+              <strong>{player.name}</strong>
+              <input aria-label={`${player.name}の数字`} disabled={!canVoteForPlayer(player.id) || state.answerVisible} inputMode="numeric" max={100} min={1} onChange={(event) => updateMeter(player.id, event.currentTarget.value, clue)} placeholder="1-100" type="number" value={value} />
+              <input aria-label={`${player.name}の例え`} disabled={!canVoteForPlayer(player.id) || state.answerVisible} onChange={(event) => updateMeter(player.id, value, event.currentTarget.value)} placeholder="数字を言わずに例える" value={clue} />
+            </div>
+          ))}
+        </div>
+        <div className="action-row">
+          <span className="inline-status">入力 {answeredRows.length}/{state.players.length}</span>
+          <button className="primary-button" disabled={!canControl && isRoomMode} onClick={() => pushLog("価値観メーターの並び順を表示しました。", { answerVisible: true })}>
+            <Check size={18} />
+            並び順を表示
+          </button>
+        </div>
+        {state.answerVisible && <div className="answer-panel wide"><strong>小さい順</strong><p>{sortedRows.map((row) => `${row.player.name}(${row.value})`).join(" → ") || "まだ数字がありません"}</p></div>}
+        <UrlActionLog logs={state.actionLog} />
+      </div>
+    );
+  }
+
+  if (prompt.mode === "acting" && prompt.options?.length) {
+    const actor = currentPlayer;
+    const answerers = actor ? state.players.filter((player) => player.id !== actor.id) : state.players;
+    const emotionOptions = prompt.options.slice(0, 4);
+    const emotionKey = "actingEmotion";
+    const selectedEmotion = state.guesses[emotionKey] ?? "";
+    const canJudge = canControl || canActForCurrentPlayer;
+    const votedPlayers = answerers.filter((player) => state.votes[player.id]);
+    const correctPlayers = selectedEmotion ? answerers.filter((player) => state.votes[player.id] === selectedEmotion) : [];
+
+    function revealActingResult() {
+      if (!canJudge || !selectedEmotion || state.answerVisible) return;
+      const nextScoreCounts = { ...state.scoreCounts };
+      correctPlayers.forEach((player) => {
+        nextScoreCounts[player.id] = (nextScoreCounts[player.id] ?? 0) + 1;
+      });
+      pushLog(`正解は「${emotionOptions[Number(selectedEmotion)]}」。正解は${correctPlayers.length}人でした。`, {
+        answerVisible: true,
+        scoreCounts: nextScoreCounts,
+      });
+    }
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact"><h3>演技同期</h3><ul className="rule-list"><li>演者だけが感情を選びます。</li><li>回答者は自分の回答だけ選べます。</li></ul></div>
+        {actor && <div className="turn-callout"><span>今回の演者</span><strong>{actor.name}</strong></div>}
+        <div className="answer-sync-list">
+          <div className="answer-sync-row">
+            <strong>演者の感情</strong>
+            <div className="vote-buttons">{emotionOptions.map((option, index) => <button className={selectedEmotion === String(index) ? "selected-choice" : "secondary-button"} disabled={!canJudge || state.answerVisible} key={option} onClick={() => setState({ ...state, guesses: { ...state.guesses, [emotionKey]: String(index) } })}>{formatChoiceLabel(option, index)}</button>)}</div>
+          </div>
+          {answerers.map((player) => (
+            <div className="answer-sync-row" key={player.id}>
+              <strong>{player.name}</strong>
+              <div className="vote-buttons">{emotionOptions.map((option, index) => <button className={state.votes[player.id] === String(index) ? "selected-choice" : "secondary-button"} disabled={!canVoteForPlayer(player.id) || state.answerVisible} key={option} onClick={() => setState({ ...state, votes: { ...state.votes, [player.id]: String(index) } })}>{formatChoiceLabel(option, index)}</button>)}</div>
+            </div>
+          ))}
+        </div>
+        <div className="action-row"><span className="inline-status">回答 {votedPlayers.length}/{answerers.length}</span><button className="primary-button" disabled={!canJudge || !selectedEmotion || state.answerVisible} onClick={revealActingResult}><Check size={18} />結果を出す</button></div>
+        {state.answerVisible && <div className="split-result"><NameCluster title="正解" players={correctPlayers} /><NameCluster title="惜しい" players={answerers.filter((player) => state.votes[player.id] && state.votes[player.id] !== selectedEmotion)} /></div>}
+        <div className="score-list wide">{state.players.map((player) => <span key={player.id}>{player.name}: 得点{state.scoreCounts[player.id] ?? 0}</span>)}</div>
+        <UrlActionLog logs={state.actionLog} />
+      </div>
+    );
+  }
+
+  if (prompt.mode === "hint-quiz") {
+    const parent = currentPlayer;
+    const answerers = parent ? state.players.filter((player) => player.id !== parent.id) : state.players;
+    const answeredPlayers = answerers.filter((player) => state.guesses[player.id]?.trim());
+    const correctPlayers = answerers.filter((player) => state.votes[player.id] === "correct");
+    const canJudge = canControl || canActForCurrentPlayer;
+
+    function markCorrect(player: Player) {
+      if (!canJudge || state.votes[player.id] === "correct") return;
+      const guess = state.guesses[player.id]?.trim();
+      pushLog(`${player.name}さんが正解${guess ? `: ${guess}` : ""}。`, {
+        answerVisible: true,
+        votes: { ...state.votes, [player.id]: "correct" },
+        scoreCounts: { ...state.scoreCounts, [player.id]: (state.scoreCounts[player.id] ?? 0) + 1 },
+      });
+    }
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact"><h3>ヒント回答同期</h3><ul className="rule-list"><li>出題者は答えを確認し、直接言わずにヒントを出します。</li><li>回答者は自分の回答を入力できます。</li></ul></div>
+        {parent && <div className="turn-callout"><span>今回の出題者</span><strong>{parent.name}</strong></div>}
+        <div className="guess-list">
+          {answerers.map((player) => {
+            const guess = state.guesses[player.id] ?? "";
+            const isCorrect = state.votes[player.id] === "correct";
+            return (
+              <div className="guess-row" key={player.id}>
+                <strong>{player.name}</strong>
+                <input aria-label={`${player.name}の回答`} disabled={!canVoteForPlayer(player.id) || isCorrect} onChange={(event) => setState({ ...state, guesses: { ...state.guesses, [player.id]: event.currentTarget.value } })} placeholder="回答を入力" value={guess} />
+                <button className={isCorrect ? "selected-choice" : "secondary-button"} disabled={!canJudge || isCorrect || !guess.trim()} onClick={() => markCorrect(player)}>{isCorrect ? "正解済み" : "正解"}</button>
+              </div>
+            );
+          })}
+        </div>
+        <div className="action-row"><span className="inline-status">回答 {answeredPlayers.length}/{answerers.length}</span><span className="inline-status">正解 {correctPlayers.length}</span>{canJudge && <button className="secondary-button" onClick={() => pushLog("このお題は正解なしで流しました。", { answerVisible: true })}>正解なしで流す</button>}</div>
+        <div className="score-list wide">{state.players.map((player) => <span key={player.id}>{player.name}: 得点{state.scoreCounts[player.id] ?? 0}</span>)}</div>
+        <UrlActionLog logs={state.actionLog} />
+      </div>
+    );
+  }
+
+  if (prompt.mode === "memory-drawing") {
+    const donePlayers = state.players.filter((player) => state.votes[player.id] === "done" || state.votes[player.id] === "award");
+    const awardedPlayers = state.players.filter((player) => state.votes[player.id] === "award");
+
+    function markDrawing(player: Player, value: "done" | "award") {
+      if ((!canVoteForPlayer(player.id) && !canControl) || (value === "award" && !canControl)) return;
+      const nextScoreCounts = value === "award" ? { ...state.scoreCounts, [player.id]: (state.scoreCounts[player.id] ?? 0) + 1 } : state.scoreCounts;
+      pushLog(value === "award" ? `${player.name}さんに拍手賞。` : `${player.name}さんが描き終わりました。`, {
+        votes: { ...state.votes, [player.id]: value },
+        scoreCounts: nextScoreCounts,
+      });
+    }
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact"><h3>描画進行同期</h3><ul className="rule-list"><li>描き終わった人は自分の完了を押します。</li><li>ホストは拍手賞を記録できます。</li></ul></div>
+        <div className="typing-sync-list">
+          {state.players.map((player) => (
+            <div className="typing-sync-row" key={player.id}>
+              <strong>{player.name}</strong>
+              <button className={state.votes[player.id] === "done" ? "selected-choice" : "secondary-button"} disabled={!canVoteForPlayer(player.id) || state.votes[player.id] === "award"} onClick={() => markDrawing(player, "done")}>描き終わった</button>
+              <button className={state.votes[player.id] === "award" ? "selected-choice" : "secondary-button"} disabled={!canControl || state.votes[player.id] === "award"} onClick={() => markDrawing(player, "award")}>拍手賞</button>
+            </div>
+          ))}
+        </div>
+        <div className="action-row"><span className="inline-status">完了 {donePlayers.length}/{state.players.length}</span><span className="inline-status">拍手賞 {awardedPlayers.length}</span></div>
+        <div className="score-list wide">{state.players.map((player) => <span key={player.id}>{player.name}: 得点{state.scoreCounts[player.id] ?? 0}</span>)}</div>
+        <UrlActionLog logs={state.actionLog} />
+      </div>
+    );
+  }
+
+  return (
+    <div className="url-interaction-panel">
+      <div className="action-row centered">
+        <button className="primary-button" disabled={!currentPlayer || !canActForCurrentPlayer} onClick={() => currentPlayer && advanceTurn(`${currentPlayer.name}さんの成功を記録しました。`)}>
+          <Check size={18} />
+          成功
+        </button>
+        <button className="secondary-button" disabled={!currentPlayer || !canActForCurrentPlayer} onClick={() => currentPlayer && advanceTurn(`${currentPlayer.name}さんはスキップしました。`)}>
+          <ChevronRight size={18} />
+          スキップ
+        </button>
+      </div>
+      <UrlActionLog logs={state.actionLog} />
+    </div>
   );
 }
 
