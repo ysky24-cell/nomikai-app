@@ -595,7 +595,7 @@ function App() {
   }
 
   if (activeGame === "turtle-soup") {
-    return <TurtleSoupGame onHome={goHome} onResetAll={resetAllGames} />;
+    return <TurtleSoupGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
   }
 
   if (activeGame === "anonymous-box") {
@@ -5611,11 +5611,77 @@ const initialTurtleSoupState: TurtleSoupState = {
   questionLog: [],
 };
 
-function TurtleSoupGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
-  const [storedState, setState] = useStoredState<TurtleSoupState>("turtle-soup", initialTurtleSoupState);
+type TurtleSoupRoomEnvelope = RoomProgressState & {
+  turtleSoup?: TurtleSoupState;
+};
+
+function parseTurtleSoupStateFromRoom(snapshot: RoomSnapshot | null) {
+  if (!snapshot || snapshot.room.currentGame !== "turtle-soup") return null;
+  const state =
+    snapshot.room.state && typeof snapshot.room.state === "object"
+      ? (snapshot.room.state as Partial<TurtleSoupRoomEnvelope>)
+      : {};
+  return state.turtleSoup && typeof state.turtleSoup === "object"
+    ? ({ ...initialTurtleSoupState, ...state.turtleSoup } as TurtleSoupState)
+    : null;
+}
+
+function getTurtleSoupProgressStep(state: TurtleSoupState) {
+  const stepOrder: Record<TurtleSoupStep, number> = {
+    setup: 1,
+    play: 2,
+    complete: 3,
+  };
+  return stepOrder[state.step] ?? 1;
+}
+
+function describeTurtleSoupProgress(state: TurtleSoupState) {
+  if (state.step === "setup") return `ウミガメのスープの準備中です: ${state.players.length}人`;
+  if (state.step === "play") {
+    const current = state.deckCaseIds.length > 0 ? `${state.deckIndex + 1}/${state.deckCaseIds.length}` : "0/0";
+    const facilitator = state.players.length > 0 ? state.players[state.deckIndex % state.players.length] : null;
+    return facilitator
+      ? `ウミガメのスープ: 問題${current}で${facilitator.name}さんが出題中です (質問${state.questionLog.length}件 / ヒント${state.hintLevel}件)`
+      : `ウミガメのスープ: 問題${current}を進行中です (質問${state.questionLog.length}件 / ヒント${state.hintLevel}件)`;
+  }
+  return `ウミガメのスープが完了しました: ${state.solvedCount}/${state.deckCaseIds.length}問`;
+}
+
+function buildTurtleSoupRoomEnvelope(turtleSoup: TurtleSoupState, updatedBy: string | null): TurtleSoupRoomEnvelope {
+  return {
+    phase: turtleSoup.step === "complete" ? "complete" : "playing",
+    gameKey: "turtle-soup",
+    gameTitle: findGameMeta("turtle-soup")?.title ?? "ウミガメのスープ",
+    step: getTurtleSoupProgressStep(turtleSoup),
+    message: describeTurtleSoupProgress(turtleSoup),
+    updatedBy,
+    updatedAt: new Date().toISOString(),
+    turtleSoup,
+  };
+}
+
+function TurtleSoupGame({
+  onHome,
+  onResetAll,
+  roomSessionOverride = null,
+}: {
+  onHome: () => void;
+  onResetAll: () => void;
+  roomSessionOverride?: RoomSession | null;
+}) {
+  const storedRoomSession = useMemo(() => readRoomSession(), []);
+  const roomSession = roomSessionOverride ?? storedRoomSession;
+  const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
+  const [roomSyncError, setRoomSyncError] = useState("");
+  const roomSocketRef = useRef<Socket | null>(null);
+  const [storedState, setStoredState] = useStoredState<TurtleSoupState>("turtle-soup", initialTurtleSoupState);
   const [draftQuestion, setDraftQuestion] = useState("");
   const [draftAnswer, setDraftAnswer] = useState<"はい" | "いいえ" | "関係ありません" | "補足あり">("はい");
-  const state = { ...initialTurtleSoupState, ...storedState };
+  const [privateTruthVisible, setPrivateTruthVisible] = useState(false);
+  const roomTurtleSoupState = parseTurtleSoupStateFromRoom(roomSnapshot);
+  const isTurtleSoupRoom = Boolean(roomSession && (!roomSnapshot || roomSnapshot.room.currentGame === "turtle-soup"));
+  const activeTurtleSoupState = isTurtleSoupRoom ? (roomTurtleSoupState ?? initialTurtleSoupState) : storedState;
+  const state = { ...initialTurtleSoupState, ...activeTurtleSoupState };
   const casePool = useMemo(
     () => (state.category === "all" ? turtleSoupCases : turtleSoupCases.filter((item) => item.category === state.category)),
     [state.category],
@@ -5623,8 +5689,79 @@ function TurtleSoupGame({ onHome, onResetAll }: { onHome: () => void; onResetAll
   const selectedQuestionCount = Math.min(state.questionCount, casePool.length);
   const activeCase = turtleSoupCases.find((item) => item.id === state.caseId) ?? null;
   const facilitator = state.players.length > 0 ? state.players[state.deckIndex % state.players.length] : null;
+  const isRoomHost = isTurtleSoupRoom && roomSession?.participantRole === "host";
+  const canControlTurtleSoup = !isTurtleSoupRoom || (isRoomHost && Boolean(roomSnapshot));
+  const canFacilitateTurtleSoup = !isTurtleSoupRoom || canControlTurtleSoup || (Boolean(roomSnapshot) && facilitator?.id === roomSession?.participantId);
   const canStart = state.players.length >= 2 && state.players.every((player) => player.name.trim());
   const progressLabel = state.deckCaseIds.length > 0 ? `${state.deckIndex + 1}/${state.deckCaseIds.length}` : "";
+
+  function setState(nextStateOrUpdater: TurtleSoupState | ((current: TurtleSoupState) => TurtleSoupState)) {
+    if (isTurtleSoupRoom && roomSession && !roomSnapshot) {
+      setRoomSyncError("ルーム情報を読み込み中です。少し待ってから操作してください。");
+      return;
+    }
+
+    if (!isTurtleSoupRoom || !roomSession || !roomSnapshot) {
+      setStoredState(nextStateOrUpdater);
+      return;
+    }
+
+    const nextState = typeof nextStateOrUpdater === "function" ? nextStateOrUpdater(state) : nextStateOrUpdater;
+    const nextRoomState = buildTurtleSoupRoomEnvelope(nextState, roomSession.participantId);
+    setRoomSnapshot({
+      ...roomSnapshot,
+      room: {
+        ...roomSnapshot.room,
+        status: nextRoomState.phase === "complete" ? "complete" : "playing",
+        currentGame: "turtle-soup",
+        state: nextRoomState,
+      },
+    });
+    roomSocketRef.current?.emit("room:state:update", {
+      roomCode: roomSession.roomCode,
+      currentGame: "turtle-soup",
+      state: nextRoomState,
+    });
+  }
+
+  useEffect(() => {
+    if (!roomSession) return;
+    let ignore = false;
+    fetchRoomSnapshot(roomSession.roomCode)
+      .then((snapshot) => {
+        if (!ignore) setRoomSnapshot(snapshot);
+      })
+      .catch((caught) => {
+        if (!ignore) setRoomSyncError(toErrorMessage(caught));
+      });
+
+    const socket = io(API_URL, {
+      transports: ["websocket", "polling"],
+    });
+    roomSocketRef.current = socket;
+
+    socket.on("connect", () => {
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+    });
+
+    socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
+      if (nextSnapshot) setRoomSnapshot(nextSnapshot);
+    });
+
+    socket.on("room:error", (payload: { error?: string }) => {
+      setRoomSyncError(toErrorMessage(payload.error ?? "room_error"));
+    });
+
+    return () => {
+      ignore = true;
+      socket.disconnect();
+      roomSocketRef.current = null;
+    };
+  }, [roomSession]);
+
+  useEffect(() => {
+    setPrivateTruthVisible(false);
+  }, [activeCase?.id, roomSession?.participantId]);
 
   useEffect(() => {
     if (state.step === "play" && !activeCase) {
@@ -5633,6 +5770,7 @@ function TurtleSoupGame({ onHome, onResetAll }: { onHome: () => void; onResetAll
   }, [activeCase, setState, state.step]);
 
   function startTurtleSoup() {
+    if (!canControlTurtleSoup) return;
     const deckCaseIds = shuffle(casePool)
       .slice(0, selectedQuestionCount)
       .map((item) => item.id);
@@ -5650,6 +5788,7 @@ function TurtleSoupGame({ onHome, onResetAll }: { onHome: () => void; onResetAll
   }
 
   function addTurtleQuestionLog() {
+    if (!canFacilitateTurtleSoup) return;
     const text = draftQuestion.trim();
     if (!text) return;
     setState({
@@ -5661,6 +5800,7 @@ function TurtleSoupGame({ onHome, onResetAll }: { onHome: () => void; onResetAll
   }
 
   function moveToNextTurtleCase(solved: boolean) {
+    if (!canFacilitateTurtleSoup) return;
     const nextIndex = state.deckIndex + 1;
     const nextCaseId = state.deckCaseIds[nextIndex];
     const solvedCount = state.solvedCount + (solved ? 1 : 0);
@@ -5687,6 +5827,26 @@ function TurtleSoupGame({ onHome, onResetAll }: { onHome: () => void; onResetAll
       onHome={onHome}
       onResetAll={onResetAll}
     >
+      {isTurtleSoupRoom && roomSession && (
+        <section className="tool-surface room-sync-strip">
+          <div>
+            <p className="eyebrow">ルーム同期中</p>
+            <h3>
+              {roomSession.roomCode} / {roomSession.participantName}
+              {isRoomHost ? " / ホスト" : ""}
+            </h3>
+            <p className="soft-note">
+              {isRoomHost
+                ? "この端末が進行役です。参加者取り込み、質問ログ、ヒント、真相表示、次の問題を同期します。"
+                : canFacilitateTurtleSoup
+                  ? "この端末は今回の出題者です。質問ログ、ヒント、真相表示を操作できます。"
+                  : "この端末では進行状況、質問ログ、ヒント、公開された真相を確認できます。"}
+            </p>
+          </div>
+          {roomSyncError && <p className="room-message error">{roomSyncError}</p>}
+        </section>
+      )}
+
       {state.step === "setup" && (
         <section className="tool-surface">
           <div className="howto-panel">
@@ -5699,32 +5859,93 @@ function TurtleSoupGame({ onHome, onResetAll }: { onHome: () => void; onResetAll
               <li>正解が出たら真相を読み上げ、すぐ次の問題へ進めます。</li>
             </ol>
           </div>
-          <PlayerSetup
-            players={state.players}
-            minPlayers={2}
-            maxPlayers={12}
-            onChange={(players) => setState({ ...state, players })}
-          />
-          <SegmentedControl
-            label="カテゴリ"
-            options={turtleSoupCategories}
-            value={state.category}
-            onChange={(category) => setState({ ...state, category, deckCaseIds: [], deckIndex: 0, caseId: null })}
-          />
-          <SegmentedControl
-            label="今回の問題数"
-            options={turtleSoupQuestionCountOptions}
-            value={String(state.questionCount)}
-            onChange={(questionCount) =>
-              setState({
-                ...state,
-                questionCount: Number(questionCount) as TurtleSoupQuestionCount,
-                deckCaseIds: [],
-                deckIndex: 0,
-                caseId: null,
-              })
-            }
-          />
+
+          {isTurtleSoupRoom && roomSnapshot && (
+            <div className="notice-panel calm">
+              <strong>ルーム参加者をウミガメのスープメンバーに使えます</strong>
+              <p>参加者一覧を取り込むと、出題者を問題ごとに順番で切り替えながら進行できます。</p>
+              <div className="action-row">
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, false),
+                      step: "setup",
+                      caseId: null,
+                      deckCaseIds: [],
+                      deckIndex: 0,
+                      hintLevel: 0,
+                      answerVisible: false,
+                      questionLog: [],
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  ホスト以外を使う
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, true),
+                      step: "setup",
+                      caseId: null,
+                      deckCaseIds: [],
+                      deckIndex: 0,
+                      hintLevel: 0,
+                      answerVisible: false,
+                      questionLog: [],
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  全員を使う
+                </button>
+              </div>
+            </div>
+          )}
+
+          {canControlTurtleSoup ? (
+            <>
+              <PlayerSetup
+                players={state.players}
+                minPlayers={2}
+                maxPlayers={12}
+                onChange={(players) => setState({ ...state, players, deckCaseIds: [], deckIndex: 0, caseId: null })}
+              />
+              <SegmentedControl
+                label="カテゴリ"
+                options={turtleSoupCategories}
+                value={state.category}
+                onChange={(category) => setState({ ...state, category, deckCaseIds: [], deckIndex: 0, caseId: null })}
+              />
+              <SegmentedControl
+                label="今回の問題数"
+                options={turtleSoupQuestionCountOptions}
+                value={String(state.questionCount)}
+                onChange={(questionCount) =>
+                  setState({
+                    ...state,
+                    questionCount: Number(questionCount) as TurtleSoupQuestionCount,
+                    deckCaseIds: [],
+                    deckIndex: 0,
+                    caseId: null,
+                  })
+                }
+              />
+            </>
+          ) : (
+            <div className="howto-panel compact">
+              <h3>ホストの準備待ち</h3>
+              <p className="soft-note">ホストが参加者と問題数を決めると、この端末にも問題が同期されます。</p>
+            </div>
+          )}
           <p className="soft-note">
             この条件では{casePool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。全体の問題は300問です。
           </p>
@@ -5733,11 +5954,11 @@ function TurtleSoupGame({ onHome, onResetAll }: { onHome: () => void; onResetAll
             <p>「誰が」「いつ」「場所は」「見えているものは本物か」など、前提をほどく質問から始めると進みやすいです。</p>
           </div>
           <div className="action-row">
-            <button className="primary-button" disabled={!canStart || selectedQuestionCount === 0} onClick={startTurtleSoup}>
+            <button className="primary-button" disabled={!canStart || selectedQuestionCount === 0 || !canControlTurtleSoup} onClick={startTurtleSoup}>
               <Play size={18} />
               はじめる
             </button>
-            <button className="secondary-button" onClick={() => setState(initialTurtleSoupState)}>
+            <button className="secondary-button" disabled={!canControlTurtleSoup} onClick={() => setState(initialTurtleSoupState)}>
               <RotateCcw size={18} />
               リセット
             </button>
@@ -5775,7 +5996,7 @@ function TurtleSoupGame({ onHome, onResetAll }: { onHome: () => void; onResetAll
           )}
           <div className="question-log-panel">
             <h3>質問メモ</h3>
-            <p>出題者が必要な時だけ記録します。記録しなくても遊べます。</p>
+            <p>出題者が必要な時だけ記録します。記録すると全端末に同期されます。</p>
             <form
               className="question-log-form"
               onSubmit={(event) => {
@@ -5786,16 +6007,21 @@ function TurtleSoupGame({ onHome, onResetAll }: { onHome: () => void; onResetAll
               <input
                 value={draftQuestion}
                 onChange={(event) => setDraftQuestion(event.target.value)}
+                disabled={!canFacilitateTurtleSoup}
                 placeholder="例: それは人間ですか？"
                 maxLength={80}
               />
-              <select value={draftAnswer} onChange={(event) => setDraftAnswer(event.target.value as typeof draftAnswer)}>
+              <select
+                value={draftAnswer}
+                disabled={!canFacilitateTurtleSoup}
+                onChange={(event) => setDraftAnswer(event.target.value as typeof draftAnswer)}
+              >
                 <option value="はい">はい</option>
                 <option value="いいえ">いいえ</option>
                 <option value="関係ありません">関係ありません</option>
                 <option value="補足あり">補足あり</option>
               </select>
-              <button className="secondary-button" disabled={!draftQuestion.trim()} type="submit">
+              <button className="secondary-button" disabled={!draftQuestion.trim() || !canFacilitateTurtleSoup} type="submit">
                 <Plus size={18} />
                 記録
               </button>
@@ -5810,37 +6036,60 @@ function TurtleSoupGame({ onHome, onResetAll }: { onHome: () => void; onResetAll
                 ))}
               </div>
             )}
+            {isTurtleSoupRoom && !canFacilitateTurtleSoup && (
+              <p className="soft-note">質問ログの記録は今回の出題者またはホスト端末で行います。</p>
+            )}
           </div>
           <div className="action-row">
             <button
               className="secondary-button"
-              disabled={state.hintLevel >= activeCase.hints.length}
+              disabled={state.hintLevel >= activeCase.hints.length || !canFacilitateTurtleSoup}
               onClick={() => setState({ ...state, hintLevel: Math.min(activeCase.hints.length, state.hintLevel + 1) })}
             >
               <MessageCircleQuestion size={18} />
               ヒントを出す
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, answerVisible: !state.answerVisible })}>
-              {state.answerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
-              {state.answerVisible ? "真相を隠す" : "出題者だけ真相を見る"}
-            </button>
+            {isTurtleSoupRoom ? (
+              <>
+                <button className="secondary-button" disabled={!canFacilitateTurtleSoup} onClick={() => setPrivateTruthVisible(!privateTruthVisible)}>
+                  {privateTruthVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+                  {privateTruthVisible ? "自分の真相確認を閉じる" : "出題者だけ真相を見る"}
+                </button>
+                <button className="secondary-button" disabled={!canFacilitateTurtleSoup} onClick={() => setState({ ...state, answerVisible: !state.answerVisible })}>
+                  {state.answerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+                  {state.answerVisible ? "全員の真相を隠す" : "真相を全員に表示"}
+                </button>
+              </>
+            ) : (
+              <button className="secondary-button" onClick={() => setState({ ...state, answerVisible: !state.answerVisible })}>
+                {state.answerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
+                {state.answerVisible ? "真相を隠す" : "出題者だけ真相を見る"}
+              </button>
+            )}
           </div>
+          {privateTruthVisible && isTurtleSoupRoom && canFacilitateTurtleSoup && !state.answerVisible && (
+            <div className="answer-panel wide">
+              <strong>出題者用の真相</strong>
+              <p>{activeCase.truth}</p>
+            </div>
+          )}
           {state.answerVisible && (
             <div className="answer-panel wide">
-              <strong>真相</strong>
+              <strong>{isTurtleSoupRoom ? "全員に表示中の真相" : "真相"}</strong>
               <p>{activeCase.truth}</p>
             </div>
           )}
           <div className="action-row">
-            <button className="primary-button" onClick={() => moveToNextTurtleCase(true)}>
+            <button className="primary-button" disabled={!canFacilitateTurtleSoup} onClick={() => moveToNextTurtleCase(true)}>
               <Check size={18} />
               解けた
             </button>
-            <button className="secondary-button" onClick={() => moveToNextTurtleCase(false)}>
+            <button className="secondary-button" disabled={!canFacilitateTurtleSoup} onClick={() => moveToNextTurtleCase(false)}>
               <ChevronRight size={18} />
               次の問題
             </button>
           </div>
+          {isTurtleSoupRoom && !canFacilitateTurtleSoup && <p className="soft-note">ヒント、真相表示、次の問題への進行は出題者またはホスト端末で行います。</p>}
         </section>
       )}
 
@@ -5853,15 +6102,16 @@ function TurtleSoupGame({ onHome, onResetAll }: { onHome: () => void; onResetAll
           </h2>
           <p className="talk-cue">解けなかった問題も、真相を読んで「そういうことか」と笑えたら成功です。</p>
           <div className="action-row centered">
-            <button className="primary-button" onClick={startTurtleSoup}>
+            <button className="primary-button" disabled={!canControlTurtleSoup} onClick={startTurtleSoup}>
               <RotateCcw size={18} />
               もう一度
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup", caseId: null })}>
+            <button className="secondary-button" disabled={!canControlTurtleSoup} onClick={() => setState({ ...state, step: "setup", caseId: null })}>
               <Users size={18} />
               設定へ
             </button>
           </div>
+          {!canControlTurtleSoup && <p className="soft-note">再開や設定変更はホスト端末で行います。</p>}
         </section>
       )}
     </GameFrame>
