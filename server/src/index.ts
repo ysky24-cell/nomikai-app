@@ -513,6 +513,10 @@ function validateParticipantScopedStateChange(
     case "large-majority-game":
       if (progress.phaseOrStepChanged) return "host_required";
       return validateUrlCandidateOwnedMapChange(currentStateValue, nextStateValue, activeGame, requesterId, ["votes"]);
+    case "reverse-word-game":
+    case "loanword-ban-game":
+      if (progress.phaseOrStepChanged) return "host_required";
+      return validateUrlCandidateTurnResultChange(currentStateValue, nextStateValue, activeGame, requesterId);
     case "song-association-quiz":
     case "drawing-quiz":
     case "memory-logo-drawing":
@@ -534,6 +538,26 @@ function validateParticipantScopedStateChange(
     case "acting-phrase-game":
       if (progress.phaseOrStepChanged) return "host_required";
       return validateUrlCandidateActingChange(currentStateValue, nextStateValue, activeGame, requesterId);
+    case "count-up-game":
+      if (progress.phaseOrStepChanged) return "host_required";
+      return validateUrlCandidateCountUpChange(currentStateValue, nextStateValue, activeGame, requesterId);
+    case "hazard-card-game":
+    case "safe-random-draw":
+      if (progress.phaseOrStepChanged) return "host_required";
+      return validateUrlCandidateDrawChange(currentStateValue, nextStateValue, activeGame, requesterId);
+    case "party-sugoroku":
+    case "life-event-sugoroku":
+      if (progress.phaseOrStepChanged) return "host_required";
+      return validateUrlCandidateSugorokuChange(currentStateValue, nextStateValue, activeGame, requesterId);
+    case "territory-board-game":
+      if (progress.phaseOrStepChanged) return "host_required";
+      return validateUrlCandidateTerritoryChange(currentStateValue, nextStateValue, activeGame, requesterId);
+    case "resource-negotiation-game":
+      if (progress.phaseOrStepChanged) return "host_required";
+      return validateUrlCandidateResourceChange(currentStateValue, nextStateValue, activeGame, requesterId);
+    case "arm-wrestling-tournament":
+      if (progress.phaseOrStepChanged) return "host_required";
+      return validateUrlCandidateTournamentChange(currentStateValue, nextStateValue, activeGame, requesterId);
     case "anonymous-box":
       if (progress.phaseOrStepChanged) return "host_required";
       return validateAnonymousQuestionSubmission(currentStateValue, nextStateValue);
@@ -897,6 +921,10 @@ function readFiniteNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
+function readNonnegativeInteger(value: unknown) {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0 ? value : null;
+}
+
 const progressStateKeys = new Set(["phase", "gameKey", "gameTitle", "step", "message", "updatedBy", "updatedAt"]);
 
 function validateOwnedMapBranchChange(
@@ -1096,6 +1124,233 @@ function validateUrlCandidateActingChange(
   return "participant_field_forbidden";
 }
 
+function validateUrlCandidateTurnResultChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  gameKey: string,
+  requesterId: string,
+) {
+  const change = readUrlCandidateStateChange(currentStateValue, nextStateValue, gameKey);
+  if ("error" in change) return change.error;
+  if (change.currentInnerState.step !== "play" || change.nextInnerState.step !== "play") return "host_required";
+
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(change.currentInnerState);
+  if (requesterId !== currentPlayerId) return "participant_field_forbidden";
+  return validateUrlCandidateTurnRecord(change.currentInnerState, change.nextInnerState, requesterId)
+    ? null
+    : "participant_field_forbidden";
+}
+
+function validateUrlCandidateCountUpChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  gameKey: string,
+  requesterId: string,
+) {
+  const change = readUrlCandidateStateChange(currentStateValue, nextStateValue, gameKey);
+  if ("error" in change) return change.error;
+  if (change.currentInnerState.step !== "play" || change.nextInnerState.step !== "play") return "host_required";
+
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(change.currentInnerState);
+  if (requesterId !== currentPlayerId) return "participant_field_forbidden";
+
+  const changedKeys = getChangedKeys(change.currentInnerState, change.nextInnerState);
+  const allowedKeys = ["numberValue", "currentPlayerIndex", "safeCounts", "missCounts", "actionLog"];
+  if (!changedKeys.every((key) => allowedKeys.includes(key))) return "participant_field_forbidden";
+  if (!changedKeys.includes("numberValue") || !changedKeys.includes("currentPlayerIndex") || !changedKeys.includes("actionLog")) {
+    return "participant_field_forbidden";
+  }
+  if (!validateAdvancedPlayerIndex(change.currentInnerState, change.nextInnerState, 1)) return "participant_field_forbidden";
+  if (!validatePrependedActionLog(change.currentInnerState.actionLog, change.nextInnerState.actionLog)) return "participant_field_forbidden";
+
+  const currentNumber = readNonnegativeInteger(change.currentInnerState.numberValue);
+  const nextNumber = readNonnegativeInteger(change.nextInnerState.numberValue);
+  if (currentNumber === null || nextNumber === null || nextNumber <= currentNumber || nextNumber - currentNumber > 3) {
+    return "participant_field_forbidden";
+  }
+
+  const hasSafeChange = changedKeys.includes("safeCounts");
+  const hasMissChange = changedKeys.includes("missCounts");
+  if (hasSafeChange === hasMissChange) return "participant_field_forbidden";
+  if (hasSafeChange && !validateScoreIncrement(change.currentInnerState.safeCounts, change.nextInnerState.safeCounts, requesterId)) {
+    return "participant_field_forbidden";
+  }
+  if (hasMissChange && !validateScoreIncrement(change.currentInnerState.missCounts, change.nextInnerState.missCounts, requesterId)) {
+    return "participant_field_forbidden";
+  }
+
+  return null;
+}
+
+function validateUrlCandidateDrawChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  gameKey: string,
+  requesterId: string,
+) {
+  const change = readUrlCandidateStateChange(currentStateValue, nextStateValue, gameKey);
+  if ("error" in change) return change.error;
+  if (change.currentInnerState.step !== "play" || change.nextInnerState.step !== "play") return "host_required";
+
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(change.currentInnerState);
+  if (requesterId !== currentPlayerId) return "participant_field_forbidden";
+
+  const changedKeys = getChangedKeys(change.currentInnerState, change.nextInnerState);
+  const allowedKeys = ["drawnCount", "currentPlayerIndex", "safeCounts", "missCounts", "actionLog"];
+  if (!changedKeys.every((key) => allowedKeys.includes(key))) return "participant_field_forbidden";
+  if (!changedKeys.includes("drawnCount") || !changedKeys.includes("currentPlayerIndex") || !changedKeys.includes("actionLog")) {
+    return "participant_field_forbidden";
+  }
+  if (!validateAdvancedPlayerIndex(change.currentInnerState, change.nextInnerState, 1)) return "participant_field_forbidden";
+  if (!validatePrependedActionLog(change.currentInnerState.actionLog, change.nextInnerState.actionLog)) return "participant_field_forbidden";
+
+  const currentDrawnCount = readNonnegativeInteger(change.currentInnerState.drawnCount);
+  const nextDrawnCount = readNonnegativeInteger(change.nextInnerState.drawnCount);
+  const hazardIndex = readNonnegativeInteger(change.currentInnerState.hazardIndex);
+  if (currentDrawnCount === null || nextDrawnCount !== currentDrawnCount + 1 || nextDrawnCount > 8 || hazardIndex === null) {
+    return "participant_field_forbidden";
+  }
+
+  const shouldMiss = nextDrawnCount === hazardIndex;
+  const hasSafeChange = changedKeys.includes("safeCounts");
+  const hasMissChange = changedKeys.includes("missCounts");
+  if (shouldMiss) {
+    if (hasSafeChange || !hasMissChange) return "participant_field_forbidden";
+    return validateScoreIncrement(change.currentInnerState.missCounts, change.nextInnerState.missCounts, requesterId)
+      ? null
+      : "participant_field_forbidden";
+  }
+  if (!hasSafeChange || hasMissChange) return "participant_field_forbidden";
+  return validateScoreIncrement(change.currentInnerState.safeCounts, change.nextInnerState.safeCounts, requesterId)
+    ? null
+    : "participant_field_forbidden";
+}
+
+function validateUrlCandidateSugorokuChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  gameKey: string,
+  requesterId: string,
+) {
+  const change = readUrlCandidateStateChange(currentStateValue, nextStateValue, gameKey);
+  if ("error" in change) return change.error;
+  if (change.currentInnerState.step !== "play" || change.nextInnerState.step !== "play") return "host_required";
+
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(change.currentInnerState);
+  if (requesterId !== currentPlayerId) return "participant_field_forbidden";
+
+  const changedKeys = getChangedKeys(change.currentInnerState, change.nextInnerState);
+  const allowedKeys = ["positions", "currentPlayerIndex", "actionLog"];
+  if (!changedKeys.every((key) => allowedKeys.includes(key))) return "participant_field_forbidden";
+  if (!changedKeys.includes("positions") || !changedKeys.includes("currentPlayerIndex") || !changedKeys.includes("actionLog")) {
+    return "participant_field_forbidden";
+  }
+  if (!validateAdvancedPlayerIndex(change.currentInnerState, change.nextInnerState, 1)) return "participant_field_forbidden";
+  if (!validatePrependedActionLog(change.currentInnerState.actionLog, change.nextInnerState.actionLog)) return "participant_field_forbidden";
+  if (!validateSingleOwnedNumberDelta(change.currentInnerState.positions, change.nextInnerState.positions, requesterId, 1, 6)) {
+    return "participant_field_forbidden";
+  }
+  return null;
+}
+
+function validateUrlCandidateTerritoryChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  gameKey: string,
+  requesterId: string,
+) {
+  const change = readUrlCandidateStateChange(currentStateValue, nextStateValue, gameKey);
+  if ("error" in change) return change.error;
+  if (change.currentInnerState.step !== "play" || change.nextInnerState.step !== "play") return "host_required";
+
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(change.currentInnerState);
+  if (requesterId !== currentPlayerId) return "participant_field_forbidden";
+
+  const changedKeys = getChangedKeys(change.currentInnerState, change.nextInnerState);
+  const allowedKeys = ["territory", "currentPlayerIndex", "actionLog"];
+  if (!changedKeys.every((key) => allowedKeys.includes(key))) return "participant_field_forbidden";
+  if (!changedKeys.includes("territory") || !changedKeys.includes("currentPlayerIndex") || !changedKeys.includes("actionLog")) {
+    return "participant_field_forbidden";
+  }
+  if (!validateAdvancedPlayerIndex(change.currentInnerState, change.nextInnerState, 1)) return "participant_field_forbidden";
+  if (!validatePrependedActionLog(change.currentInnerState.actionLog, change.nextInnerState.actionLog)) return "participant_field_forbidden";
+
+  const currentTerritory = asRecord(change.currentInnerState.territory) ?? {};
+  const nextTerritory = asRecord(change.nextInnerState.territory) ?? {};
+  const changedCells = getChangedKeys(currentTerritory, nextTerritory);
+  if (changedCells.length !== 1) return "participant_field_forbidden";
+  const cell = readNonnegativeInteger(Number(changedCells[0]));
+  if (cell === null || cell > 24 || typeof currentTerritory[changedCells[0]] !== "undefined") return "participant_field_forbidden";
+  return nextTerritory[changedCells[0]] === requesterId ? null : "participant_field_forbidden";
+}
+
+function validateUrlCandidateResourceChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  gameKey: string,
+  requesterId: string,
+) {
+  const change = readUrlCandidateStateChange(currentStateValue, nextStateValue, gameKey);
+  if ("error" in change) return change.error;
+  if (change.currentInnerState.step !== "play" || change.nextInnerState.step !== "play") return "host_required";
+
+  const changedKeys = getChangedKeys(change.currentInnerState, change.nextInnerState);
+  if (isOnlyChangedKeys(changedKeys, ["resourceCounts", "actionLog"]) && changedKeys.includes("resourceCounts") && changedKeys.includes("actionLog")) {
+    if (!validatePrependedActionLog(change.currentInnerState.actionLog, change.nextInnerState.actionLog)) return "participant_field_forbidden";
+    return validateSingleOwnedNumberDelta(change.currentInnerState.resourceCounts, change.nextInnerState.resourceCounts, requesterId, -1, 1)
+      ? null
+      : "participant_field_forbidden";
+  }
+
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(change.currentInnerState);
+  if (requesterId !== currentPlayerId) return "participant_field_forbidden";
+  if (!isOnlyChangedKeys(changedKeys, ["currentPlayerIndex", "actionLog"]) || !changedKeys.includes("currentPlayerIndex") || !changedKeys.includes("actionLog")) {
+    return "participant_field_forbidden";
+  }
+  if (!validateAdvancedPlayerIndex(change.currentInnerState, change.nextInnerState, 1)) return "participant_field_forbidden";
+  return validatePrependedActionLog(change.currentInnerState.actionLog, change.nextInnerState.actionLog)
+    ? null
+    : "participant_field_forbidden";
+}
+
+function validateUrlCandidateTournamentChange(
+  currentStateValue: unknown,
+  nextStateValue: unknown,
+  gameKey: string,
+  requesterId: string,
+) {
+  const change = readUrlCandidateStateChange(currentStateValue, nextStateValue, gameKey);
+  if ("error" in change) return change.error;
+  if (change.currentInnerState.step !== "play" || change.nextInnerState.step !== "play") return "host_required";
+
+  const currentPlayerId = getUrlCandidateCurrentPlayerId(change.currentInnerState);
+  const secondPlayerId = getUrlCandidateOffsetPlayerId(change.currentInnerState, 1);
+  if (requesterId !== currentPlayerId && requesterId !== secondPlayerId) return "participant_field_forbidden";
+
+  const changedKeys = getChangedKeys(change.currentInnerState, change.nextInnerState);
+  const allowedKeys = ["currentPlayerIndex", "completedPairs", "scoreCounts", "actionLog"];
+  if (!changedKeys.every((key) => allowedKeys.includes(key))) return "participant_field_forbidden";
+  if (!changedKeys.includes("currentPlayerIndex") || !changedKeys.includes("completedPairs") || !changedKeys.includes("scoreCounts") || !changedKeys.includes("actionLog")) {
+    return "participant_field_forbidden";
+  }
+  if (!validateAdvancedPlayerIndex(change.currentInnerState, change.nextInnerState, 2)) return "participant_field_forbidden";
+  if (!validatePrependedActionLog(change.currentInnerState.actionLog, change.nextInnerState.actionLog)) return "participant_field_forbidden";
+
+  const currentCompletedPairs = readNonnegativeInteger(change.currentInnerState.completedPairs);
+  const nextCompletedPairs = readNonnegativeInteger(change.nextInnerState.completedPairs);
+  if (currentCompletedPairs === null || nextCompletedPairs !== currentCompletedPairs + 1) return "participant_field_forbidden";
+
+  const currentScores = asRecord(change.currentInnerState.scoreCounts) ?? {};
+  const nextScores = asRecord(change.nextInnerState.scoreCounts) ?? {};
+  const changedScoreKeys = getChangedKeys(currentScores, nextScores);
+  if (changedScoreKeys.length !== 1) return "participant_field_forbidden";
+  const winnerId = changedScoreKeys[0];
+  if (winnerId !== currentPlayerId && winnerId !== secondPlayerId) return "participant_field_forbidden";
+  return validateScoreIncrement(change.currentInnerState.scoreCounts, change.nextInnerState.scoreCounts, winnerId)
+    ? null
+    : "participant_field_forbidden";
+}
+
 function readUrlCandidateStateChange(currentStateValue: unknown, nextStateValue: unknown, gameKey: string) {
   const currentState = asRecord(currentStateValue);
   const nextState = asRecord(nextStateValue);
@@ -1226,6 +1481,57 @@ function getUrlCandidateCurrentPlayerId(state: Record<string, unknown>) {
   const currentPlayerIndex = readFiniteNumber(state.currentPlayerIndex) ?? 0;
   const currentPlayer = players[currentPlayerIndex % Math.max(1, players.length)] ?? null;
   return currentPlayer ? readString(currentPlayer.id) : null;
+}
+
+function getUrlCandidateOffsetPlayerId(state: Record<string, unknown>, offset: number) {
+  const players = readRecordArray(state.players);
+  if (players.length === 0) return null;
+  const currentPlayerIndex = readNonnegativeInteger(state.currentPlayerIndex) ?? 0;
+  const player = players[(currentPlayerIndex + offset) % players.length] ?? null;
+  return player ? readString(player.id) : null;
+}
+
+function validateUrlCandidateTurnRecord(currentState: Record<string, unknown>, nextState: Record<string, unknown>, playerId: string) {
+  const changedKeys = getChangedKeys(currentState, nextState);
+  const allowedKeys = ["currentPlayerIndex", "safeCounts", "missCounts", "actionLog"];
+  if (!changedKeys.every((key) => allowedKeys.includes(key))) return false;
+  if (!changedKeys.includes("currentPlayerIndex") || !changedKeys.includes("actionLog")) return false;
+  if (!validateAdvancedPlayerIndex(currentState, nextState, 1)) return false;
+  if (!validatePrependedActionLog(currentState.actionLog, nextState.actionLog)) return false;
+
+  const hasSafeChange = changedKeys.includes("safeCounts");
+  const hasMissChange = changedKeys.includes("missCounts");
+  if (hasSafeChange && hasMissChange) return false;
+  if (hasSafeChange) return validateScoreIncrement(currentState.safeCounts, nextState.safeCounts, playerId);
+  if (hasMissChange) return validateScoreIncrement(currentState.missCounts, nextState.missCounts, playerId);
+  return true;
+}
+
+function validateAdvancedPlayerIndex(currentState: Record<string, unknown>, nextState: Record<string, unknown>, offset: number) {
+  const players = readRecordArray(currentState.players);
+  const currentPlayerIndex = readNonnegativeInteger(currentState.currentPlayerIndex);
+  const nextPlayerIndex = readNonnegativeInteger(nextState.currentPlayerIndex);
+  if (players.length === 0 || currentPlayerIndex === null || nextPlayerIndex === null) return false;
+  return nextPlayerIndex === (currentPlayerIndex + offset) % players.length;
+}
+
+function validateSingleOwnedNumberDelta(
+  currentValue: unknown,
+  nextValue: unknown,
+  playerId: string,
+  minDelta: number,
+  maxDelta: number,
+) {
+  const currentMap = asRecord(currentValue) ?? {};
+  const nextMap = asRecord(nextValue) ?? {};
+  const changedKeys = getChangedKeys(currentMap, nextMap);
+  if (changedKeys.length !== 1 || changedKeys[0] !== playerId) return false;
+
+  const currentNumber = readFiniteNumber(currentMap[playerId]) ?? 0;
+  const nextNumber = readFiniteNumber(nextMap[playerId]);
+  if (nextNumber === null || nextNumber < 0) return false;
+  const delta = nextNumber - currentNumber;
+  return Number.isInteger(delta) && delta >= minDelta && delta <= maxDelta && delta !== 0;
 }
 
 function isOnlyChangedKeys(changedKeys: string[], allowedKeys: string[]) {
