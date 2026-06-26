@@ -365,7 +365,7 @@ io.on("connection", (socket) => {
     }
 
     const currentGame = payload.currentGame ?? currentSnapshot.room.currentGame;
-    const stateToPersist = restoreProtectedSecretFields(
+    let stateToPersist: unknown = restoreProtectedSecretFields(
       currentGame,
       currentSnapshot.room.state,
       payload.state ?? {},
@@ -376,6 +376,7 @@ io.on("connection", (socket) => {
       socket.emit("room:error", { error: authorizationError });
       return;
     }
+    stateToPersist = normalizeSyncedTimerState(currentGame, currentSnapshot.room.state, stateToPersist);
 
     const room = await updateRoomState(
       roomCode,
@@ -443,6 +444,74 @@ function readRoomStatusFromState(stateValue: unknown, currentGame: string | null
     if (state.phase === "lobby") return "waiting";
   }
   return currentGame ? "playing" : "waiting";
+}
+
+function normalizeSyncedTimerState(currentGame: string | null, currentStateValue: unknown, nextStateValue: unknown) {
+  const branchKey = getSyncedTimerBranchKey(currentGame);
+  if (!branchKey) return nextStateValue;
+  const currentState = asRecord(currentStateValue);
+  const nextState = asRecord(nextStateValue);
+  const currentBranch = currentState ? asRecord(currentState[branchKey]) : null;
+  const nextBranch = nextState ? asRecord(nextState[branchKey]) : null;
+  if (!nextState || !nextBranch) return nextStateValue;
+
+  const normalizedBranch = normalizeSyncedTimerBranch(currentBranch, nextBranch);
+  if (normalizedBranch === nextBranch) return nextStateValue;
+  return {
+    ...nextState,
+    [branchKey]: normalizedBranch,
+  };
+}
+
+function getSyncedTimerBranchKey(currentGame: string | null) {
+  if (currentGame === "werewolf-game") return "werewolf";
+  if (currentGame === "word-wolf") return "wordWolf";
+  if (currentGame === "ng-word") return "ngWord";
+  return null;
+}
+
+function normalizeSyncedTimerBranch(currentBranch: Record<string, unknown> | null, nextBranch: Record<string, unknown>) {
+  const currentRunning = currentBranch?.timerRunning === true;
+  const nextRunning = nextBranch.timerRunning === true;
+  const now = Date.now();
+
+  if (nextRunning && !currentRunning) {
+    const remainingSeconds = readNonnegativeInteger(nextBranch.remainingSeconds) ?? 0;
+    return {
+      ...nextBranch,
+      remainingSeconds,
+      timerRunning: remainingSeconds > 0,
+      timerEndsAt: remainingSeconds > 0 ? new Date(now + remainingSeconds * 1000).toISOString() : null,
+    };
+  }
+
+  if (!nextRunning && currentRunning) {
+    return {
+      ...nextBranch,
+      remainingSeconds: readSyncedTimerRemaining(currentBranch, now),
+      timerRunning: false,
+      timerEndsAt: null,
+    };
+  }
+
+  if (nextRunning && currentRunning) {
+    const currentEndsAt = readString(currentBranch?.timerEndsAt);
+    return currentEndsAt ? { ...nextBranch, timerEndsAt: currentEndsAt } : nextBranch;
+  }
+
+  if (nextBranch.timerEndsAt !== null && typeof nextBranch.timerEndsAt !== "undefined") {
+    return { ...nextBranch, timerEndsAt: null };
+  }
+
+  return nextBranch;
+}
+
+function readSyncedTimerRemaining(branch: Record<string, unknown> | null, now = Date.now()) {
+  const fallback = readNonnegativeInteger(branch?.remainingSeconds) ?? 0;
+  if (!branch?.timerRunning || !branch.timerEndsAt) return fallback;
+  const endTime = Date.parse(String(branch.timerEndsAt));
+  if (!Number.isFinite(endTime)) return fallback;
+  return Math.max(0, Math.ceil((endTime - now) / 1000));
 }
 
 type RoomSnapshot = NonNullable<Awaited<ReturnType<typeof findRoomByCode>>>;

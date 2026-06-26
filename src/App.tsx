@@ -475,9 +475,70 @@ function pickOne<T>(items: T[]) {
 }
 
 function formatTime(totalSeconds: number) {
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds % 60;
+  const normalizedSeconds = Math.max(0, Math.floor(totalSeconds));
+  const minutes = Math.floor(normalizedSeconds / 60);
+  const seconds = normalizedSeconds % 60;
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+}
+
+type SyncedTimerFields = {
+  remainingSeconds: number;
+  timerRunning: boolean;
+  timerEndsAt: string | null;
+};
+
+function getSyncedTimerRemaining(timer: SyncedTimerFields, now = Date.now()) {
+  if (!timer.timerRunning || !timer.timerEndsAt) return Math.max(0, timer.remainingSeconds);
+  const endTime = Date.parse(timer.timerEndsAt);
+  if (!Number.isFinite(endTime)) return Math.max(0, timer.remainingSeconds);
+  return Math.max(0, Math.ceil((endTime - now) / 1000));
+}
+
+function startSyncedTimer<T extends SyncedTimerFields>(state: T, now = Date.now()): T {
+  const remainingSeconds = getSyncedTimerRemaining(state, now);
+  return {
+    ...state,
+    remainingSeconds,
+    timerRunning: remainingSeconds > 0,
+    timerEndsAt: remainingSeconds > 0 ? new Date(now + remainingSeconds * 1000).toISOString() : null,
+  };
+}
+
+function pauseSyncedTimer<T extends SyncedTimerFields>(state: T, now = Date.now()): T {
+  return {
+    ...state,
+    remainingSeconds: getSyncedTimerRemaining(state, now),
+    timerRunning: false,
+    timerEndsAt: null,
+  };
+}
+
+function stopSyncedTimer<T extends SyncedTimerFields>(state: T, remainingSeconds = state.remainingSeconds): T {
+  return {
+    ...state,
+    remainingSeconds: Math.max(0, remainingSeconds),
+    timerRunning: false,
+    timerEndsAt: null,
+  };
+}
+
+function toggleSyncedTimer<T extends SyncedTimerFields>(state: T, now = Date.now()): T {
+  return state.timerRunning ? pauseSyncedTimer(state, now) : startSyncedTimer(state, now);
+}
+
+function useSecondTick(active: boolean) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!active) {
+      setNow(Date.now());
+      return;
+    }
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [active]);
+
+  return now;
 }
 
 function useStoredState<T>(key: string, initialState: T) {
@@ -3563,6 +3624,7 @@ type WerewolfState = {
   discussionSeconds: number;
   remainingSeconds: number;
   timerRunning: boolean;
+  timerEndsAt: string | null;
   nightStep: WerewolfNightStep;
   werewolfTargetId: string | null;
   seerTargetId: string | null;
@@ -3613,6 +3675,7 @@ const initialWerewolfState: WerewolfState = {
   discussionSeconds: 300,
   remainingSeconds: 300,
   timerRunning: false,
+  timerEndsAt: null,
   nightStep: "werewolf",
   werewolfTargetId: null,
   seerTargetId: null,
@@ -3828,6 +3891,9 @@ function WerewolfGame({
   const ownAssignment = roomSession ? getWerewolfAssignment(state.assignments, roomSession.participantId) : null;
   const currentVoterIsThisParticipant = Boolean(isWerewolfRoom && currentVoter?.id === roomSession?.participantId);
   const canVoteForCurrentVoter = canControlWerewolf || currentVoterIsThisParticipant;
+  const werewolfTimerNow = useSecondTick(state.phase === "day" && state.timerRunning);
+  const werewolfRemainingSeconds = getSyncedTimerRemaining(state, werewolfTimerNow);
+  const werewolfTimerRunning = state.timerRunning && werewolfRemainingSeconds > 0;
 
   function setState(nextStateOrUpdater: WerewolfState | ((current: WerewolfState) => WerewolfState)) {
     if (!isWerewolfRoom || !roomSession || !roomSnapshot) {
@@ -3889,20 +3955,13 @@ function WerewolfGame({
   }, [roomSession]);
 
   useEffect(() => {
-    if (state.phase !== "day" || !state.timerRunning || (isWerewolfRoom && !isRoomHost)) return;
-    const timer = window.setInterval(() => {
-      setState((current) => {
-        if (current.phase !== "day" || !current.timerRunning) return current;
-        const next = Math.max(0, current.remainingSeconds - 1);
-        return {
-          ...current,
-          remainingSeconds: next,
-          timerRunning: next > 0,
-        };
-      });
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [isRoomHost, isWerewolfRoom, state.phase, state.remainingSeconds, state.timerRunning]);
+    if (state.phase !== "day" || !state.timerRunning || werewolfRemainingSeconds > 0 || !canControlWerewolf) return;
+    setState((current) =>
+      current.phase === "day" && current.timerRunning && getSyncedTimerRemaining(current) === 0
+        ? stopSyncedTimer(current, 0)
+        : current,
+    );
+  }, [canControlWerewolf, state.phase, state.timerRunning, werewolfRemainingSeconds]);
 
   function startWerewolfGame() {
     const assignments = createWerewolfAssignments(state.players);
@@ -3911,6 +3970,7 @@ function WerewolfGame({
       players: state.players,
       discussionSeconds: state.discussionSeconds,
       remainingSeconds: state.discussionSeconds,
+      timerEndsAt: null,
       phase: "reveal",
       assignments,
       actionLog: ["役職を配りました。スマホを順番に回して本人だけ確認します。"],
@@ -3923,6 +3983,7 @@ function WerewolfGame({
       phase: "night",
       dayNumber: nextState.dayNumber + 1,
       timerRunning: false,
+      timerEndsAt: null,
       nightStep: "werewolf",
       werewolfTargetId: null,
       seerTargetId: null,
@@ -3953,6 +4014,8 @@ function WerewolfGame({
         morningMessage,
         winner: outcome.winner,
         resultReason: `${morningMessage} ${outcome.reason}`,
+        timerRunning: false,
+        timerEndsAt: null,
         actionLog: nextLog,
       });
       return;
@@ -3965,6 +4028,7 @@ function WerewolfGame({
       morningMessage,
       remainingSeconds: state.discussionSeconds,
       timerRunning: false,
+      timerEndsAt: null,
       votes: {},
       voteIndex: 0,
       tiedTargetIds: [],
@@ -3989,6 +4053,7 @@ function WerewolfGame({
         tiedTargetIds: tally.topTargetIds,
         lastExecutedId: null,
         timerRunning: false,
+        timerEndsAt: null,
         actionLog: [`同票です。${tally.maxVotes}票で並びました。`, ...state.actionLog].slice(0, 10),
       });
       return;
@@ -4010,6 +4075,7 @@ function WerewolfGame({
         winner: outcome.winner,
         resultReason: `${executedName}さんを追放しました。${outcome.reason}`,
         timerRunning: false,
+        timerEndsAt: null,
         actionLog: nextLog,
       });
       return;
@@ -4023,6 +4089,7 @@ function WerewolfGame({
       tiedTargetIds: [],
       lastExecutedId: executedId,
       timerRunning: false,
+      timerEndsAt: null,
       actionLog: nextLog,
     });
   }
@@ -4142,7 +4209,13 @@ function WerewolfGame({
               options={werewolfDiscussionTimeOptions}
               value={String(state.discussionSeconds) as "180" | "300" | "420"}
               onChange={(seconds) =>
-                setState({ ...state, discussionSeconds: Number(seconds), remainingSeconds: Number(seconds) })
+                setState({
+                  ...state,
+                  discussionSeconds: Number(seconds),
+                  remainingSeconds: Number(seconds),
+                  timerRunning: false,
+                  timerEndsAt: null,
+                })
               }
             />
           )}
@@ -4402,7 +4475,7 @@ function WerewolfGame({
         <section className="tool-surface center-flow">
           <p className="eyebrow">昼 {state.dayNumber}</p>
           <h2>{state.morningMessage}</h2>
-          <div className="timer-display">{formatTime(state.remainingSeconds)}</div>
+          <div className="timer-display">{formatTime(werewolfRemainingSeconds)}</div>
           <div className="howto-panel compact">
             <h3>昼の進め方</h3>
             <ul className="rule-list">
@@ -4418,16 +4491,23 @@ function WerewolfGame({
           <div className="action-row centered">
             <button
               className="primary-button"
-              onClick={() => setState({ ...state, timerRunning: !state.timerRunning })}
-              disabled={state.remainingSeconds === 0 || !canControlWerewolf}
+              onClick={() => setState(toggleSyncedTimer(state, werewolfTimerNow))}
+              disabled={werewolfRemainingSeconds === 0 || !canControlWerewolf}
             >
-              {state.timerRunning ? <Pause size={18} /> : <Play size={18} />}
-              {state.timerRunning ? "止める" : "開始"}
+              {werewolfTimerRunning ? <Pause size={18} /> : <Play size={18} />}
+              {werewolfTimerRunning ? "止める" : "開始"}
             </button>
             <button
               className="secondary-button"
               disabled={!canControlWerewolf}
-              onClick={() => setState({ ...state, phase: "vote", timerRunning: false, votes: {}, voteIndex: 0 })}
+              onClick={() =>
+                setState({
+                  ...stopSyncedTimer(state, werewolfRemainingSeconds),
+                  phase: "vote",
+                  votes: {},
+                  voteIndex: 0,
+                })
+              }
             >
               <Vote size={18} />
               投票へ
@@ -9008,6 +9088,7 @@ type WordWolfState = {
   revealVisible: boolean;
   remainingSeconds: number;
   timerRunning: boolean;
+  timerEndsAt: string | null;
   votes: Record<string, string>;
   voteIndex: number;
 };
@@ -9030,6 +9111,7 @@ const initialWordWolfState: WordWolfState = {
   revealVisible: false,
   remainingSeconds: 300,
   timerRunning: false,
+  timerEndsAt: null,
   votes: {},
   voteIndex: 0,
 };
@@ -9070,7 +9152,7 @@ function getWordWolfProgressStep(state: WordWolfState) {
 function describeWordWolfProgress(state: WordWolfState) {
   if (state.step === "setup") return "ワードウルフの設定中です";
   if (state.step === "reveal") return "お題を配布しました。各自端末で自分のお題を確認してください";
-  if (state.step === "discussion") return `会話タイム中です / 残り${formatTime(state.remainingSeconds)}`;
+  if (state.step === "discussion") return `会話タイム中です / 残り${formatTime(getSyncedTimerRemaining(state))}`;
   if (state.step === "vote") return `投票中です: ${Math.min(state.voteIndex + 1, state.players.length)}/${state.players.length}`;
   const result = getWordWolfVoteResult(state);
   return result.majorityWin ? "多数派が少数派を見破りました" : "少数派がうまく紛れ込みました";
@@ -9142,6 +9224,9 @@ function WordWolfGame({
   const currentVoterIsThisParticipant = Boolean(isWordWolfRoom && currentVoter?.id === roomSession?.participantId);
   const canVoteForCurrentVoter = canControlWordWolf || currentVoterIsThisParticipant;
   const wordWolfResult = useMemo(() => getWordWolfVoteResult(state), [state.assignments, state.players, state.votes]);
+  const wordWolfTimerNow = useSecondTick(state.step === "discussion" && state.timerRunning);
+  const wordWolfRemainingSeconds = getSyncedTimerRemaining(state, wordWolfTimerNow);
+  const wordWolfTimerRunning = state.timerRunning && wordWolfRemainingSeconds > 0;
 
   function setState(nextStateOrUpdater: WordWolfState | ((current: WordWolfState) => WordWolfState)) {
     if (isWordWolfRoom && roomSession && !roomSnapshot) {
@@ -9208,20 +9293,13 @@ function WordWolfGame({
   }, [roomSession]);
 
   useEffect(() => {
-    if (state.step !== "discussion" || !state.timerRunning || (isWordWolfRoom && !isRoomHost)) return;
-    const timer = window.setInterval(() => {
-      setState((current) => {
-        if (current.step !== "discussion" || !current.timerRunning) return current;
-        const next = Math.max(0, current.remainingSeconds - 1);
-        return {
-          ...current,
-          remainingSeconds: next,
-          timerRunning: next > 0,
-        };
-      });
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [isRoomHost, isWordWolfRoom, state.remainingSeconds, state.step, state.timerRunning]);
+    if (state.step !== "discussion" || !state.timerRunning || wordWolfRemainingSeconds > 0 || !canControlWordWolf) return;
+    setState((current) =>
+      current.step === "discussion" && current.timerRunning && getSyncedTimerRemaining(current) === 0
+        ? stopSyncedTimer(current, 0)
+        : current,
+    );
+  }, [canControlWordWolf, state.step, state.timerRunning, wordWolfRemainingSeconds]);
 
   useEffect(() => {
     setOwnWordVisible(false);
@@ -9245,6 +9323,7 @@ function WordWolfGame({
       revealVisible: false,
       remainingSeconds: state.seconds,
       timerRunning: false,
+      timerEndsAt: null,
       votes: {},
       voteIndex: 0,
     });
@@ -9394,7 +9473,15 @@ function WordWolfGame({
                 label="会話時間"
                 options={wordWolfTimeOptions}
                 value={String(state.seconds) as "180" | "300" | "420"}
-                onChange={(seconds) => setState({ ...state, seconds: Number(seconds), remainingSeconds: Number(seconds) })}
+                onChange={(seconds) =>
+                  setState({
+                    ...state,
+                    seconds: Number(seconds),
+                    remainingSeconds: Number(seconds),
+                    timerRunning: false,
+                    timerEndsAt: null,
+                  })
+                }
               />
             </>
           ) : (
@@ -9437,7 +9524,7 @@ function WordWolfGame({
             <button
               className="secondary-button"
               disabled={!canControlWordWolf}
-              onClick={() => setState({ ...state, step: "discussion", revealVisible: false, timerRunning: false })}
+              onClick={() => setState({ ...state, step: "discussion", revealVisible: false, timerRunning: false, timerEndsAt: null })}
             >
               <ChevronRight size={18} />
               会話へ
@@ -9467,7 +9554,7 @@ function WordWolfGame({
               disabled={!state.revealVisible}
               onClick={() => {
                 if (state.revealIndex + 1 >= state.players.length) {
-                  setState({ ...state, step: "discussion", revealVisible: false });
+                  setState({ ...state, step: "discussion", revealVisible: false, timerRunning: false, timerEndsAt: null });
                 } else {
                   setState({ ...state, revealIndex: state.revealIndex + 1, revealVisible: false });
                 }
@@ -9483,7 +9570,7 @@ function WordWolfGame({
       {state.step === "discussion" && (
         <section className="tool-surface center-flow">
           <p className="eyebrow">会話タイム</p>
-          <div className="timer-display">{formatTime(state.remainingSeconds)}</div>
+          <div className="timer-display">{formatTime(wordWolfRemainingSeconds)}</div>
           <div className="howto-panel compact">
             <h3>会話のコツ</h3>
             <ul className="rule-list">
@@ -9495,13 +9582,17 @@ function WordWolfGame({
           <div className="action-row centered">
             <button
               className="primary-button"
-              onClick={() => setState({ ...state, timerRunning: !state.timerRunning })}
-              disabled={state.remainingSeconds === 0 || !canControlWordWolf}
+              onClick={() => setState(toggleSyncedTimer(state, wordWolfTimerNow))}
+              disabled={wordWolfRemainingSeconds === 0 || !canControlWordWolf}
             >
-              {state.timerRunning ? <Pause size={18} /> : <Play size={18} />}
-              {state.timerRunning ? "止める" : "開始"}
+              {wordWolfTimerRunning ? <Pause size={18} /> : <Play size={18} />}
+              {wordWolfTimerRunning ? "止める" : "開始"}
             </button>
-            <button className="secondary-button" disabled={!canControlWordWolf} onClick={() => setState({ ...state, step: "vote", timerRunning: false })}>
+            <button
+              className="secondary-button"
+              disabled={!canControlWordWolf}
+              onClick={() => setState({ ...stopSyncedTimer(state, wordWolfRemainingSeconds), step: "vote" })}
+            >
               <Vote size={18} />
               投票へ
             </button>
@@ -9610,6 +9701,7 @@ type NgWordState = {
   revealVisible: boolean;
   remainingSeconds: number;
   timerRunning: boolean;
+  timerEndsAt: string | null;
 };
 
 const ngDifficultyOptions: SegmentedOption<NgDifficulty>[] = [
@@ -9636,6 +9728,7 @@ const initialNgWordState: NgWordState = {
   revealVisible: false,
   remainingSeconds: 600,
   timerRunning: false,
+  timerEndsAt: null,
 };
 
 function getNgWordPool(difficulty: NgDifficulty, playerCount: number) {
@@ -9669,7 +9762,7 @@ function describeNgWordProgress(state: NgWordState) {
   if (state.step === "reveal") return "NGワードを配布確認中です";
   if (state.step === "play") {
     const totalPenalty = state.assignments.reduce((sum, assignment) => sum + assignment.penaltyCount, 0);
-    return `会話中です: ${formatTime(state.remainingSeconds)} / 踏んだ記録${totalPenalty}回`;
+    return `会話中です: ${formatTime(getSyncedTimerRemaining(state))} / 踏んだ記録${totalPenalty}回`;
   }
   return "NGワードゲームの結果を表示中です";
 }
@@ -9710,6 +9803,9 @@ function NgWordGame({
   const canControlNgWord = !isNgWordRoom || (isRoomHost && Boolean(roomSnapshot));
   const canRecordNgPenalty = !isNgWordRoom || Boolean(roomSnapshot);
   const canStart = state.players.length >= 3 && state.players.every((player) => player.name.trim());
+  const ngWordTimerNow = useSecondTick(state.step === "play" && state.timerRunning);
+  const ngWordRemainingSeconds = getSyncedTimerRemaining(state, ngWordTimerNow);
+  const ngWordTimerRunning = state.timerRunning && ngWordRemainingSeconds > 0;
 
   function setState(nextStateOrUpdater: NgWordState | ((current: NgWordState) => NgWordState)) {
     if (isNgWordRoom && roomSession && !roomSnapshot) {
@@ -9776,20 +9872,13 @@ function NgWordGame({
   }, [roomSession]);
 
   useEffect(() => {
-    if (state.step !== "play" || !state.timerRunning || !canControlNgWord) return;
-    const timer = window.setInterval(() => {
-      setState((current) => {
-        if (current.step !== "play" || !current.timerRunning) return current;
-        const next = Math.max(0, current.remainingSeconds - 1);
-        return {
-          ...current,
-          remainingSeconds: next,
-          timerRunning: next > 0,
-        };
-      });
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, [canControlNgWord, setState, state.step, state.timerRunning]);
+    if (state.step !== "play" || !state.timerRunning || ngWordRemainingSeconds > 0 || !canControlNgWord) return;
+    setState((current) =>
+      current.step === "play" && current.timerRunning && getSyncedTimerRemaining(current) === 0
+        ? stopSyncedTimer(current, 0)
+        : current,
+    );
+  }, [canControlNgWord, state.step, state.timerRunning, ngWordRemainingSeconds]);
 
   function startRound() {
     if (!canControlNgWord) return;
@@ -9807,6 +9896,7 @@ function NgWordGame({
       revealVisible: false,
       remainingSeconds: state.seconds,
       timerRunning: false,
+      timerEndsAt: null,
     });
   }
 
@@ -9893,6 +9983,7 @@ function NgWordGame({
                       revealVisible: false,
                       timerRunning: false,
                       remainingSeconds: state.seconds,
+                      timerEndsAt: null,
                     })
                   }
                 >
@@ -9913,6 +10004,7 @@ function NgWordGame({
                       revealVisible: false,
                       timerRunning: false,
                       remainingSeconds: state.seconds,
+                      timerEndsAt: null,
                     })
                   }
                 >
@@ -9947,6 +10039,7 @@ function NgWordGame({
                     seconds: Number(seconds),
                     remainingSeconds: Number(seconds),
                     timerRunning: false,
+                    timerEndsAt: null,
                   })
                 }
               />
@@ -10006,7 +10099,7 @@ function NgWordGame({
             <button
               className="primary-button"
               disabled={!canControlNgWord}
-              onClick={() => setState({ ...state, step: "play", revealVisible: false, timerRunning: false })}
+              onClick={() => setState({ ...state, step: "play", revealVisible: false, timerRunning: false, timerEndsAt: null })}
             >
               <Play size={18} />
               会話へ進む
@@ -10068,15 +10161,15 @@ function NgWordGame({
           <div className="timer-strip">
             <div>
               <p className="eyebrow">会話タイム</p>
-              <strong>{formatTime(state.remainingSeconds)}</strong>
+              <strong>{formatTime(ngWordRemainingSeconds)}</strong>
             </div>
             <button
               className="secondary-button"
-              onClick={() => setState({ ...state, timerRunning: !state.timerRunning })}
-              disabled={state.remainingSeconds === 0 || !canControlNgWord}
+              onClick={() => setState(toggleSyncedTimer(state, ngWordTimerNow))}
+              disabled={ngWordRemainingSeconds === 0 || !canControlNgWord}
             >
-              {state.timerRunning ? <Pause size={18} /> : <Play size={18} />}
-              {state.timerRunning ? "止める" : "開始"}
+              {ngWordTimerRunning ? <Pause size={18} /> : <Play size={18} />}
+              {ngWordTimerRunning ? "止める" : "開始"}
             </button>
           </div>
 
@@ -10126,12 +10219,23 @@ function NgWordGame({
             <button
               className="secondary-button"
               disabled={!canControlNgWord}
-              onClick={() => setState({ ...state, step: "reveal", revealIndex: 0, revealVisible: false, timerRunning: false })}
+              onClick={() =>
+                setState({
+                  ...stopSyncedTimer(state, ngWordRemainingSeconds),
+                  step: "reveal",
+                  revealIndex: 0,
+                  revealVisible: false,
+                })
+              }
             >
               <Eye size={18} />
               確認し直す
             </button>
-            <button className="primary-button" disabled={!canControlNgWord} onClick={() => setState({ ...state, step: "result", timerRunning: false })}>
+            <button
+              className="primary-button"
+              disabled={!canControlNgWord}
+              onClick={() => setState({ ...stopSyncedTimer(state, ngWordRemainingSeconds), step: "result" })}
+            >
               <Trophy size={18} />
               結果へ
             </button>
