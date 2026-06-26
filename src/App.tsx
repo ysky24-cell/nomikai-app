@@ -579,7 +579,7 @@ function App() {
   }
 
   if (activeGame === "ng-word") {
-    return <NgWordGame onHome={goHome} onResetAll={resetAllGames} />;
+    return <NgWordGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
   }
 
   if (activeGame === "impression-ranking") {
@@ -6870,12 +6870,139 @@ function getNgWordPool(difficulty: NgDifficulty, playerCount: number) {
   return playerCount <= primary.length ? primary : [...primary, ...secondary];
 }
 
-function NgWordGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
-  const [state, setState] = useStoredState<NgWordState>("ng-word", initialNgWordState);
+type NgWordRoomEnvelope = RoomProgressState & {
+  ngWord?: NgWordState;
+};
+
+function parseNgWordStateFromRoom(snapshot: RoomSnapshot | null) {
+  if (!snapshot || snapshot.room.currentGame !== "ng-word") return null;
+  const state = snapshot.room.state && typeof snapshot.room.state === "object" ? (snapshot.room.state as Partial<NgWordRoomEnvelope>) : {};
+  return state.ngWord && typeof state.ngWord === "object" ? ({ ...initialNgWordState, ...state.ngWord } as NgWordState) : null;
+}
+
+function getNgWordProgressStep(state: NgWordState) {
+  const stepOrder: Record<NgWordStep, number> = {
+    setup: 1,
+    reveal: 2,
+    play: 3,
+    result: 4,
+  };
+  return stepOrder[state.step] ?? 1;
+}
+
+function describeNgWordProgress(state: NgWordState) {
+  if (state.step === "setup") return "NGワードゲームの設定中です";
+  if (state.step === "reveal") return "NGワードを配布確認中です";
+  if (state.step === "play") {
+    const totalPenalty = state.assignments.reduce((sum, assignment) => sum + assignment.penaltyCount, 0);
+    return `会話中です: ${formatTime(state.remainingSeconds)} / 踏んだ記録${totalPenalty}回`;
+  }
+  return "NGワードゲームの結果を表示中です";
+}
+
+function buildNgWordRoomEnvelope(ngWord: NgWordState, updatedBy: string | null): NgWordRoomEnvelope {
+  return {
+    phase: ngWord.step === "result" ? "complete" : "playing",
+    gameKey: "ng-word",
+    gameTitle: findGameMeta("ng-word")?.title ?? "NGワードゲーム",
+    step: getNgWordProgressStep(ngWord),
+    message: describeNgWordProgress(ngWord),
+    updatedBy,
+    updatedAt: new Date().toISOString(),
+    ngWord,
+  };
+}
+
+function NgWordGame({
+  onHome,
+  onResetAll,
+  roomSessionOverride = null,
+}: {
+  onHome: () => void;
+  onResetAll: () => void;
+  roomSessionOverride?: RoomSession | null;
+}) {
+  const storedRoomSession = useMemo(() => readRoomSession(), []);
+  const roomSession = roomSessionOverride ?? storedRoomSession;
+  const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
+  const [roomSyncError, setRoomSyncError] = useState("");
+  const roomSocketRef = useRef<Socket | null>(null);
+  const [storedState, setStoredState] = useStoredState<NgWordState>("ng-word", initialNgWordState);
+  const roomNgWordState = parseNgWordStateFromRoom(roomSnapshot);
+  const isNgWordRoom = Boolean(roomSession && (!roomSnapshot || roomSnapshot.room.currentGame === "ng-word"));
+  const activeNgWordState = isNgWordRoom ? (roomNgWordState ?? initialNgWordState) : storedState;
+  const state = { ...initialNgWordState, ...activeNgWordState };
+  const isRoomHost = isNgWordRoom && roomSession?.participantRole === "host";
+  const canControlNgWord = !isNgWordRoom || (isRoomHost && Boolean(roomSnapshot));
+  const canRecordNgPenalty = !isNgWordRoom || Boolean(roomSnapshot);
   const canStart = state.players.length >= 3 && state.players.every((player) => player.name.trim());
 
+  function setState(nextStateOrUpdater: NgWordState | ((current: NgWordState) => NgWordState)) {
+    if (isNgWordRoom && roomSession && !roomSnapshot) {
+      setRoomSyncError("ルーム情報を読み込み中です。少し待ってから操作してください。");
+      return;
+    }
+
+    if (!isNgWordRoom || !roomSession || !roomSnapshot) {
+      setStoredState(nextStateOrUpdater);
+      return;
+    }
+
+    const nextState = typeof nextStateOrUpdater === "function" ? nextStateOrUpdater(state) : nextStateOrUpdater;
+    const nextRoomState = buildNgWordRoomEnvelope(nextState, roomSession.participantId);
+    setRoomSnapshot({
+      ...roomSnapshot,
+      room: {
+        ...roomSnapshot.room,
+        status: nextRoomState.phase === "complete" ? "complete" : "playing",
+        currentGame: "ng-word",
+        state: nextRoomState,
+      },
+    });
+    roomSocketRef.current?.emit("room:state:update", {
+      roomCode: roomSession.roomCode,
+      currentGame: "ng-word",
+      state: nextRoomState,
+    });
+  }
+
   useEffect(() => {
-    if (state.step !== "play" || !state.timerRunning) return;
+    if (!roomSession) return;
+    let ignore = false;
+    fetchRoomSnapshot(roomSession.roomCode)
+      .then((snapshot) => {
+        if (!ignore) setRoomSnapshot(snapshot);
+      })
+      .catch((caught) => {
+        if (!ignore) setRoomSyncError(toErrorMessage(caught));
+      });
+
+    const socket = io(API_URL, {
+      transports: ["websocket", "polling"],
+    });
+    roomSocketRef.current = socket;
+
+    socket.on("connect", () => {
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+    });
+
+    socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
+      if (nextSnapshot) setRoomSnapshot(nextSnapshot);
+    });
+
+    socket.on("room:error", (payload: { error?: string }) => {
+      setRoomSyncError(toErrorMessage(payload.error ?? "room_error"));
+    });
+
+    return () => {
+      ignore = true;
+      socket.disconnect();
+      roomSocketRef.current = null;
+    };
+  }, [roomSession]);
+
+  useEffect(() => {
+    if (state.step !== "play" || !state.timerRunning || !canControlNgWord) return;
     const timer = window.setInterval(() => {
       setState((current) => {
         if (current.step !== "play" || !current.timerRunning) return current;
@@ -6888,9 +7015,10 @@ function NgWordGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: ()
       });
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [setState, state.step, state.timerRunning]);
+  }, [canControlNgWord, setState, state.step, state.timerRunning]);
 
   function startRound() {
+    if (!canControlNgWord) return;
     const words = shuffle(getNgWordPool(state.difficulty, state.players.length));
     const assignments = state.players.map((player, index) => ({
       playerId: player.id,
@@ -6925,6 +7053,7 @@ function NgWordGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: ()
   const winners = resultRows.filter((row) => row.assignment.penaltyCount === minPenalty);
 
   function addPenalty(playerId: string) {
+    if (!canRecordNgPenalty) return;
     setState({
       ...state,
       assignments: state.assignments.map((assignment) =>
@@ -6940,6 +7069,24 @@ function NgWordGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: ()
       onHome={onHome}
       onResetAll={onResetAll}
     >
+      {isNgWordRoom && roomSession && (
+        <section className="tool-surface room-sync-strip">
+          <div>
+            <p className="eyebrow">ルーム同期中</p>
+            <h3>
+              {roomSession.roomCode} / {roomSession.participantName}
+              {isRoomHost ? " / ホスト" : ""}
+            </h3>
+            <p className="soft-note">
+              {isRoomHost
+                ? "この端末が進行役です。参加者取り込み、配布、タイマー、結果表示を同期します。"
+                : "この端末では自分以外のNGワード確認と、踏んだ記録の追加ができます。"}
+            </p>
+          </div>
+          {roomSyncError && <p className="room-message error">{roomSyncError}</p>}
+        </section>
+      )}
+
       {state.step === "setup" && (
         <section className="tool-surface">
           <div className="howto-panel">
@@ -6952,30 +7099,97 @@ function NgWordGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: ()
               <li>制限時間が終わったら結果へ進み、点数が少ない人が勝ちです。</li>
             </ol>
           </div>
-          <PlayerSetup
-            players={state.players}
-            minPlayers={3}
-            maxPlayers={12}
-            onChange={(players) => setState({ ...state, players })}
-          />
-          <SegmentedControl
-            label="ワード"
-            options={ngDifficultyOptions}
-            value={state.difficulty}
-            onChange={(difficulty) => setState({ ...state, difficulty })}
-          />
-          <SegmentedControl
-            label="時間"
-            options={ngWordTimeOptions}
-            value={String(state.seconds) as "300" | "600" | "900"}
-            onChange={(seconds) => setState({ ...state, seconds: Number(seconds), remainingSeconds: Number(seconds) })}
-          />
+
+          {isNgWordRoom && roomSnapshot && (
+            <div className="notice-panel calm">
+              <strong>ルーム参加者をNGワードメンバーに使えます</strong>
+              <p>ホストを司会にするなら「ホスト以外」、ホストも参加するなら「全員」を選びます。</p>
+              <div className="action-row">
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, false),
+                      step: "setup",
+                      assignments: [],
+                      revealIndex: 0,
+                      revealVisible: false,
+                      timerRunning: false,
+                      remainingSeconds: state.seconds,
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  ホスト以外を使う
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, true),
+                      step: "setup",
+                      assignments: [],
+                      revealIndex: 0,
+                      revealVisible: false,
+                      timerRunning: false,
+                      remainingSeconds: state.seconds,
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  全員を使う
+                </button>
+              </div>
+            </div>
+          )}
+
+          {canControlNgWord ? (
+            <>
+              <PlayerSetup
+                players={state.players}
+                minPlayers={3}
+                maxPlayers={12}
+                onChange={(players) => setState({ ...state, players, assignments: [], revealIndex: 0, revealVisible: false })}
+              />
+              <SegmentedControl
+                label="ワード"
+                options={ngDifficultyOptions}
+                value={state.difficulty}
+                onChange={(difficulty) => setState({ ...state, difficulty, assignments: [], revealIndex: 0, revealVisible: false })}
+              />
+              <SegmentedControl
+                label="時間"
+                options={ngWordTimeOptions}
+                value={String(state.seconds) as "300" | "600" | "900"}
+                onChange={(seconds) =>
+                  setState({
+                    ...state,
+                    seconds: Number(seconds),
+                    remainingSeconds: Number(seconds),
+                    timerRunning: false,
+                  })
+                }
+              />
+            </>
+          ) : (
+            <div className="howto-panel compact">
+              <h3>ホストの配布待ち</h3>
+              <p className="soft-note">ホストがNGワードを配ると、この端末で自分以外のNGワードを確認できます。</p>
+            </div>
+          )}
+
           <div className="action-row">
-            <button className="primary-button" disabled={!canStart} onClick={startRound}>
+            <button className="primary-button" disabled={!canStart || !canControlNgWord} onClick={startRound}>
               <Play size={18} />
               配る
             </button>
-            <button className="secondary-button" onClick={() => setState(initialNgWordState)}>
+            <button className="secondary-button" disabled={!canControlNgWord} onClick={() => setState(initialNgWordState)}>
               <RotateCcw size={18} />
               リセット
             </button>
@@ -6983,7 +7197,56 @@ function NgWordGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: ()
         </section>
       )}
 
-      {state.step === "reveal" && currentRevealPlayer && currentRevealAssignment && (
+      {state.step === "reveal" && isNgWordRoom && (
+        <section className="tool-surface">
+          <div className="prompt-panel">
+            <p className="eyebrow">配布確認</p>
+            <h2>自分以外のNGワードを確認</h2>
+            <p>本人のNGワードはその端末では表示しません。他の人のNGワードだけ見て、会話で自然に誘導します。</p>
+          </div>
+
+          <div className="result-table">
+            {state.players.map((player) => {
+              const assignment = state.assignments.find((item) => item.playerId === player.id);
+              const isSelf = roomSession?.participantId === player.id;
+              return (
+                <div className="result-row" key={player.id}>
+                  <strong>{player.name}</strong>
+                  <span>NG</span>
+                  <span>{isSelf ? "あなたのNGワードは非表示" : assignment?.word ?? "未配布"}</span>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="howto-panel compact">
+            <h3>配布後の注意</h3>
+            <ul className="rule-list">
+              <li>自分のNGワードを聞き出そうとしすぎないようにします。</li>
+              <li>他の人のNGワードを声に出して読まないようにします。</li>
+              <li>全員が確認できたら、ホストが会話タイムへ進めます。</li>
+            </ul>
+          </div>
+
+          <div className="action-row">
+            <button
+              className="primary-button"
+              disabled={!canControlNgWord}
+              onClick={() => setState({ ...state, step: "play", revealVisible: false, timerRunning: false })}
+            >
+              <Play size={18} />
+              会話へ進む
+            </button>
+            <button className="secondary-button" disabled={!canControlNgWord} onClick={startRound}>
+              <RotateCcw size={18} />
+              配り直す
+            </button>
+          </div>
+          {!canControlNgWord && <p className="soft-note">会話へ進む操作はホスト端末で行います。</p>}
+        </section>
+      )}
+
+      {state.step === "reveal" && !isNgWordRoom && currentRevealPlayer && currentRevealAssignment && (
         <section className="tool-surface center-flow">
           <p className="eyebrow">
             {state.revealIndex + 1}/{state.players.length}
@@ -7036,7 +7299,7 @@ function NgWordGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: ()
             <button
               className="secondary-button"
               onClick={() => setState({ ...state, timerRunning: !state.timerRunning })}
-              disabled={state.remainingSeconds === 0}
+              disabled={state.remainingSeconds === 0 || !canControlNgWord}
             >
               {state.timerRunning ? <Pause size={18} /> : <Play size={18} />}
               {state.timerRunning ? "止める" : "開始"}
@@ -7052,6 +7315,22 @@ function NgWordGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: ()
             </ul>
           </div>
 
+          {isNgWordRoom && (
+            <div className="result-table">
+              {state.players.map((player) => {
+                const assignment = state.assignments.find((item) => item.playerId === player.id);
+                const isSelf = roomSession?.participantId === player.id;
+                return (
+                  <div className="result-row" key={player.id}>
+                    <strong>{player.name}</strong>
+                    <span>NG</span>
+                    <span>{isSelf ? "あなたのNGワードは非表示" : assignment?.word ?? "未配布"}</span>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           <div className="penalty-list">
             {state.players.map((player) => {
               const assignment = state.assignments.find((item) => item.playerId === player.id);
@@ -7061,7 +7340,7 @@ function NgWordGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: ()
                     <strong>{player.name}</strong>
                     <span>{assignment?.penaltyCount ?? 0}点</span>
                   </div>
-                  <button className="danger-button" onClick={() => addPenalty(player.id)}>
+                  <button className="danger-button" disabled={!canRecordNgPenalty} onClick={() => addPenalty(player.id)}>
                     +1
                   </button>
                 </div>
@@ -7072,16 +7351,18 @@ function NgWordGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: ()
           <div className="action-row">
             <button
               className="secondary-button"
+              disabled={!canControlNgWord}
               onClick={() => setState({ ...state, step: "reveal", revealIndex: 0, revealVisible: false, timerRunning: false })}
             >
               <Eye size={18} />
               確認し直す
             </button>
-            <button className="primary-button" onClick={() => setState({ ...state, step: "result", timerRunning: false })}>
+            <button className="primary-button" disabled={!canControlNgWord} onClick={() => setState({ ...state, step: "result", timerRunning: false })}>
               <Trophy size={18} />
               結果へ
             </button>
           </div>
+          {!canControlNgWord && <p className="soft-note">タイマーと結果へ進む操作はホスト端末で行います。踏んだ記録はこの端末から追加できます。</p>}
         </section>
       )}
 
@@ -7107,15 +7388,16 @@ function NgWordGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: ()
           <p className="talk-cue">言わせようとした場面を振り返ると、もう一段盛り上がります。</p>
           <p className="soft-note">同点の場合は全員勝ちとして扱うと、飲み会では終わり方が軽くなります。</p>
           <div className="action-row">
-            <button className="primary-button" onClick={startRound}>
+            <button className="primary-button" disabled={!canControlNgWord} onClick={startRound}>
               <RotateCcw size={18} />
               同じメンバーでもう一度
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup" })}>
+            <button className="secondary-button" disabled={!canControlNgWord} onClick={() => setState({ ...state, step: "setup" })}>
               <Users size={18} />
               設定へ
             </button>
           </div>
+          {!canControlNgWord && <p className="soft-note">もう一度遊ぶ操作はホスト端末で行います。</p>}
         </section>
       )}
     </GameFrame>
