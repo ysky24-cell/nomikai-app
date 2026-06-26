@@ -1508,6 +1508,7 @@ type UrlCandidateState = {
   missCounts: Record<string, number>;
   guesses: Record<string, string>;
   scoreCounts: Record<string, number>;
+  resourceCounts: Record<string, number>;
 };
 
 const urlCandidateQuestionCountOptions: SegmentedOption<string>[] = [
@@ -1541,6 +1542,7 @@ const initialUrlCandidateState: UrlCandidateState = {
   missCounts: {},
   guesses: {},
   scoreCounts: {},
+  resourceCounts: {},
 };
 
 function createPlayerPositions(players: Player[]) {
@@ -1549,6 +1551,10 @@ function createPlayerPositions(players: Player[]) {
 
 function createPlayerCountMap(players: Player[]) {
   return Object.fromEntries(players.map((player) => [player.id, 0]));
+}
+
+function createPlayerResourceMap(players: Player[]) {
+  return Object.fromEntries(players.map((player) => [player.id, 3]));
 }
 
 function createHazardIndex() {
@@ -1590,8 +1596,22 @@ function isGuessSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
   );
 }
 
+function isBoardSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
+  return (
+    key === "party-sugoroku" ||
+    key === "life-event-sugoroku" ||
+    key === "territory-board-game" ||
+    key === "resource-negotiation-game"
+  );
+}
+
 function isRoomSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
-  return isVoteSyncableUrlCandidateKey(key) || isTurnSyncableUrlCandidateKey(key) || isGuessSyncableUrlCandidateKey(key);
+  return (
+    isVoteSyncableUrlCandidateKey(key) ||
+    isTurnSyncableUrlCandidateKey(key) ||
+    isGuessSyncableUrlCandidateKey(key) ||
+    isBoardSyncableUrlCandidateKey(key)
+  );
 }
 
 function parseUrlCandidateStateFromRoom(snapshot: RoomSnapshot | null, key: UrlCandidateGameKey) {
@@ -1633,6 +1653,19 @@ function describeUrlCandidateProgress(config: UrlCandidateGameConfig, state: Url
       return currentPlayer
         ? `${config.title}: お題${progress}で${currentPlayer.name}さんが出題中です (${guessedCount}/${answerers.length})`
         : `${config.title}: お題${progress}で回答中です (${guessedCount}/${answerers.length})`;
+    }
+    if (isBoardSyncableUrlCandidateKey(config.key)) {
+      const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+      if (config.key === "resource-negotiation-game") {
+        return currentPlayer ? `${config.title}: お題${progress}で${currentPlayer.name}さんが交渉中です` : `${config.title}: お題${progress}で交渉中です`;
+      }
+      if (config.key === "territory-board-game") {
+        const ownedCount = Object.keys(state.territory).length;
+        return currentPlayer
+          ? `${config.title}: ${ownedCount}/25マス取得済み、${currentPlayer.name}さんの番です`
+          : `${config.title}: ${ownedCount}/25マス取得済みです`;
+      }
+      return currentPlayer ? `${config.title}: お題${progress}で${currentPlayer.name}さんの番です` : `${config.title}: お題${progress}で進行中です`;
     }
     return `${config.title}: お題${progress}で進行中です`;
   }
@@ -1686,6 +1719,7 @@ function UrlCandidateGame({
   const canControlUrlCandidate = !isUrlCandidateRoom || (isRoomHost && Boolean(roomSnapshot));
   const usesTurnSync = isTurnSyncableUrlCandidateKey(config.key);
   const usesGuessSync = isGuessSyncableUrlCandidateKey(config.key);
+  const usesBoardSync = isBoardSyncableUrlCandidateKey(config.key);
   const promptPool = useMemo(
     () => config.prompts.filter((prompt) => state.includeAdultTopics || prompt.rating === "normal"),
     [config.prompts, state.includeAdultTopics],
@@ -1772,7 +1806,16 @@ function UrlCandidateGame({
 
   useEffect(() => {
     if (state.step === "play" && !prompt) {
-      setState({ ...state, step: "setup", deckPromptIds: [], deckIndex: 0, answerVisible: false, votes: {}, guesses: {} });
+      setState({
+        ...state,
+        step: "setup",
+        deckPromptIds: [],
+        deckIndex: 0,
+        answerVisible: false,
+        votes: {},
+        guesses: {},
+        resourceCounts: {},
+      });
     }
   }, [prompt, setState, state.step]);
 
@@ -1799,6 +1842,7 @@ function UrlCandidateGame({
       missCounts: createPlayerCountMap(state.players),
       guesses: {},
       scoreCounts: createPlayerCountMap(state.players),
+      resourceCounts: createPlayerResourceMap(state.players),
     });
   }
 
@@ -1822,6 +1866,7 @@ function UrlCandidateGame({
       safeCounts: state.safeCounts,
       missCounts: state.missCounts,
       scoreCounts: state.scoreCounts,
+      resourceCounts: state.resourceCounts,
     });
   }
 
@@ -1844,11 +1889,15 @@ function UrlCandidateGame({
                   ? "この端末が進行役です。参加者取り込み、手番、セーフ、アウト、次のお題を同期します。"
                   : usesGuessSync
                     ? "この端末が進行役です。参加者取り込み、親、回答、正解表示、次のお題を同期します。"
+                    : usesBoardSync
+                      ? "この端末が進行役です。参加者取り込み、手番、盤面、コマ、資源、次のお題を同期します。"
                   : "この端末が進行役です。参加者取り込み、次のお題、完了を同期します。"
                 : usesTurnSync
                   ? "この端末では自分の番だけセーフ、パス、アウト操作ができます。お題切り替えはホスト端末で行います。"
                   : usesGuessSync
                     ? "この端末では自分の回答を入力できます。親の番では答え確認と正解表示ができます。"
+                    : usesBoardSync
+                      ? "この端末では自分の番や自分の資源操作を行えます。盤面とお題切り替えは同期されます。"
                   : "この端末では自分の投票だけ操作できます。集計とお題の進行は同期されます。"}
             </p>
           </div>
@@ -1875,6 +1924,8 @@ function UrlCandidateGame({
                   ? "参加者それぞれの端末で自分の番を操作するには、ルーム参加者を取り込んでください。"
                   : usesGuessSync
                     ? "親、回答者、正解表示を端末ごとに同期するには、ルーム参加者を取り込んでください。"
+                    : usesBoardSync
+                      ? "手番、盤面、コマ、資源を端末ごとに同期するには、ルーム参加者を取り込んでください。"
                   : "参加者それぞれの端末で自分の投票をするには、ルーム参加者を取り込んでください。"}
               </p>
               <div className="action-row">
@@ -1897,6 +1948,7 @@ function UrlCandidateGame({
                       missCounts: {},
                       guesses: {},
                       scoreCounts: {},
+                      resourceCounts: {},
                     })
                   }
                 >
@@ -1922,6 +1974,7 @@ function UrlCandidateGame({
                       missCounts: {},
                       guesses: {},
                       scoreCounts: {},
+                      resourceCounts: {},
                     })
                   }
                 >
@@ -1949,6 +2002,7 @@ function UrlCandidateGame({
                     missCounts: {},
                     guesses: {},
                     scoreCounts: {},
+                    resourceCounts: {},
                   })
                 }
               />
@@ -1975,6 +2029,7 @@ function UrlCandidateGame({
                     missCounts: {},
                     guesses: {},
                     scoreCounts: {},
+                    resourceCounts: {},
                   })
                 }
               />
@@ -1997,6 +2052,7 @@ function UrlCandidateGame({
                     missCounts: {},
                     guesses: {},
                     scoreCounts: {},
+                    resourceCounts: {},
                   })
                 }
               />
@@ -2021,6 +2077,8 @@ function UrlCandidateGame({
                   ? "ホストが参加者を取り込み、お題を開始すると、この端末でも自分の番を操作できます。"
                   : usesGuessSync
                     ? "ホストが参加者を取り込み、お題を開始すると、この端末で回答できます。親の番では答えを確認できます。"
+                    : usesBoardSync
+                      ? "ホストが参加者を取り込み、お題を開始すると、この端末で自分の番や資源操作ができます。"
                   : "ホストがお題を開始すると、この端末で自分の投票を選べます。"}
               </p>
             </div>
@@ -2176,6 +2234,7 @@ function UrlCandidateGame({
                   missCounts: {},
                   guesses: {},
                   scoreCounts: {},
+                  resourceCounts: {},
                 })
               }
             >
@@ -2210,6 +2269,33 @@ function UrlCandidateGame({
               ))}
             </div>
           )}
+          {usesBoardSync && config.kind === "sugoroku" && (
+            <div className="score-list wide">
+              {state.players.map((player) => (
+                <span key={player.id}>
+                  {player.name}: {state.positions[player.id] ?? 0}マス
+                </span>
+              ))}
+            </div>
+          )}
+          {usesBoardSync && config.kind === "territory" && (
+            <div className="score-list wide">
+              {state.players.map((player) => (
+                <span key={player.id}>
+                  {player.name}: {Object.values(state.territory).filter((ownerId) => ownerId === player.id).length}マス
+                </span>
+              ))}
+            </div>
+          )}
+          {usesBoardSync && config.key === "resource-negotiation-game" && (
+            <div className="score-list wide">
+              {state.players.map((player) => (
+                <span key={player.id}>
+                  {player.name}: 資源{state.resourceCounts[player.id] ?? 3}
+                </span>
+              ))}
+            </div>
+          )}
           <p className="talk-cue">違う設問数やHな話題ON/OFFに変えると、同じゲームでも雰囲気を変えて遊べます。</p>
           <div className="action-row centered">
             <button className="primary-button" disabled={!canControlUrlCandidate} onClick={startUrlCandidateGame}>
@@ -2230,6 +2316,7 @@ function UrlCandidateGame({
                   missCounts: {},
                   guesses: {},
                   scoreCounts: {},
+                  resourceCounts: {},
                 })
               }
             >
@@ -2542,6 +2629,73 @@ function UrlCandidateInteractionPanel({
     );
   }
 
+  if (config.key === "resource-negotiation-game") {
+    const canAdvanceNegotiator = canControl || canActForCurrentPlayer;
+
+    function adjustResource(player: Player, delta: number) {
+      if (!canVoteForPlayer(player.id)) return;
+      const nextValue = Math.max(0, (state.resourceCounts[player.id] ?? 3) + delta);
+      pushLog(`${player.name}さんの資源を${nextValue}にしました。`, {
+        resourceCounts: { ...state.resourceCounts, [player.id]: nextValue },
+      });
+    }
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>資源同期</h3>
+          <ul className="rule-list">
+            <li>各自の端末では自分の資源だけ増減できます。</li>
+            <li>ホスト端末では全員分を代行入力できます。</li>
+            <li>交渉がまとまったら、次の交渉者へ進めます。</li>
+          </ul>
+        </div>
+
+        {currentPlayer && (
+          <div className="turn-callout">
+            <span>現在の交渉者</span>
+            <strong>{currentPlayer.name}</strong>
+          </div>
+        )}
+
+        <div className="resource-list">
+          {state.players.map((player) => {
+            const value = state.resourceCounts[player.id] ?? 3;
+            return (
+              <div className="resource-row" key={player.id}>
+                <strong>{player.name}</strong>
+                <span>資源 {value}</span>
+                <div className="resource-actions">
+                  <button className="secondary-button" disabled={!canVoteForPlayer(player.id)} type="button" onClick={() => adjustResource(player, -1)}>
+                    -1
+                  </button>
+                  <button className="secondary-button" disabled={!canVoteForPlayer(player.id)} type="button" onClick={() => adjustResource(player, 1)}>
+                    +1
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="action-row centered">
+          <button
+            className="primary-button"
+            disabled={!currentPlayer || !canAdvanceNegotiator}
+            type="button"
+            onClick={() => currentPlayer && rotatePlayer(`${currentPlayer.name}さんの交渉を記録し、次の人へ進みます。`)}
+          >
+            <ChevronRight size={18} />
+            次の交渉者へ
+          </button>
+        </div>
+
+        <UrlActionLog logs={state.actionLog} />
+        {isRoomMode && !canControl && <p className="soft-note">全員分の代行入力と次のお題へ進む操作はホスト端末で行います。</p>}
+      </div>
+    );
+  }
+
   if (config.kind === "count-up") {
     const target = prompt.targetNumber ?? 30;
     return (
@@ -2625,6 +2779,20 @@ function UrlCandidateInteractionPanel({
   if (config.kind === "sugoroku") {
     return (
       <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>コマ同期</h3>
+          <ul className="rule-list">
+            <li>各自の端末では自分の番だけサイコロを振れます。</li>
+            <li>ホスト端末では全員分を代行入力できます。</li>
+            <li>コマ位置は全端末に同期されます。</li>
+          </ul>
+        </div>
+        {currentPlayer && (
+          <div className="turn-callout">
+            <span>現在の番</span>
+            <strong>{currentPlayer.name}</strong>
+          </div>
+        )}
         <div className="position-list">
           {state.players.map((player) => (
             <span key={player.id}>
@@ -2635,6 +2803,7 @@ function UrlCandidateInteractionPanel({
         <div className="action-row centered">
           <button
             className="primary-button"
+            disabled={!currentPlayer || !canActForCurrentPlayer}
             onClick={() => {
               if (!currentPlayer) return;
               const roll = Math.floor(Math.random() * 6) + 1;
@@ -2650,6 +2819,7 @@ function UrlCandidateInteractionPanel({
           </button>
         </div>
         <UrlActionLog logs={state.actionLog} />
+        {isRoomMode && !canControl && <p className="soft-note">次のお題へ進む操作はホスト端末で行います。</p>}
       </div>
     );
   }
@@ -2658,6 +2828,20 @@ function UrlCandidateInteractionPanel({
     const cells = Array.from({ length: 25 }, (_, index) => String(index));
     return (
       <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>盤面同期</h3>
+          <ul className="rule-list">
+            <li>各自の端末では自分の番だけマスを選べます。</li>
+            <li>ホスト端末では全員分を代行入力できます。</li>
+            <li>取ったマスは全端末に同期されます。</li>
+          </ul>
+        </div>
+        {currentPlayer && (
+          <div className="turn-callout">
+            <span>現在の番</span>
+            <strong>{currentPlayer.name}</strong>
+          </div>
+        )}
         <p className="soft-note">{currentPlayer ? `${currentPlayer.name}さんが取るマスを選びます。` : "参加者が必要です。"}</p>
         <div className="territory-grid">
           {cells.map((cell) => {
@@ -2667,7 +2851,7 @@ function UrlCandidateInteractionPanel({
               <button
                 key={cell}
                 className={owner ? "owned" : ""}
-                disabled={Boolean(owner) || !currentPlayer}
+                disabled={Boolean(owner) || !currentPlayer || !canActForCurrentPlayer}
                 onClick={() => {
                   if (!currentPlayer) return;
                   pushLog(`${currentPlayer.name}さんが${Number(cell) + 1}番のマスを取りました。`, {
@@ -2682,6 +2866,7 @@ function UrlCandidateInteractionPanel({
           })}
         </div>
         <UrlActionLog logs={state.actionLog} />
+        {isRoomMode && !canControl && <p className="soft-note">次のお題へ進む操作はホスト端末で行います。</p>}
       </div>
     );
   }
