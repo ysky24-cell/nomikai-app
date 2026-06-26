@@ -1605,12 +1605,17 @@ function isBoardSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
   );
 }
 
+function isAnswerSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
+  return key === "truth-lie-game" || key === "value-meter-game" || key === "typing-speed-game";
+}
+
 function isRoomSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
   return (
     isVoteSyncableUrlCandidateKey(key) ||
     isTurnSyncableUrlCandidateKey(key) ||
     isGuessSyncableUrlCandidateKey(key) ||
-    isBoardSyncableUrlCandidateKey(key)
+    isBoardSyncableUrlCandidateKey(key) ||
+    isAnswerSyncableUrlCandidateKey(key)
   );
 }
 
@@ -1667,6 +1672,18 @@ function describeUrlCandidateProgress(config: UrlCandidateGameConfig, state: Url
       }
       return currentPlayer ? `${config.title}: お題${progress}で${currentPlayer.name}さんの番です` : `${config.title}: お題${progress}で進行中です`;
     }
+    if (isAnswerSyncableUrlCandidateKey(config.key)) {
+      const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+      if (config.key === "truth-lie-game") {
+        const voters = currentPlayer ? state.players.filter((player) => player.id !== currentPlayer.id) : state.players;
+        const votedCount = voters.filter((player) => state.votes[player.id]).length;
+        return currentPlayer
+          ? `${config.title}: お題${progress}で${currentPlayer.name}さんが話し手です (${votedCount}/${voters.length})`
+          : `${config.title}: お題${progress}で投票中です (${votedCount}/${voters.length})`;
+      }
+      const answeredCount = state.players.filter((player) => state.guesses[player.id]?.trim() || state.votes[player.id]?.trim()).length;
+      return `${config.title}: お題${progress}で回答中です (${answeredCount}/${state.players.length})`;
+    }
     return `${config.title}: お題${progress}で進行中です`;
   }
   return `${config.title}が完了しました`;
@@ -1720,6 +1737,7 @@ function UrlCandidateGame({
   const usesTurnSync = isTurnSyncableUrlCandidateKey(config.key);
   const usesGuessSync = isGuessSyncableUrlCandidateKey(config.key);
   const usesBoardSync = isBoardSyncableUrlCandidateKey(config.key);
+  const usesAnswerSync = isAnswerSyncableUrlCandidateKey(config.key);
   const promptPool = useMemo(
     () => config.prompts.filter((prompt) => state.includeAdultTopics || prompt.rating === "normal"),
     [config.prompts, state.includeAdultTopics],
@@ -1848,6 +1866,7 @@ function UrlCandidateGame({
 
   function moveToNextUrlPrompt() {
     const nextIndex = state.deckIndex + 1;
+    const shouldRotatePromptOwner = usesGuessSync || config.key === "truth-lie-game";
     if (nextIndex >= state.deckPromptIds.length) {
       setState({ ...state, step: "complete", answerVisible: false, actionLog: [] });
       return;
@@ -1862,7 +1881,7 @@ function UrlCandidateGame({
       actionLog: [],
       votes: {},
       guesses: {},
-      currentPlayerIndex: usesGuessSync ? (state.currentPlayerIndex + 1) % Math.max(1, state.players.length) : state.currentPlayerIndex,
+      currentPlayerIndex: shouldRotatePromptOwner ? (state.currentPlayerIndex + 1) % Math.max(1, state.players.length) : state.currentPlayerIndex,
       safeCounts: state.safeCounts,
       missCounts: state.missCounts,
       scoreCounts: state.scoreCounts,
@@ -1891,6 +1910,8 @@ function UrlCandidateGame({
                     ? "この端末が進行役です。参加者取り込み、親、回答、正解表示、次のお題を同期します。"
                     : usesBoardSync
                       ? "この端末が進行役です。参加者取り込み、手番、盤面、コマ、資源、次のお題を同期します。"
+                      : usesAnswerSync
+                        ? "この端末が進行役です。参加者取り込み、回答、集計、得点、次のお題を同期します。"
                   : "この端末が進行役です。参加者取り込み、次のお題、完了を同期します。"
                 : usesTurnSync
                   ? "この端末では自分の番だけセーフ、パス、アウト操作ができます。お題切り替えはホスト端末で行います。"
@@ -1898,6 +1919,8 @@ function UrlCandidateGame({
                     ? "この端末では自分の回答を入力できます。親の番では答え確認と正解表示ができます。"
                     : usesBoardSync
                       ? "この端末では自分の番や自分の資源操作を行えます。盤面とお題切り替えは同期されます。"
+                      : usesAnswerSync
+                        ? "この端末では自分の回答だけ操作できます。集計とお題切り替えは同期されます。"
                   : "この端末では自分の投票だけ操作できます。集計とお題の進行は同期されます。"}
             </p>
           </div>
@@ -1926,6 +1949,8 @@ function UrlCandidateGame({
                     ? "親、回答者、正解表示を端末ごとに同期するには、ルーム参加者を取り込んでください。"
                     : usesBoardSync
                       ? "手番、盤面、コマ、資源を端末ごとに同期するには、ルーム参加者を取り込んでください。"
+                      : usesAnswerSync
+                        ? "回答、集計、得点を端末ごとに同期するには、ルーム参加者を取り込んでください。"
                   : "参加者それぞれの端末で自分の投票をするには、ルーム参加者を取り込んでください。"}
               </p>
               <div className="action-row">
@@ -2079,6 +2104,8 @@ function UrlCandidateGame({
                     ? "ホストが参加者を取り込み、お題を開始すると、この端末で回答できます。親の番では答えを確認できます。"
                     : usesBoardSync
                       ? "ホストが参加者を取り込み、お題を開始すると、この端末で自分の番や資源操作ができます。"
+                      : usesAnswerSync
+                        ? "ホストが参加者を取り込み、お題を開始すると、この端末で自分の回答を操作できます。"
                   : "ホストがお題を開始すると、この端末で自分の投票を選べます。"}
               </p>
             </div>
@@ -2613,6 +2640,277 @@ function UrlCandidateInteractionPanel({
               正解なしで流す
             </button>
           )}
+        </div>
+
+        <div className="score-list wide">
+          {state.players.map((player) => (
+            <span key={player.id}>
+              {player.name}: 正解{state.scoreCounts[player.id] ?? 0}
+            </span>
+          ))}
+        </div>
+
+        <UrlActionLog logs={state.actionLog} />
+        {isRoomMode && !canControl && <p className="soft-note">次のお題へ進む操作はホスト端末で行います。</p>}
+      </div>
+    );
+  }
+
+  if (config.key === "truth-lie-game") {
+    const speaker = currentPlayer;
+    const voters = speaker ? state.players.filter((player) => player.id !== speaker.id) : state.players;
+    const lieOptions = prompt.options?.slice(0, 3) ?? ["1つ目が嘘", "2つ目が嘘", "3つ目が嘘"];
+    const answerKey = "truthLieAnswer";
+    const answerChoice = state.guesses[answerKey] ?? "";
+    const canJudgeTruthLie = canControl || canActForCurrentPlayer;
+    const votedPlayers = voters.filter((player) => state.votes[player.id]);
+    const correctPlayers = answerChoice ? voters.filter((player) => state.votes[player.id] === answerChoice) : [];
+
+    function revealTruthLieResult() {
+      if (!canJudgeTruthLie || !answerChoice || state.answerVisible) return;
+      const nextScoreCounts = { ...state.scoreCounts };
+      correctPlayers.forEach((player) => {
+        nextScoreCounts[player.id] = (nextScoreCounts[player.id] ?? 0) + 1;
+      });
+      pushLog(`嘘は${Number(answerChoice) + 1}つ目。正解は${correctPlayers.length}人でした。`, {
+        answerVisible: true,
+        scoreCounts: nextScoreCounts,
+      });
+    }
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>嘘当て同期</h3>
+          <ul className="rule-list">
+            <li>話し手は3つの話を出し、どれが嘘かを選びます。</li>
+            <li>聞き手は各自の端末で嘘だと思う番号を選びます。</li>
+            <li>話し手またはホストが結果を出すと、正解者と得点が同期されます。</li>
+          </ul>
+        </div>
+
+        {speaker && (
+          <div className="turn-callout">
+            <span>今回の話し手</span>
+            <strong>{speaker.name}</strong>
+          </div>
+        )}
+
+        <div className="answer-sync-list">
+          <div className="answer-sync-row">
+            <strong>正解設定</strong>
+            <div className="vote-buttons">
+              {lieOptions.map((option, index) => (
+                <button
+                  className={answerChoice === String(index) ? "selected-choice" : "secondary-button"}
+                  disabled={!canJudgeTruthLie || state.answerVisible}
+                  key={option}
+                  type="button"
+                  onClick={() => setState({ ...state, guesses: { ...state.guesses, [answerKey]: String(index) } })}
+                >
+                  {formatChoiceLabel(option, index)}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {voters.map((player) => (
+            <div className="answer-sync-row" key={player.id}>
+              <strong>{player.name}</strong>
+              <div className="vote-buttons">
+                {lieOptions.map((option, index) => (
+                  <button
+                    className={state.votes[player.id] === String(index) ? "selected-choice" : "secondary-button"}
+                    disabled={!canVoteForPlayer(player.id) || state.answerVisible}
+                    key={option}
+                    type="button"
+                    onClick={() => setState({ ...state, votes: { ...state.votes, [player.id]: String(index) } })}
+                  >
+                    {formatChoiceLabel(option, index)}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <div className="action-row">
+          <span className="inline-status">
+            投票 {votedPlayers.length}/{voters.length}
+          </span>
+          {state.answerVisible && answerChoice && <span className="inline-status">正解 {correctPlayers.length}人</span>}
+          <button className="primary-button" disabled={!canJudgeTruthLie || !answerChoice || state.answerVisible} type="button" onClick={revealTruthLieResult}>
+            <Check size={18} />
+            結果を出す
+          </button>
+        </div>
+
+        {state.answerVisible && answerChoice && (
+          <div className="split-result">
+            <NameCluster title="正解" players={correctPlayers} />
+            <NameCluster title="惜しい" players={voters.filter((player) => state.votes[player.id] && state.votes[player.id] !== answerChoice)} />
+          </div>
+        )}
+
+        <div className="score-list wide">
+          {state.players.map((player) => (
+            <span key={player.id}>
+              {player.name}: 正解{state.scoreCounts[player.id] ?? 0}
+            </span>
+          ))}
+        </div>
+
+        <UrlActionLog logs={state.actionLog} />
+        {isRoomMode && !canControl && <p className="soft-note">次のお題へ進む操作はホスト端末で行います。</p>}
+      </div>
+    );
+  }
+
+  if (config.key === "value-meter-game") {
+    const rows = state.players.map((player) => ({
+      player,
+      clue: state.guesses[player.id] ?? "",
+      value: state.votes[player.id] ?? "",
+    }));
+    const answeredRows = rows.filter((row) => row.clue.trim() || row.value.trim());
+    const sortedRows = rows
+      .filter((row) => row.value.trim() && Number.isFinite(Number(row.value)))
+      .sort((a, b) => Number(a.value) - Number(b.value));
+
+    function updateMeter(playerId: string, nextValue: string, nextClue: string) {
+      if (!canVoteForPlayer(playerId)) return;
+      setState({
+        ...state,
+        votes: { ...state.votes, [playerId]: nextValue },
+        guesses: { ...state.guesses, [playerId]: nextClue },
+      });
+    }
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>メーター同期</h3>
+          <ul className="rule-list">
+            <li>各自が1から100の数字と、数字を言わない例えを入力します。</li>
+            <li>ホスト端末では全員分を代行入力できます。</li>
+            <li>出そろったら並び順を表示して、ズレた理由を楽しみます。</li>
+          </ul>
+        </div>
+
+        <div className="meter-sync-list">
+          {rows.map(({ player, clue, value }) => (
+            <div className="meter-sync-row" key={player.id}>
+              <strong>{player.name}</strong>
+              <input
+                aria-label={`${player.name}の数字`}
+                disabled={!canVoteForPlayer(player.id) || state.answerVisible}
+                inputMode="numeric"
+                max={100}
+                min={1}
+                onChange={(event) => updateMeter(player.id, event.currentTarget.value, clue)}
+                placeholder="1-100"
+                type="number"
+                value={value}
+              />
+              <input
+                aria-label={`${player.name}の例え`}
+                disabled={!canVoteForPlayer(player.id) || state.answerVisible}
+                onChange={(event) => updateMeter(player.id, value, event.currentTarget.value)}
+                placeholder="数字を言わずに例える"
+                value={clue}
+              />
+            </div>
+          ))}
+        </div>
+
+        <div className="action-row">
+          <span className="inline-status">
+            入力 {answeredRows.length}/{state.players.length}
+          </span>
+          <button
+            className="primary-button"
+            disabled={!canControl && isRoomMode}
+            type="button"
+            onClick={() => pushLog("価値観メーターの並び順を表示しました。", { answerVisible: true })}
+          >
+            <Check size={18} />
+            並び順を表示
+          </button>
+        </div>
+
+        {state.answerVisible && (
+          <div className="answer-panel wide">
+            <strong>小さい順</strong>
+            <p>{sortedRows.length > 0 ? sortedRows.map((row) => `${row.player.name} ${row.value}: ${row.clue || "例えなし"}`).join(" / ") : "まだ数字がありません"}</p>
+          </div>
+        )}
+
+        <UrlActionLog logs={state.actionLog} />
+        {isRoomMode && !canControl && <p className="soft-note">並び順表示と次のお題へ進む操作はホスト端末で行います。</p>}
+      </div>
+    );
+  }
+
+  if (config.key === "typing-speed-game") {
+    const answeredPlayers = state.players.filter((player) => state.guesses[player.id]?.trim());
+    const correctPlayers = state.players.filter((player) => state.votes[player.id] === "correct");
+
+    function updateTypingAnswer(playerId: string, answer: string) {
+      if (!canVoteForPlayer(playerId)) return;
+      setState({ ...state, guesses: { ...state.guesses, [playerId]: answer } });
+    }
+
+    function markTypingCorrect(player: Player) {
+      if ((!canVoteForPlayer(player.id) && !canControl) || state.votes[player.id] === "correct") return;
+      pushLog(`${player.name}さんは誤字なしで入力完了。`, {
+        votes: { ...state.votes, [player.id]: "correct" },
+        scoreCounts: { ...state.scoreCounts, [player.id]: (state.scoreCounts[player.id] ?? 0) + 1 },
+      });
+    }
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>早打ち同期</h3>
+          <ul className="rule-list">
+            <li>各自が入力できた文を自分の欄に入れます。</li>
+            <li>誤字なしなら、本人またはホストが誤字なしを押します。</li>
+            <li>誤字なしの人数と得点が全端末に同期されます。</li>
+          </ul>
+        </div>
+
+        <div className="typing-sync-list">
+          {state.players.map((player) => {
+            const answer = state.guesses[player.id] ?? "";
+            const isCorrect = state.votes[player.id] === "correct";
+            return (
+              <div className="typing-sync-row" key={player.id}>
+                <strong>{player.name}</strong>
+                <input
+                  aria-label={`${player.name}の入力文`}
+                  disabled={!canVoteForPlayer(player.id) || isCorrect}
+                  onChange={(event) => updateTypingAnswer(player.id, event.currentTarget.value)}
+                  placeholder="入力した文"
+                  value={answer}
+                />
+                <button
+                  className={isCorrect ? "selected-choice" : "secondary-button"}
+                  disabled={isCorrect || !answer.trim() || (!canVoteForPlayer(player.id) && !canControl)}
+                  type="button"
+                  onClick={() => markTypingCorrect(player)}
+                >
+                  {isCorrect ? "誤字なし" : "誤字なし"}
+                </button>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="action-row">
+          <span className="inline-status">
+            入力 {answeredPlayers.length}/{state.players.length}
+          </span>
+          <span className="inline-status">誤字なし {correctPlayers.length}</span>
         </div>
 
         <div className="score-list wide">

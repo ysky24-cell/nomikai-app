@@ -1362,6 +1362,47 @@ select:focus {
   padding: 12px;
 }
 
+.answer-sync-list,
+.meter-sync-list,
+.typing-sync-list {
+  display: grid;
+  gap: 10px;
+}
+
+.answer-sync-row,
+.meter-sync-row,
+.typing-sync-row {
+  display: grid;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 10px;
+}
+
+.answer-sync-row {
+  grid-template-columns: minmax(96px, 0.35fr) minmax(0, 1.65fr);
+}
+
+.meter-sync-row {
+  grid-template-columns: minmax(88px, 0.25fr) minmax(80px, 0.25fr) minmax(0, 1fr);
+}
+
+.typing-sync-row {
+  grid-template-columns: minmax(88px, 0.3fr) minmax(0, 1fr) auto;
+}
+
+.meter-sync-row input,
+.typing-sync-row input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 12px;
+}
+
 .resource-list {
   display: grid;
   gap: 10px;
@@ -1659,6 +1700,9 @@ select:focus {
 
   .vote-row,
   .guess-row,
+  .answer-sync-row,
+  .meter-sync-row,
+  .typing-sync-row,
   .resource-row,
   .split-result,
   .choice-display,
