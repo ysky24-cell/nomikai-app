@@ -591,7 +591,7 @@ function App() {
   }
 
   if (activeGame === "johari-window") {
-    return <JohariWindowGame onHome={goHome} onResetAll={resetAllGames} />;
+    return <JohariWindowGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
   }
 
   if (activeGame === "turtle-soup") {
@@ -3805,9 +3805,74 @@ function WordList({ words }: { words: string[] }) {
   );
 }
 
-function JohariWindowGame({ onHome, onResetAll }: { onHome: () => void; onResetAll: () => void }) {
-  const [storedState, setState] = useStoredState<JohariState>("johari-window", initialJohariState);
-  const state = { ...initialJohariState, ...storedState };
+type JohariRoomEnvelope = RoomProgressState & {
+  johari?: JohariState;
+};
+
+function parseJohariStateFromRoom(snapshot: RoomSnapshot | null) {
+  if (!snapshot || snapshot.room.currentGame !== "johari-window") return null;
+  const state = snapshot.room.state && typeof snapshot.room.state === "object" ? (snapshot.room.state as Partial<JohariRoomEnvelope>) : {};
+  return state.johari && typeof state.johari === "object" ? ({ ...initialJohariState, ...state.johari } as JohariState) : null;
+}
+
+function getJohariProgressStep(state: JohariState) {
+  const stepOrder: Record<JohariStep, number> = {
+    setup: 1,
+    self: 2,
+    peer: 3,
+    result: 4,
+    complete: 5,
+  };
+  return stepOrder[state.step] ?? 1;
+}
+
+function describeJohariProgress(state: JohariState) {
+  const target = state.players[state.targetIndex] ?? null;
+  if (state.step === "setup") return "ジョハリの窓の設定中です";
+  if (state.step === "self") return target ? `${target.name}さん本人の選択中です` : "本人の選択中です";
+  if (state.step === "peer") {
+    const peers = target ? state.players.filter((player) => player.id !== target.id) : [];
+    const currentPeer = peers[state.peerIndex] ?? null;
+    return currentPeer && target
+      ? `${currentPeer.name}さんが${target.name}さんへの印象を選択中です: ${state.peerIndex + 1}/${peers.length}`
+      : "周りの選択中です";
+  }
+  if (state.step === "result") return target ? `${target.name}さんの結果を表示中です` : "結果を表示中です";
+  return "ジョハリの窓が完了しました";
+}
+
+function buildJohariRoomEnvelope(johari: JohariState, updatedBy: string | null): JohariRoomEnvelope {
+  return {
+    phase: johari.step === "complete" ? "complete" : "playing",
+    gameKey: "johari-window",
+    gameTitle: findGameMeta("johari-window")?.title ?? "ジョハリの窓",
+    step: getJohariProgressStep(johari),
+    message: describeJohariProgress(johari),
+    updatedBy,
+    updatedAt: new Date().toISOString(),
+    johari,
+  };
+}
+
+function JohariWindowGame({
+  onHome,
+  onResetAll,
+  roomSessionOverride = null,
+}: {
+  onHome: () => void;
+  onResetAll: () => void;
+  roomSessionOverride?: RoomSession | null;
+}) {
+  const storedRoomSession = useMemo(() => readRoomSession(), []);
+  const roomSession = roomSessionOverride ?? storedRoomSession;
+  const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
+  const [roomSyncError, setRoomSyncError] = useState("");
+  const roomSocketRef = useRef<Socket | null>(null);
+  const [storedState, setStoredState] = useStoredState<JohariState>("johari-window", initialJohariState);
+  const roomJohariState = parseJohariStateFromRoom(roomSnapshot);
+  const isJohariRoom = Boolean(roomSession && (!roomSnapshot || roomSnapshot.room.currentGame === "johari-window"));
+  const activeJohariState = isJohariRoom ? (roomJohariState ?? initialJohariState) : storedState;
+  const state = { ...initialJohariState, ...activeJohariState };
   const wordPool = useMemo(
     () => (state.category === "all" ? johariWords : johariWords.filter((word) => word.category === state.category)),
     [state.category],
@@ -3820,8 +3885,79 @@ function JohariWindowGame({ onHome, onResetAll }: { onHome: () => void; onResetA
   const peers = target ? state.players.filter((player) => player.id !== target.id) : [];
   const currentPeer = peers[state.peerIndex] ?? null;
   const canStart = state.players.length >= 3 && state.players.every((player) => player.name.trim());
+  const isRoomHost = isJohariRoom && roomSession?.participantRole === "host";
+  const canControlJohari = !isJohariRoom || (isRoomHost && Boolean(roomSnapshot));
+  const canSelectSelfWords = !isJohariRoom || canControlJohari || target?.id === roomSession?.participantId;
+  const canSelectPeerWords = !isJohariRoom || canControlJohari || currentPeer?.id === roomSession?.participantId;
+  const canMoveFromSelf = !isJohariRoom || canControlJohari || target?.id === roomSession?.participantId;
+  const canMoveFromPeer = !isJohariRoom || canControlJohari || currentPeer?.id === roomSession?.participantId;
+
+  function setState(nextStateOrUpdater: JohariState | ((current: JohariState) => JohariState)) {
+    if (isJohariRoom && roomSession && !roomSnapshot) {
+      setRoomSyncError("ルーム情報を読み込み中です。少し待ってから操作してください。");
+      return;
+    }
+
+    if (!isJohariRoom || !roomSession || !roomSnapshot) {
+      setStoredState(nextStateOrUpdater);
+      return;
+    }
+
+    const nextState = typeof nextStateOrUpdater === "function" ? nextStateOrUpdater(state) : nextStateOrUpdater;
+    const nextRoomState = buildJohariRoomEnvelope(nextState, roomSession.participantId);
+    setRoomSnapshot({
+      ...roomSnapshot,
+      room: {
+        ...roomSnapshot.room,
+        status: nextRoomState.phase === "complete" ? "complete" : "playing",
+        currentGame: "johari-window",
+        state: nextRoomState,
+      },
+    });
+    roomSocketRef.current?.emit("room:state:update", {
+      roomCode: roomSession.roomCode,
+      currentGame: "johari-window",
+      state: nextRoomState,
+    });
+  }
+
+  useEffect(() => {
+    if (!roomSession) return;
+    let ignore = false;
+    fetchRoomSnapshot(roomSession.roomCode)
+      .then((snapshot) => {
+        if (!ignore) setRoomSnapshot(snapshot);
+      })
+      .catch((caught) => {
+        if (!ignore) setRoomSyncError(toErrorMessage(caught));
+      });
+
+    const socket = io(API_URL, {
+      transports: ["websocket", "polling"],
+    });
+    roomSocketRef.current = socket;
+
+    socket.on("connect", () => {
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+    });
+
+    socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
+      if (nextSnapshot) setRoomSnapshot(nextSnapshot);
+    });
+
+    socket.on("room:error", (payload: { error?: string }) => {
+      setRoomSyncError(toErrorMessage(payload.error ?? "room_error"));
+    });
+
+    return () => {
+      ignore = true;
+      socket.disconnect();
+      roomSocketRef.current = null;
+    };
+  }, [roomSession]);
 
   function startJohari() {
+    if (!canControlJohari) return;
     const deckWordIds = shuffle(wordPool)
       .slice(0, selectedWordCount)
       .map((word) => word.id);
@@ -3837,6 +3973,7 @@ function JohariWindowGame({ onHome, onResetAll }: { onHome: () => void; onResetA
   }
 
   function toggleSelfWord(id: string) {
+    if (!canSelectSelfWords) return;
     const selected = state.selfWordIds.includes(id)
       ? state.selfWordIds.filter((wordId) => wordId !== id)
       : [...state.selfWordIds, id];
@@ -3844,12 +3981,14 @@ function JohariWindowGame({ onHome, onResetAll }: { onHome: () => void; onResetA
   }
 
   function togglePeerWord(peerId: string, id: string) {
+    if (isJohariRoom && !canControlJohari && roomSession?.participantId !== peerId) return;
     const current = state.peerSelections[peerId] ?? [];
     const selected = current.includes(id) ? current.filter((wordId) => wordId !== id) : [...current, id];
     setState({ ...state, peerSelections: { ...state.peerSelections, [peerId]: selected } });
   }
 
   function moveToNextPeer() {
+    if (!canMoveFromPeer) return;
     if (state.peerIndex + 1 >= peers.length) {
       setState({ ...state, step: "result" });
       return;
@@ -3858,6 +3997,7 @@ function JohariWindowGame({ onHome, onResetAll }: { onHome: () => void; onResetA
   }
 
   function moveToNextTarget() {
+    if (!canControlJohari) return;
     if (state.targetIndex + 1 >= state.players.length) {
       setState({ ...state, step: "complete" });
       return;
@@ -3896,6 +4036,24 @@ function JohariWindowGame({ onHome, onResetAll }: { onHome: () => void; onResetA
       onHome={onHome}
       onResetAll={onResetAll}
     >
+      {isJohariRoom && roomSession && (
+        <section className="tool-surface room-sync-strip">
+          <div>
+            <p className="eyebrow">ルーム同期中</p>
+            <h3>
+              {roomSession.roomCode} / {roomSession.participantName}
+              {isRoomHost ? " / ホスト" : ""}
+            </h3>
+            <p className="soft-note">
+              {isRoomHost
+                ? "この端末が進行役です。参加者取り込み、対象者の切り替え、結果表示を同期します。"
+                : "この端末では、自分が対象者または回答者になった時だけ選択できます。"}
+            </p>
+          </div>
+          {roomSyncError && <p className="room-message error">{roomSyncError}</p>}
+        </section>
+      )}
+
       {state.step === "setup" && (
         <section className="tool-surface">
           <div className="howto-panel">
@@ -3908,45 +4066,113 @@ function JohariWindowGame({ onHome, onResetAll }: { onHome: () => void; onResetA
               <li>欠点探しではなく、選ばれた言葉から「そう見えているんだ」と会話するゲームです。</li>
             </ol>
           </div>
-          <PlayerSetup
-            players={state.players}
-            minPlayers={3}
-            maxPlayers={12}
-            onChange={(players) => setState({ ...state, players })}
-          />
-          <SegmentedControl
-            label="特徴ワード"
-            options={johariCategories}
-            value={state.category}
-            onChange={(category) => setState({ ...state, category, deckWordIds: [], selfWordIds: [], peerSelections: {} })}
-          />
-          <SegmentedControl
-            label="今回使う語数"
-            options={johariWordCountOptions}
-            value={String(state.wordCount)}
-            onChange={(wordCount) =>
-              setState({
-                ...state,
-                wordCount: Number(wordCount) as JohariWordCount,
-                deckWordIds: [],
-                selfWordIds: [],
-                peerSelections: {},
-              })
-            }
-          />
-          <p className="soft-note">
-            この条件では{wordPool.length}語から、今回は{selectedWordCount}語をランダムに使います。全体の特徴ワードは300語です。
-          </p>
+          {isJohariRoom && roomSnapshot && (
+            <div className="notice-panel calm">
+              <strong>ルーム参加者をジョハリの窓メンバーに使えます</strong>
+              <p>それぞれの端末で本人選択や周りの選択をするには、ルーム参加者を取り込んでください。</p>
+              <div className="action-row">
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, false),
+                      step: "setup",
+                      targetIndex: 0,
+                      peerIndex: 0,
+                      deckWordIds: [],
+                      selfWordIds: [],
+                      peerSelections: {},
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  ホスト以外を使う
+                </button>
+                <button
+                  className="secondary-button"
+                  disabled={!isRoomHost}
+                  type="button"
+                  onClick={() =>
+                    setState({
+                      ...state,
+                      players: roomParticipantsToPlayers(roomSnapshot, true),
+                      step: "setup",
+                      targetIndex: 0,
+                      peerIndex: 0,
+                      deckWordIds: [],
+                      selfWordIds: [],
+                      peerSelections: {},
+                    })
+                  }
+                >
+                  <Users size={18} />
+                  全員を使う
+                </button>
+              </div>
+            </div>
+          )}
+
+          {canControlJohari ? (
+            <>
+              <PlayerSetup
+                players={state.players}
+                minPlayers={3}
+                maxPlayers={12}
+                onChange={(players) =>
+                  setState({
+                    ...state,
+                    players,
+                    targetIndex: 0,
+                    peerIndex: 0,
+                    deckWordIds: [],
+                    selfWordIds: [],
+                    peerSelections: {},
+                  })
+                }
+              />
+              <SegmentedControl
+                label="特徴ワード"
+                options={johariCategories}
+                value={state.category}
+                onChange={(category) => setState({ ...state, category, deckWordIds: [], selfWordIds: [], peerSelections: {} })}
+              />
+              <SegmentedControl
+                label="今回使う語数"
+                options={johariWordCountOptions}
+                value={String(state.wordCount)}
+                onChange={(wordCount) =>
+                  setState({
+                    ...state,
+                    wordCount: Number(wordCount) as JohariWordCount,
+                    deckWordIds: [],
+                    selfWordIds: [],
+                    peerSelections: {},
+                  })
+                }
+              />
+              <p className="soft-note">
+                この条件では{wordPool.length}語から、今回は{selectedWordCount}語をランダムに使います。全体の特徴ワードは300語です。
+              </p>
+            </>
+          ) : (
+            <div className="howto-panel compact">
+              <h3>ホストの準備待ち</h3>
+              <p className="soft-note">ホストが参加者を取り込み、ジョハリの窓を開始すると、この端末でも選択できます。</p>
+            </div>
+          )}
           <div className="notice-panel calm">
             <strong>心理的安全性を優先します</strong>
             <p>容姿や年齢をいじるゲームではありません。良い特徴、役割、見え方を共有する時間として進めます。</p>
           </div>
           <div className="action-row">
-            <button className="primary-button" disabled={!canStart || selectedWordCount === 0} onClick={startJohari}>
+            <button className="primary-button" disabled={!canStart || selectedWordCount === 0 || !canControlJohari} onClick={startJohari}>
               <Play size={18} />
               はじめる
             </button>
-            <button className="secondary-button" onClick={() => setState(initialJohariState)}>
+            <button className="secondary-button" disabled={!canControlJohari} onClick={() => setState(initialJohariState)}>
               <RotateCcw size={18} />
               リセット
             </button>
@@ -3963,13 +4189,26 @@ function JohariWindowGame({ onHome, onResetAll }: { onHome: () => void; onResetA
             <h2>{target.name}さん本人の選択</h2>
             <p>自分に当てはまると思う特徴を選びます。多くても少なくても大丈夫です。</p>
           </div>
-          <ToggleWordGrid words={deckWords} selectedIds={state.selfWordIds} onToggle={toggleSelfWord} />
+          {canSelectSelfWords ? (
+            <ToggleWordGrid words={deckWords} selectedIds={state.selfWordIds} onToggle={toggleSelfWord} />
+          ) : (
+            <div className="howto-panel compact">
+              <h3>{target.name}さんの選択待ち</h3>
+              <p className="soft-note">本人が自分に当てはまる特徴を選んでいます。終わったら周りの選択へ進みます。</p>
+            </div>
+          )}
           <div className="action-row">
-            <button className="primary-button" onClick={() => setState({ ...state, step: "peer", peerIndex: 0 })}>
+            <button
+              className="primary-button"
+              disabled={!canMoveFromSelf}
+              onClick={() => setState({ ...state, step: "peer", peerIndex: 0 })}
+            >
               <ChevronRight size={18} />
               周りの選択へ
             </button>
-            <span className="inline-status">{state.selfWordIds.length}語選択中</span>
+            <span className="inline-status">
+              {canSelectSelfWords ? `${state.selfWordIds.length}語選択中` : "本人の選択待ち"}
+            </span>
           </div>
         </section>
       )}
@@ -3985,17 +4224,28 @@ function JohariWindowGame({ onHome, onResetAll }: { onHome: () => void; onResetA
             </h2>
             <p>対象者に当てはまりそうな特徴を選びます。本人が見ないように、スマホを少し隠して進めます。</p>
           </div>
-          <ToggleWordGrid
-            words={deckWords}
-            selectedIds={state.peerSelections[currentPeer.id] ?? []}
-            onToggle={(id) => togglePeerWord(currentPeer.id, id)}
-          />
+          {canSelectPeerWords ? (
+            <ToggleWordGrid
+              words={deckWords}
+              selectedIds={state.peerSelections[currentPeer.id] ?? []}
+              onToggle={(id) => togglePeerWord(currentPeer.id, id)}
+            />
+          ) : (
+            <div className="howto-panel compact">
+              <h3>{currentPeer.name}さんの選択待ち</h3>
+              <p className="soft-note">
+                今は{currentPeer.name}さんが、{target.name}さんに当てはまりそうな特徴を選んでいます。
+              </p>
+            </div>
+          )}
           <div className="action-row">
-            <button className="primary-button" onClick={moveToNextPeer}>
+            <button className="primary-button" disabled={!canMoveFromPeer} onClick={moveToNextPeer}>
               <ChevronRight size={18} />
               {state.peerIndex + 1 >= peers.length ? "結果を見る" : "次の人へ"}
             </button>
-            <span className="inline-status">{(state.peerSelections[currentPeer.id] ?? []).length}語選択中</span>
+            <span className="inline-status">
+              {canSelectPeerWords ? `${(state.peerSelections[currentPeer.id] ?? []).length}語選択中` : "回答者の選択待ち"}
+            </span>
           </div>
         </section>
       )}
@@ -4040,15 +4290,16 @@ function JohariWindowGame({ onHome, onResetAll }: { onHome: () => void; onResetA
             </ul>
           </div>
           <div className="action-row">
-            <button className="primary-button" onClick={moveToNextTarget}>
+            <button className="primary-button" disabled={!canControlJohari} onClick={moveToNextTarget}>
               {state.targetIndex + 1 >= state.players.length ? <Check size={18} /> : <ChevronRight size={18} />}
               {state.targetIndex + 1 >= state.players.length ? "完了" : "次の対象者"}
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup" })}>
+            <button className="secondary-button" disabled={!canControlJohari} onClick={() => setState({ ...state, step: "setup" })}>
               <Users size={18} />
               設定へ
             </button>
           </div>
+          {!canControlJohari && <p className="soft-note">次の対象者への切り替えはホスト端末で行います。</p>}
         </section>
       )}
 
@@ -4059,15 +4310,16 @@ function JohariWindowGame({ onHome, onResetAll }: { onHome: () => void; onResetA
           <h2>全員分の窓を見ました</h2>
           <p className="talk-cue">印象に残った良い言葉を1つずつ持ち帰ると、気持ちよく終われます。</p>
           <div className="action-row centered">
-            <button className="primary-button" onClick={startJohari}>
+            <button className="primary-button" disabled={!canControlJohari} onClick={startJohari}>
               <RotateCcw size={18} />
               もう一度
             </button>
-            <button className="secondary-button" onClick={() => setState({ ...state, step: "setup" })}>
+            <button className="secondary-button" disabled={!canControlJohari} onClick={() => setState({ ...state, step: "setup" })}>
               <Users size={18} />
               設定へ
             </button>
           </div>
+          {!canControlJohari && <p className="soft-note">もう一度遊ぶ場合はホスト端末で開始します。</p>}
         </section>
       )}
     </GameFrame>
