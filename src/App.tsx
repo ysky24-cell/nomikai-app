@@ -1504,6 +1504,8 @@ type UrlCandidateState = {
   completedPairs: number;
   actionLog: string[];
   votes: Record<string, string>;
+  safeCounts: Record<string, number>;
+  missCounts: Record<string, number>;
 };
 
 const urlCandidateQuestionCountOptions: SegmentedOption<string>[] = [
@@ -1533,9 +1535,15 @@ const initialUrlCandidateState: UrlCandidateState = {
   completedPairs: 0,
   actionLog: [],
   votes: {},
+  safeCounts: {},
+  missCounts: {},
 };
 
 function createPlayerPositions(players: Player[]) {
+  return Object.fromEntries(players.map((player) => [player.id, 0]));
+}
+
+function createPlayerCountMap(players: Player[]) {
   return Object.fromEntries(players.map((player) => [player.id, 0]));
 }
 
@@ -1554,8 +1562,16 @@ type UrlCandidateRoomEnvelope = RoomProgressState & {
   };
 };
 
-function isRoomSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
+function isVoteSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
   return key === "majority-game" || key === "large-majority-game";
+}
+
+function isTurnSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
+  return key === "reverse-word-game" || key === "loanword-ban-game";
+}
+
+function isRoomSyncableUrlCandidateKey(key: UrlCandidateGameKey) {
+  return isVoteSyncableUrlCandidateKey(key) || isTurnSyncableUrlCandidateKey(key);
 }
 
 function parseUrlCandidateStateFromRoom(snapshot: RoomSnapshot | null, key: UrlCandidateGameKey) {
@@ -1581,9 +1597,16 @@ function getUrlCandidateProgressStep(state: UrlCandidateState) {
 function describeUrlCandidateProgress(config: UrlCandidateGameConfig, state: UrlCandidateState) {
   if (state.step === "setup") return `${config.title}の設定中です`;
   if (state.step === "play") {
-    const votedCount = state.players.filter((player) => state.votes[player.id]).length;
     const progress = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "準備中";
-    return `${config.title}: お題${progress}で投票中です (${votedCount}/${state.players.length})`;
+    if (isVoteSyncableUrlCandidateKey(config.key)) {
+      const votedCount = state.players.filter((player) => state.votes[player.id]).length;
+      return `${config.title}: お題${progress}で投票中です (${votedCount}/${state.players.length})`;
+    }
+    if (isTurnSyncableUrlCandidateKey(config.key)) {
+      const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+      return currentPlayer ? `${config.title}: お題${progress}で${currentPlayer.name}さんの番です` : `${config.title}: お題${progress}で進行中です`;
+    }
+    return `${config.title}: お題${progress}で進行中です`;
   }
   return `${config.title}が完了しました`;
 }
@@ -1632,6 +1655,7 @@ function UrlCandidateGame({
   const state = { ...initialUrlCandidateState, ...activeUrlCandidateState };
   const isRoomHost = isUrlCandidateRoom && roomSession?.participantRole === "host";
   const canControlUrlCandidate = !isUrlCandidateRoom || (isRoomHost && Boolean(roomSnapshot));
+  const usesTurnSync = isTurnSyncableUrlCandidateKey(config.key);
   const promptPool = useMemo(
     () => config.prompts.filter((prompt) => state.includeAdultTopics || prompt.rating === "normal"),
     [config.prompts, state.includeAdultTopics],
@@ -1639,6 +1663,7 @@ function UrlCandidateGame({
   const selectedQuestionCount = Math.min(state.questionCount, promptPool.length);
   const prompt = config.prompts.find((item) => item.id === state.deckPromptIds[state.deckIndex]) ?? null;
   const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+  const canActForCurrentUrlPlayer = !isUrlCandidateRoom || canControlUrlCandidate || roomSession?.participantId === currentPlayer?.id;
   const canStart = state.players.length >= config.minPlayers && state.players.every((player) => player.name.trim());
   const progressLabel = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "";
   const normalCount = config.prompts.filter((item) => item.rating === "normal").length;
@@ -1733,6 +1758,8 @@ function UrlCandidateGame({
       completedPairs: 0,
       actionLog: [],
       votes: {},
+      safeCounts: createPlayerCountMap(state.players),
+      missCounts: createPlayerCountMap(state.players),
     });
   }
 
@@ -1751,6 +1778,8 @@ function UrlCandidateGame({
       hazardIndex: createHazardIndex(),
       actionLog: [],
       votes: {},
+      safeCounts: state.safeCounts,
+      missCounts: state.missCounts,
     });
   }
 
@@ -1769,8 +1798,12 @@ function UrlCandidateGame({
             </h3>
             <p className="soft-note">
               {isRoomHost
-                ? "この端末が進行役です。参加者取り込み、次のお題、完了を同期します。"
-                : "この端末では自分の投票だけ操作できます。集計とお題の進行は同期されます。"}
+                ? usesTurnSync
+                  ? "この端末が進行役です。参加者取り込み、手番、セーフ、アウト、次のお題を同期します。"
+                  : "この端末が進行役です。参加者取り込み、次のお題、完了を同期します。"
+                : usesTurnSync
+                  ? "この端末では自分の番だけセーフ、パス、アウト操作ができます。お題切り替えはホスト端末で行います。"
+                  : "この端末では自分の投票だけ操作できます。集計とお題の進行は同期されます。"}
             </p>
           </div>
           {roomSyncError && <p className="room-message error">{roomSyncError}</p>}
@@ -1791,7 +1824,11 @@ function UrlCandidateGame({
           {isUrlCandidateRoom && roomSnapshot && (
             <div className="notice-panel calm">
               <strong>ルーム参加者を{config.title}メンバーに使えます</strong>
-              <p>参加者それぞれの端末で自分の投票をするには、ルーム参加者を取り込んでください。</p>
+              <p>
+                {usesTurnSync
+                  ? "参加者それぞれの端末で自分の番を操作するには、ルーム参加者を取り込んでください。"
+                  : "参加者それぞれの端末で自分の投票をするには、ルーム参加者を取り込んでください。"}
+              </p>
               <div className="action-row">
                 <button
                   className="secondary-button"
@@ -1806,6 +1843,10 @@ function UrlCandidateGame({
                       deckIndex: 0,
                       answerVisible: false,
                       votes: {},
+                      currentPlayerIndex: 0,
+                      actionLog: [],
+                      safeCounts: {},
+                      missCounts: {},
                     })
                   }
                 >
@@ -1825,6 +1866,10 @@ function UrlCandidateGame({
                       deckIndex: 0,
                       answerVisible: false,
                       votes: {},
+                      currentPlayerIndex: 0,
+                      actionLog: [],
+                      safeCounts: {},
+                      missCounts: {},
                     })
                   }
                 >
@@ -1841,7 +1886,17 @@ function UrlCandidateGame({
                 players={state.players}
                 minPlayers={config.minPlayers}
                 maxPlayers={config.maxPlayers}
-                onChange={(players) => setState({ ...state, players, votes: {} })}
+                onChange={(players) =>
+                  setState({
+                    ...state,
+                    players,
+                    votes: {},
+                    currentPlayerIndex: 0,
+                    actionLog: [],
+                    safeCounts: {},
+                    missCounts: {},
+                  })
+                }
               />
 
               <ToggleSwitch
@@ -1853,7 +1908,18 @@ function UrlCandidateGame({
                 }
                 checked={state.includeAdultTopics}
                 onChange={(includeAdultTopics) =>
-                  setState({ ...state, includeAdultTopics, deckPromptIds: [], deckIndex: 0, answerVisible: false, votes: {} })
+                  setState({
+                    ...state,
+                    includeAdultTopics,
+                    deckPromptIds: [],
+                    deckIndex: 0,
+                    answerVisible: false,
+                    votes: {},
+                    currentPlayerIndex: 0,
+                    actionLog: [],
+                    safeCounts: {},
+                    missCounts: {},
+                  })
                 }
               />
 
@@ -1869,6 +1935,10 @@ function UrlCandidateGame({
                     deckIndex: 0,
                     answerVisible: false,
                     votes: {},
+                    currentPlayerIndex: 0,
+                    actionLog: [],
+                    safeCounts: {},
+                    missCounts: {},
                   })
                 }
               />
@@ -1888,7 +1958,11 @@ function UrlCandidateGame({
           ) : (
             <div className="howto-panel compact">
               <h3>ホストの準備待ち</h3>
-              <p className="soft-note">ホストがお題を開始すると、この端末で自分の投票を選べます。</p>
+              <p className="soft-note">
+                {usesTurnSync
+                  ? "ホストが参加者を取り込み、お題を開始すると、この端末でも自分の番を操作できます。"
+                  : "ホストがお題を開始すると、この端末で自分の投票を選べます。"}
+              </p>
             </div>
           )}
 
@@ -1956,6 +2030,7 @@ function UrlCandidateGame({
             <div className="action-row">
               <button
                 className="secondary-button"
+                disabled={isUrlCandidateRoom && !canControlUrlCandidate}
                 onClick={() => setState({ ...state, answerVisible: !state.answerVisible })}
               >
                 {state.answerVisible ? <EyeOff size={18} /> : <Eye size={18} />}
@@ -1977,6 +2052,7 @@ function UrlCandidateGame({
             state={state}
             setState={setState}
             canControl={canControlUrlCandidate}
+            canActForCurrentPlayer={canActForCurrentUrlPlayer}
             canVoteForPlayer={canVoteForUrlPlayer}
             isRoomMode={isUrlCandidateRoom}
           />
@@ -1998,7 +2074,18 @@ function UrlCandidateGame({
             <button
               className="secondary-button"
               disabled={!canControlUrlCandidate}
-              onClick={() => setState({ ...state, step: "setup", answerVisible: false, votes: {} })}
+              onClick={() =>
+                setState({
+                  ...state,
+                  step: "setup",
+                  answerVisible: false,
+                  votes: {},
+                  currentPlayerIndex: 0,
+                  actionLog: [],
+                  safeCounts: {},
+                  missCounts: {},
+                })
+              }
             >
               <Users size={18} />
               設定へ
@@ -2013,13 +2100,36 @@ function UrlCandidateGame({
           <Trophy size={32} />
           <p className="eyebrow">終了</p>
           <h2>{state.deckPromptIds.length}問おつかれさまでした</h2>
+          {usesTurnSync && (
+            <div className="score-list wide">
+              {state.players.map((player) => (
+                <span key={player.id}>
+                  {player.name}: セーフ{state.safeCounts[player.id] ?? 0} / アウト{state.missCounts[player.id] ?? 0}
+                </span>
+              ))}
+            </div>
+          )}
           <p className="talk-cue">違う設問数やHな話題ON/OFFに変えると、同じゲームでも雰囲気を変えて遊べます。</p>
           <div className="action-row centered">
             <button className="primary-button" disabled={!canControlUrlCandidate} onClick={startUrlCandidateGame}>
               <RotateCcw size={18} />
               もう一度
             </button>
-            <button className="secondary-button" disabled={!canControlUrlCandidate} onClick={() => setState({ ...state, step: "setup", votes: {} })}>
+            <button
+              className="secondary-button"
+              disabled={!canControlUrlCandidate}
+              onClick={() =>
+                setState({
+                  ...state,
+                  step: "setup",
+                  votes: {},
+                  currentPlayerIndex: 0,
+                  actionLog: [],
+                  safeCounts: {},
+                  missCounts: {},
+                })
+              }
+            >
               <Users size={18} />
               設定へ
             </button>
@@ -2036,6 +2146,7 @@ function UrlCandidateInteractionPanel({
   state,
   setState,
   canControl = true,
+  canActForCurrentPlayer = true,
   canVoteForPlayer = () => true,
   isRoomMode = false,
 }: {
@@ -2044,6 +2155,7 @@ function UrlCandidateInteractionPanel({
   state: UrlCandidateState;
   setState: (state: UrlCandidateState) => void;
   canControl?: boolean;
+  canActForCurrentPlayer?: boolean;
   canVoteForPlayer?: (playerId: string) => boolean;
   isRoomMode?: boolean;
 }) {
@@ -2062,7 +2174,27 @@ function UrlCandidateInteractionPanel({
     pushLog(message, { currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length) });
   }
 
-  if (isRoomSyncableUrlCandidateKey(config.key) && prompt.options?.length) {
+  function recordTurnResult(kind: "safe" | "miss" | "skip") {
+    if (!currentPlayer || !canActForCurrentPlayer) return;
+    const nextIndex = (state.currentPlayerIndex + 1) % Math.max(1, state.players.length);
+    if (kind === "safe") {
+      pushLog(`${currentPlayer.name}さんはセーフ。次の人へ進みます。`, {
+        currentPlayerIndex: nextIndex,
+        safeCounts: { ...state.safeCounts, [currentPlayer.id]: (state.safeCounts[currentPlayer.id] ?? 0) + 1 },
+      });
+      return;
+    }
+    if (kind === "miss") {
+      pushLog(`${currentPlayer.name}さんはアウト。やさしく笑って次の人へ。`, {
+        currentPlayerIndex: nextIndex,
+        missCounts: { ...state.missCounts, [currentPlayer.id]: (state.missCounts[currentPlayer.id] ?? 0) + 1 },
+      });
+      return;
+    }
+    pushLog(`${currentPlayer.name}さんはパスしました。`, { currentPlayerIndex: nextIndex });
+  }
+
+  if (isVoteSyncableUrlCandidateKey(config.key) && prompt.options?.length) {
     const voteOptions = prompt.options.slice(0, 4);
     const tallyRows = voteOptions.map((option, index) => ({
       option,
@@ -2143,6 +2275,67 @@ function UrlCandidateInteractionPanel({
         </div>
 
         {isRoomMode && !canControl && <p className="soft-note">自分の投票だけ操作できます。次のお題へ進む操作はホスト端末で行います。</p>}
+      </div>
+    );
+  }
+
+  if (isTurnSyncableUrlCandidateKey(config.key)) {
+    const scoreRows = state.players.map((player) => ({
+      player,
+      safe: state.safeCounts[player.id] ?? 0,
+      miss: state.missCounts[player.id] ?? 0,
+    }));
+
+    return (
+      <div className="url-interaction-panel">
+        <div className="howto-panel compact">
+          <h3>手番同期</h3>
+          <ul className="rule-list">
+            <li>各自の端末では、自分の番だけセーフ、パス、アウトを押せます。</li>
+            <li>ホスト端末では全員分を代行入力できます。</li>
+            <li>アウトは責めずに、テンポよく次の人へ回します。</li>
+          </ul>
+        </div>
+
+        {currentPlayer && (
+          <div className="turn-callout">
+            <span>現在の番</span>
+            <strong>{currentPlayer.name}</strong>
+          </div>
+        )}
+
+        {canActForCurrentPlayer ? (
+          <div className="action-row centered">
+            <button className="primary-button" type="button" onClick={() => recordTurnResult("safe")}>
+              <Check size={18} />
+              セーフ
+            </button>
+            <button className="secondary-button" type="button" onClick={() => recordTurnResult("skip")}>
+              <ChevronRight size={18} />
+              パス
+            </button>
+            <button className="danger-button" type="button" onClick={() => recordTurnResult("miss")}>
+              <ShieldAlert size={18} />
+              アウト
+            </button>
+          </div>
+        ) : (
+          <div className="howto-panel compact">
+            <h3>{currentPlayer?.name ?? "次の人"}さんの番です</h3>
+            <p className="soft-note">この端末では待機中です。自分の番になると操作できます。</p>
+          </div>
+        )}
+
+        <div className="score-list wide">
+          {scoreRows.map(({ player, safe, miss }) => (
+            <span key={player.id}>
+              {player.name}: セーフ{safe} / アウト{miss}
+            </span>
+          ))}
+        </div>
+
+        <UrlActionLog logs={state.actionLog} />
+        {isRoomMode && !canControl && <p className="soft-note">次のお題へ進む操作はホスト端末で行います。</p>}
       </div>
     );
   }

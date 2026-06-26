@@ -973,6 +973,29 @@ select:focus {
   font-variant-numeric: tabular-nums;
 }
 
+.turn-callout {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+  text-align: center;
+}
+
+.turn-callout span {
+  color: var(--muted);
+  font-size: 0.8rem;
+  font-weight: 800;
+}
+
+.turn-callout strong {
+  color: var(--teal);
+  font-size: 1.35rem;
+  line-height: 1.35;
+}
+
 .draw-status,
 .matchup-panel,
 .position-list {
