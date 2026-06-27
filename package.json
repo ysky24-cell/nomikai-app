@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "room:lifecycle:check": "node scripts/room-lifecycle-check.mjs"
+    "room:lifecycle:check": "node scripts/room-lifecycle-check.mjs",
+    "room:lifecycle:check:all": "node scripts/room-lifecycle-check-all.mjs"
   },
   "dependencies": {
     "lucide-react": "^1.21.0",

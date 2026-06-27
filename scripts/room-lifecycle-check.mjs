@@ -31,6 +31,14 @@ async function main() {
     assert.ok(host?.id, "host participant id is required");
   });
 
+  await step("reject unsupported game start", async () => {
+    const result = await expectHttpFailure("POST", `/rooms/${roomCode}/game/start`, {
+      body: { participantId: host.id, gameKey: "unsupported-test-game", gameTitle: "Unsupported Test Game" },
+    });
+    assert.equal(result.response.status, 400);
+    assert.equal(result.data?.error, "unsupported_game");
+  });
+
   await step("join player", async () => {
     const result = await request("POST", `/rooms/${roomCode}/join`, {
       body: { name: "Lifecycle Player" },
@@ -255,7 +263,7 @@ async function expectHttpFailure(method, path, options = {}) {
   const data = parseJsonBody(text);
 
   if (response.ok) {
-    throw new Error(`${method} ${url.pathname}${url.search} should fail after room close, got ${response.status}`);
+    throw new Error(`${method} ${url.pathname}${url.search} should fail, got ${response.status}`);
   }
 
   return { response, data };

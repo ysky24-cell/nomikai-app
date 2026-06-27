@@ -1394,6 +1394,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
 
         <div className="room-form">
           <h3>コードで参加</h3>
+          <p className="soft-note">観戦から参加へ切り替える時も、ここで名前を入れて参加します。</p>
           <div className="room-button-row">
             <input
               value={joinCode}
@@ -1411,6 +1412,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
 
         <div className="room-form">
           <h3>観戦で見る</h3>
+          <p className="soft-note">参加者に数えず、進行・履歴・接続状況だけを確認します。</p>
           <div className="room-button-row">
             <input
               value={observerCode}
@@ -1431,7 +1433,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
           <div>
             <h3>前回のルームに戻る</h3>
             <p className="soft-note">
-              {savedSession.roomCode} / {savedSession.participantName}（{savedSessionRoleLabel}）として保存されています。
+              {savedSession.roomCode} / {savedSession.participantName}（{savedSessionRoleLabel}）としてこのブラウザに保存されています。別端末ではルームコードで参加してください。
             </p>
           </div>
           <div className="room-game-controls">
@@ -1500,6 +1502,9 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
 
           {participant ? (
             <div className="room-game-panel">
+              {currentGame && !roomClosed && (
+                <p className="soft-note">回答や自分だけの確認は、下の「この端末でゲーム画面を開く」から進みます。</p>
+              )}
               <label>
                 <span className="control-label">開始するゲーム</span>
                 <select
@@ -1544,7 +1549,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
               <p className="soft-note">
                 {roomClosed
                   ? "このルームは終了済みです。参加者として追加されず、履歴と接続状況だけを確認できます。"
-                  : "参加者としては追加されません。現在のゲーム、進行メッセージ、参加者の接続状況だけを確認できます。"}
+                  : "参加者としては追加されません。現在のゲーム、進行メッセージ、参加者の接続状況だけを確認できます。参加する場合は、上の「コードで参加」に名前を入れて入り直してください。"}
               </p>
             </div>
           )}
@@ -1552,7 +1557,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
           {currentGame && participant && !roomClosed && (
             <button className="primary-button room-open-game" type="button" onClick={openCurrentRoomGame}>
               <Play size={18} />
-              この端末で開く
+              この端末でゲーム画面を開く
             </button>
           )}
 
@@ -1619,6 +1624,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
                 {eventsLoading ? "取得中..." : "履歴更新"}
               </button>
             </div>
+            <p className="soft-note">履歴は進行の要約です。役職やお題などの秘密情報は画面に出さない前提です。</p>
             {eventsError && <p className="room-message error">履歴を取得できませんでした: {eventsError}</p>}
             {!eventsError && roomEvents.length === 0 && (
               <p className="soft-note">{eventsLoading ? "履歴を取得しています。" : "まだ表示できる履歴がありません。"}</p>
@@ -1744,6 +1750,7 @@ function toErrorMessage(error: unknown) {
     name_required: "名前を入力してください。",
     game_key_required: "ゲームを選択してください。",
     game_title_required: "ゲーム名が取得できません。",
+    unsupported_game: "このゲームはルーム同期の対象外です。画面を更新して選び直してください。",
     game_not_started: "先にゲームを開始してください。",
     host_required: "この操作はホストだけが実行できます。",
     room_closed: "このルームは終了済みです。",

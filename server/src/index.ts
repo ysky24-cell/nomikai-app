@@ -161,6 +161,10 @@ app.post("/rooms/:code/game/start", async (request, response, next) => {
       response.status(409).json({ error: "room_closed" });
       return;
     }
+    if (!isSupportedRoomGameKey(gameKey)) {
+      response.status(400).json({ error: "unsupported_game" });
+      return;
+    }
     if (!isHostParticipant(currentSnapshot, participantId)) {
       response.status(403).json({ error: "host_required" });
       return;
@@ -619,6 +623,46 @@ function readSyncedTimerRemaining(branch: Record<string, unknown> | null, now = 
 type RoomSnapshot = NonNullable<Awaited<ReturnType<typeof findRoomByCode>>>;
 type RoomParticipant = RoomSnapshot["participants"][number];
 
+const supportedRoomGameKeys = new Set([
+  "yamanote",
+  "two-choice",
+  "word-wolf",
+  "ng-word",
+  "impression-ranking",
+  "party-pack",
+  "johari-window",
+  "turtle-soup",
+  "anonymous-box",
+  "majority-game",
+  "truth-lie-game",
+  "count-up-game",
+  "reverse-word-game",
+  "song-association-quiz",
+  "drawing-quiz",
+  "hazard-card-game",
+  "typing-speed-game",
+  "memory-logo-drawing",
+  "value-meter-game",
+  "acting-phrase-game",
+  "party-sugoroku",
+  "territory-board-game",
+  "weird-karuta-game",
+  "emo-hint-game",
+  "resource-negotiation-game",
+  "life-event-sugoroku",
+  "arm-wrestling-tournament",
+  "safe-random-draw",
+  "person-hint-quiz",
+  "large-majority-game",
+  "humming-intro-quiz",
+  "loanword-ban-game",
+  "werewolf-game",
+]);
+
+function isSupportedRoomGameKey(gameKey: string | null | undefined) {
+  return typeof gameKey === "string" && supportedRoomGameKeys.has(gameKey);
+}
+
 function findParticipant(snapshot: RoomSnapshot, participantId: string | null | undefined) {
   if (!participantId) return null;
   return snapshot.participants.find((participant) => participant.id === participantId) ?? null;
@@ -709,6 +753,9 @@ function validateStateUpdateAuthorization(
   const activeGame = snapshot.room.currentGame;
   if (activeGame !== requestedGame) {
     return "game_mismatch";
+  }
+  if (!isSupportedRoomGameKey(activeGame)) {
+    return "unsupported_game";
   }
   if (requester.role === "host") {
     return null;
@@ -815,7 +862,7 @@ function validateParticipantScopedStateChange(
       if (progress.phaseOrStepChanged) return "host_required";
       return validateAnonymousQuestionSubmission(currentStateValue, nextStateValue);
     default:
-      return progress.phaseOrStepChanged ? "host_required" : null;
+      return "unsupported_game";
   }
 }
 

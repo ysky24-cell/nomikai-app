@@ -22,6 +22,8 @@ docker compose -p nomikai-app up --build
 - フロント: http://localhost:5173/nomikai-app/
 - APIヘルスチェック: http://localhost:3000/health
 
+Synology Docker / Container Manager でNAS上にホストする場合は、開発用のこのComposeではなく [Synology Docker / Container Manager ホスト準備](synology-docker.md) を参照してください。
+
 ## 実装済みAPI
 
 ```bash
@@ -169,6 +171,7 @@ curl "http://localhost:3000/rooms/ROOMCD/events"
 - 履歴はイベント種別、参加者名、時刻、ゲーム名、進行ステップなどの要約として表示します
 - REST APIでは、ゲーム開始、次へ、完了、待機戻しをホストだけが実行できます
 - REST APIでは、ルーム終了をホストだけが実行できます
+- REST APIとSocket.IOでは、同期対象外の未知ゲームキーによる開始・状態更新を拒否します
 - Socket.IOのゲーム内状態更新では、参加者が対象ルームに所属していること、現在のゲームと一致すること、参加者更新の `updatedBy` が本人であることをサーバー側でも確認します
 - 二択トーク、第一印象ランキング、マジョリティゲーム / 大人数マジョリティでは、非ホストは自分の投票欄だけ変更できます
 - 匿名質問箱では、非ホストは準備中に匿名質問を1件追加する操作だけ実行できます

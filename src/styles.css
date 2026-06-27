@@ -421,6 +421,11 @@ select:focus {
   margin-bottom: 10px;
 }
 
+.room-form > .soft-note {
+  margin: -2px 0 10px;
+  font-size: 0.92rem;
+}
+
 .room-resume-card {
   display: grid;
   gap: 10px;
@@ -475,6 +480,11 @@ select:focus {
 .room-game-panel {
   display: grid;
   gap: 12px;
+}
+
+.room-game-panel > .soft-note,
+.room-history-panel > .soft-note {
+  margin: 0;
 }
 
 .room-game-controls {

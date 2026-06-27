@@ -166,6 +166,7 @@ Docker、DB、WebSocketを使う多人数ルーム参加版は、別ブランチ
 - 終了済みルームでの新規参加、ホスト交代、参加者削除の停止
 - `room_events` 由来の履歴表示
 - ホスト操作APIとSocket.IO状態更新の基本的なサーバー側権限チェック
+- サーバー側で同期対象ゲームキーを33件に限定し、未知のゲームキーは開始・状態更新を拒否
 - 人狼、ワードウルフ、NGワード、二択トーク、第一印象ランキング、マジョリティ系、匿名質問箱、ウミガメのスープ、ジョハリの窓、山手線ゲーム、定番ゲームパック、当てる系、回答・集計系、演技系、手番・抽選・対戦系、盤面系の本人欄・投票・記録・手番・盤面単位のサーバー側検証
 - 人狼の役職、ワードウルフのお題、NGワードの参加者別マスク配信
 - 保存済みルームへの再接続、保存削除、接続切れ表示、最終同期時刻表示、役割更新
@@ -197,7 +198,7 @@ Docker、DB、WebSocketを使う多人数ルーム参加版は、別ブランチ
 - 本番公開では、履歴とルーム状態の保存期間、削除方法、運用者閲覧範囲を決める必要があります。
 - DB内部の役職やお題をサーバー運用者にも読めない形にする暗号化
 - 同期対象外の細かい補助操作に対するサーバー権限検証
-- 本番AWS用のHTTPS、ドメイン、認証、監視
+- Synology外部公開やクラウド公開向けのHTTPS、ドメイン、認証、監視
 
 ローカルでは次のコマンドで、Reactフロント、API、PostgreSQL、Redisをまとめて起動できます。
 
@@ -211,6 +212,7 @@ docker compose -p nomikai-app up --build
 - APIヘルスチェック: [http://localhost:3000/health](http://localhost:3000/health)
 
 詳しくは [Docker / ルーム版セットアップ](docs/docker-room-setup.md) を参照してください。
+Synology NAS の Docker / Container Manager で試す場合は [Synology Docker / Container Manager ホスト準備](docs/synology-docker.md) を参照してください。
 
 ## ローカル起動
 
@@ -223,6 +225,20 @@ npm run dev
 
 ```bash
 npm run build
+```
+
+## Dockerルーム版の検証
+
+単一ゲームキーの共通進行を確認:
+
+```bash
+npm run room:lifecycle:check
+```
+
+全33ゲームキーの共通進行をまとめて確認:
+
+```bash
+npm run room:lifecycle:check:all
 ```
 
 ## 関連ドキュメント
