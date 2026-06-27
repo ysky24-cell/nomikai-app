@@ -20,6 +20,17 @@ export type ParticipantRow = {
   updatedAt: string;
 };
 
+export type ParticipantTransferCodeRow = {
+  id: string;
+  roomId: string;
+  participantId: string;
+  createdByParticipantId: string | null;
+  codeHash: string;
+  expiresAt: string;
+  usedAt: string | null;
+  createdAt: string;
+};
+
 export type RoomEventRow = {
   id: string;
   roomId: string;

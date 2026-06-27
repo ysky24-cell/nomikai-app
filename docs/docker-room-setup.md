@@ -23,6 +23,7 @@ docker compose -p nomikai-app up --build
 - APIヘルスチェック: http://localhost:3000/health
 
 Synology Docker / Container Manager でNAS上にホストする場合は、開発用のこのComposeではなく [Synology Docker / Container Manager ホスト準備](synology-docker.md) を参照してください。
+Synologyでは、参加者のスマホや別PCから見た `localhost` はNASではなくその端末自身です。フロントとAPIのURLには、参加者端末から届くNAS IPを使います。
 
 ## 実装済みAPI
 
@@ -53,6 +54,24 @@ curl -X DELETE http://localhost:3000/rooms/ROOMCD/participants/TARGET_ID \
   -H "Content-Type: application/json" \
   -d "{\"participantId\":\"HOST_ID\"}"
 ```
+
+参加者引き継ぎコードを発行する例:
+
+```bash
+curl -X POST http://localhost:3000/rooms/ROOMCD/participants/TARGET_ID/transfer-code \
+  -H "Content-Type: application/json" \
+  -d "{\"participantId\":\"HOST_ID\"}"
+```
+
+別端末や別ブラウザで、発行済みコードを使って同じ参加者として復帰する例:
+
+```bash
+curl -X POST http://localhost:3000/rooms/ROOMCD/claim-transfer \
+  -H "Content-Type: application/json" \
+  -d "{\"transferCode\":\"TRANSFER_CODE\"}"
+```
+
+引き継ぎコードはホストだけが発行できます。8桁、10分有効で、一回使用すると無効になります。同じ参加者に再発行すると、前に出した未使用コードは無効になります。
 
 ```bash
 curl -X POST http://localhost:3000/rooms/ROOMCD/game/start \
@@ -166,6 +185,8 @@ curl "http://localhost:3000/rooms/ROOMCD/events"
 - ホスト交代
 - ホストによる参加者削除
 - ホスト交代や削除後の参加者画面更新
+- ホストによる参加者引き継ぎコード発行
+- 引き継ぎコードによる別端末 / 別ブラウザからの同一参加者としての復帰
 - 観戦者は参加者として追加されず、Socket.IOでマスク済みのルーム進行だけを受け取れます
 - 観戦者は終了状態と履歴を確認できますが、ゲーム操作や各自回答には参加できません
 - 履歴はイベント種別、参加者名、時刻、ゲーム名、進行ステップなどの要約として表示します
@@ -257,13 +278,14 @@ curl "http://localhost:3000/rooms/ROOMCD/events"
 - 終了済みルームは再開せず、遊び直す場合は新しいルームを作る想定です。
 - Socket.IOの状態更新にはサーバー側権限チェックがあります。同期対象外の補助表示や端末ごとのローカルUI状態は、まだサーバー側では検証しません。
 - 静的版の `localStorage` 進行は残しています。
-- 保存済みルームへの再接続は同じブラウザの `localStorage` を使います。別端末や別ブラウザへの参加者引き継ぎは未対応です。
+- 保存済みルームへの再接続は同じブラウザの `localStorage` を使います。別端末や別ブラウザで同じ参加者として復帰するには、ホストが対象参加者に発行した引き継ぎコードが必要です。
+- 引き継ぎコードは8桁で、発行から10分だけ有効です。一回使用するか、同じ参加者へ再発行すると無効になります。期限切れ、使用済み、対象参加者が削除済みの場合は、ホストが新しいコードを発行します。
 - 観戦者はゲーム内操作や各自回答には参加できません。参加する場合は名前を登録してルームへ入り直します。
 - 本番公開用のHTTPS、ドメイン、認証、監視は未設定です。
 - 日本語フォルダ名の環境では、Composeのプロジェクト名を明示するため `-p nomikai-app` を付けて起動します。
 
 ## 次に作る候補
 
-1. 別端末への参加者引き継ぎコード
-2. 履歴の保存期間、削除UI、エクスポート
-3. AWS公開用の本番Docker構成
+1. 履歴の保存期間、削除UI、エクスポート
+2. 引き継ぎコードの発行履歴、期限切れ表示、再発行導線の強化
+3. Synology外部公開やクラウド公開向けのHTTPS、ドメイン、認証、監視

@@ -1,9 +1,10 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomInt, randomUUID } from "node:crypto";
 import pg from "pg";
 import { config } from "./config.js";
-import type { ParticipantRow, RoomEventRow, RoomRow, RoomStatus } from "./types.js";
+import type { ParticipantRow, ParticipantTransferCodeRow, RoomEventRow, RoomRow, RoomStatus } from "./types.js";
 
 const { Pool } = pg;
+const participantTransferCodeTtlMs = 10 * 60 * 1000;
 
 export const pool = new Pool({
   connectionString: config.databaseUrl,
@@ -126,6 +127,144 @@ export async function setParticipantConnected(participantId: string, connected: 
      WHERE id = $1`,
     [participantId, connected],
   );
+}
+
+export async function createParticipantTransferCode(code: string, requesterParticipantId: string, targetParticipantId: string) {
+  await ensureDatabaseMigrations();
+
+  const normalizedCode = normalizeRoomCode(code);
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    const room = await findRoomForUpdate(client, normalizedCode);
+    if (!room) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+    if (room.status === "closed") {
+      throw new Error("room_closed");
+    }
+
+    await assertRoomHost(client, room.id, requesterParticipantId);
+    const target = await findParticipantInRoom(client, room.id, targetParticipantId);
+    if (!target) {
+      throw new Error("participant_not_found");
+    }
+
+    await client.query(
+      `UPDATE participant_transfer_codes
+       SET used_at = now()
+       WHERE room_id = $1
+         AND participant_id = $2
+         AND used_at IS NULL`,
+      [room.id, targetParticipantId],
+    );
+
+    const { transferCode, codeHash } = await createUniqueParticipantTransferCode(client, room.id);
+    const expiresAt = new Date(Date.now() + participantTransferCodeTtlMs).toISOString();
+
+    await client.query(
+      `INSERT INTO participant_transfer_codes (id, room_id, participant_id, created_by_participant_id, code_hash, expires_at)
+       VALUES ($1, $2, $3, $4, $5, $6)`,
+      [randomUUID(), room.id, targetParticipantId, requesterParticipantId, codeHash, expiresAt],
+    );
+
+    await client.query(
+      `INSERT INTO room_events (room_id, participant_id, event_type, payload)
+       VALUES ($1, $2, 'participant_transfer_code_created', $3::jsonb)`,
+      [room.id, requesterParticipantId, JSON.stringify({ targetParticipantId, targetName: target.name, expiresAt })],
+    );
+
+    await client.query("COMMIT");
+    return { participant: target, transferCode, expiresAt };
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function claimParticipantTransfer(code: string, transferCode: string) {
+  await ensureDatabaseMigrations();
+
+  const normalizedCode = normalizeRoomCode(code);
+  const normalizedTransferCode = normalizeParticipantTransferCode(transferCode);
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    const room = await findRoomForUpdate(client, normalizedCode);
+    if (!room) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+    if (room.status === "closed") {
+      throw new Error("room_closed");
+    }
+
+    const codeHash = hashParticipantTransferCode(room.id, normalizedTransferCode);
+    const transferCodeResult = await client.query<Pick<ParticipantTransferCodeRow, "id" | "participantId">>(
+      `SELECT tc.id,
+              tc.participant_id AS "participantId"
+       FROM participant_transfer_codes tc
+       INNER JOIN participants p ON p.id = tc.participant_id AND p.room_id = tc.room_id
+       WHERE tc.room_id = $1
+         AND tc.code_hash = $2
+         AND tc.used_at IS NULL
+         AND tc.expires_at > now()
+       FOR UPDATE OF tc`,
+      [room.id, codeHash],
+    );
+
+    const activeTransferCode = transferCodeResult.rows[0] ?? null;
+    if (!activeTransferCode) {
+      throw new Error("transfer_code_invalid");
+    }
+
+    await client.query(
+      `UPDATE participant_transfer_codes
+       SET used_at = now()
+       WHERE id = $1`,
+      [activeTransferCode.id],
+    );
+
+    const participantResult = await client.query<ParticipantRow>(
+      `UPDATE participants
+       SET connected = true,
+           updated_at = now()
+       WHERE id = $1 AND room_id = $2
+       RETURNING id, room_id AS "roomId", name, role, connected, created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [activeTransferCode.participantId, room.id],
+    );
+    const participant = participantResult.rows[0] ?? null;
+    if (!participant) {
+      throw new Error("participant_not_found");
+    }
+
+    await client.query(
+      `INSERT INTO room_events (room_id, participant_id, event_type, payload)
+       VALUES ($1, $2, 'participant_transfer_claimed', $3::jsonb)`,
+      [
+        room.id,
+        participant.id,
+        JSON.stringify({
+          targetParticipantId: participant.id,
+          targetName: participant.name,
+        }),
+      ],
+    );
+
+    await client.query("COMMIT");
+    const snapshot = await findRoomByCode(room.code);
+    return snapshot ? { participant, snapshot } : null;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function transferRoomHost(code: string, requesterParticipantId: string, targetParticipantId: string) {
@@ -399,6 +538,31 @@ async function migrateDatabase() {
       ALTER TABLE public.rooms
         ADD CONSTRAINT rooms_status_check
         CHECK (status IN ('waiting', 'playing', 'complete', 'closed'));
+
+      IF to_regclass('public.participants') IS NULL THEN
+        RETURN;
+      END IF;
+
+      CREATE TABLE IF NOT EXISTS public.participant_transfer_codes (
+        id uuid PRIMARY KEY,
+        room_id uuid NOT NULL REFERENCES public.rooms(id) ON DELETE CASCADE,
+        participant_id uuid NOT NULL REFERENCES public.participants(id) ON DELETE CASCADE,
+        created_by_participant_id uuid REFERENCES public.participants(id) ON DELETE SET NULL,
+        code_hash text NOT NULL,
+        expires_at timestamptz NOT NULL,
+        used_at timestamptz,
+        created_at timestamptz NOT NULL DEFAULT now()
+      );
+
+      CREATE UNIQUE INDEX IF NOT EXISTS participant_transfer_codes_room_hash_idx
+        ON public.participant_transfer_codes(room_id, code_hash);
+
+      CREATE INDEX IF NOT EXISTS participant_transfer_codes_participant_id_idx
+        ON public.participant_transfer_codes(participant_id);
+
+      CREATE INDEX IF NOT EXISTS participant_transfer_codes_active_idx
+        ON public.participant_transfer_codes(room_id, expires_at)
+        WHERE used_at IS NULL;
     END $$;
   `);
 }
@@ -442,6 +606,21 @@ async function createUniqueRoomCode(client: pg.PoolClient) {
   throw new Error("room_code_generation_failed");
 }
 
+async function createUniqueParticipantTransferCode(client: pg.PoolClient, roomId: string) {
+  for (let index = 0; index < 20; index += 1) {
+    const transferCode = randomParticipantTransferCode();
+    const codeHash = hashParticipantTransferCode(roomId, transferCode);
+    const existing = await client.query("SELECT 1 FROM participant_transfer_codes WHERE room_id = $1 AND code_hash = $2", [
+      roomId,
+      codeHash,
+    ]);
+    if (existing.rowCount === 0) {
+      return { transferCode, codeHash };
+    }
+  }
+  throw new Error("transfer_code_generation_failed");
+}
+
 function randomCode() {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
   let code = "";
@@ -449,4 +628,21 @@ function randomCode() {
     code += alphabet[Math.floor(Math.random() * alphabet.length)];
   }
   return code;
+}
+
+function randomParticipantTransferCode() {
+  const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+  let code = "";
+  for (let index = 0; index < 8; index += 1) {
+    code += alphabet[randomInt(alphabet.length)];
+  }
+  return code;
+}
+
+function normalizeParticipantTransferCode(code: string) {
+  return code.trim().toUpperCase();
+}
+
+function hashParticipantTransferCode(roomId: string, code: string) {
+  return createHash("sha256").update(`${roomId}:${normalizeParticipantTransferCode(code)}`).digest("hex");
 }

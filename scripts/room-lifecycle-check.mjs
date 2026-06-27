@@ -47,6 +47,64 @@ async function main() {
     assert.ok(player?.id, "player participant id is required");
   });
 
+  let claimedTransferCode;
+  let blockedTransferCode;
+  let supersededTransferCode;
+
+  await step("reject transfer code issue by non-host", async () => {
+    const result = await expectHttpFailure("POST", `/rooms/${roomCode}/participants/${player.id}/transfer-code`, {
+      body: { participantId: player.id },
+    });
+    assert.equal(result.response.status, 403);
+    assert.equal(result.data?.error, "host_required");
+  });
+
+  await step("issue and claim participant transfer code", async () => {
+    const issueResult = await request("POST", `/rooms/${roomCode}/participants/${player.id}/transfer-code`, {
+      body: { participantId: host.id },
+    });
+    claimedTransferCode = issueResult.data?.transferCode;
+    assert.equal(issueResult.data?.participant?.id, player.id, "transfer code must target the requested participant");
+    assert.match(claimedTransferCode ?? "", /^[A-Z2-9]{8}$/);
+    assert.ok(issueResult.data?.expiresAt, "transfer code response must include expiresAt");
+
+    const claimResult = await request("POST", `/rooms/${roomCode}/claim-transfer`, {
+      body: { transferCode: claimedTransferCode },
+    });
+    assert.equal(claimResult.data?.participant?.id, player.id, "claimed participant id must match original player");
+    assert.equal(claimResult.data?.participant?.role, player.role, "claimed participant role must match original player");
+    assert.equal(claimResult.data?.room?.code, roomCode, "claim response must include the room code");
+  });
+
+  await step("reject reused participant transfer code", async () => {
+    const result = await expectHttpFailure("POST", `/rooms/${roomCode}/claim-transfer`, {
+      body: { transferCode: claimedTransferCode },
+    });
+    assert.equal(result.response.status, 404);
+    assert.equal(result.data?.error, "transfer_code_invalid");
+  });
+
+  await step("reject superseded participant transfer code", async () => {
+    const firstIssueResult = await request("POST", `/rooms/${roomCode}/participants/${player.id}/transfer-code`, {
+      body: { participantId: host.id },
+    });
+    supersededTransferCode = firstIssueResult.data?.transferCode;
+    assert.match(supersededTransferCode ?? "", /^[A-Z2-9]{8}$/);
+
+    const secondIssueResult = await request("POST", `/rooms/${roomCode}/participants/${player.id}/transfer-code`, {
+      body: { participantId: host.id },
+    });
+    blockedTransferCode = secondIssueResult.data?.transferCode;
+    assert.match(blockedTransferCode ?? "", /^[A-Z2-9]{8}$/);
+    assert.notEqual(blockedTransferCode, supersededTransferCode, "a reissued transfer code should be newly generated");
+
+    const result = await expectHttpFailure("POST", `/rooms/${roomCode}/claim-transfer`, {
+      body: { transferCode: supersededTransferCode },
+    });
+    assert.equal(result.response.status, 404);
+    assert.equal(result.data?.error, "transfer_code_invalid");
+  });
+
   const spectator = await step("connect spectator socket without adding participant", async () => {
     const socket = await connectSocket("spectator");
     socket.emit("room:join", { roomCode });
@@ -146,9 +204,18 @@ async function main() {
       "game_completed",
       "game_reset",
       "room_closed",
+      "participant_transfer_code_created",
+      "participant_transfer_claimed",
     ]) {
       assert.ok(eventTypes.includes(expected), `event history must include ${expected}`);
     }
+    assert.equal(
+      JSON.stringify(events).includes(claimedTransferCode) ||
+        JSON.stringify(events).includes(blockedTransferCode) ||
+        JSON.stringify(events).includes(supersededTransferCode),
+      false,
+      "event history must not expose raw transfer codes",
+    );
   });
 
   await step("reject game start after room close", async () => {
@@ -184,6 +251,22 @@ async function main() {
       body: { participantId: host.id },
     });
     assert.equal(result.response.status, 409);
+  });
+
+  await step("reject transfer code issue after room close", async () => {
+    const result = await expectHttpFailure("POST", `/rooms/${roomCode}/participants/${player.id}/transfer-code`, {
+      body: { participantId: host.id },
+    });
+    assert.equal(result.response.status, 409);
+    assert.equal(result.data?.error, "room_closed");
+  });
+
+  await step("reject transfer code claim after room close", async () => {
+    const result = await expectHttpFailure("POST", `/rooms/${roomCode}/claim-transfer`, {
+      body: { transferCode: blockedTransferCode },
+    });
+    assert.equal(result.response.status, 409);
+    assert.equal(result.data?.error, "room_closed");
   });
 
   await step("reject socket state update after room close", async () => {

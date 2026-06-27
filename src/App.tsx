@@ -3,9 +3,11 @@ import type { LucideIcon } from "lucide-react";
 import {
   Check,
   ChevronRight,
+  Copy,
   Eye,
   EyeOff,
   Home,
+  KeyRound,
   ListChecks,
   MessageCircleQuestion,
   Pause,
@@ -155,6 +157,26 @@ type RoomSession = {
   participantId: string;
   participantName: string;
   participantRole: "host" | "player";
+};
+
+type ClaimTransferResponse = {
+  participant?: RoomParticipant | null;
+  participantId?: string | null;
+  room?: RoomInfo | null;
+  participants?: RoomParticipant[];
+};
+
+type TransferCodeResponse = {
+  transferCode?: string;
+  expiresAt?: string | null;
+  participant?: RoomParticipant | null;
+};
+
+type IssuedTransferCode = {
+  participantId: string;
+  participantName: string;
+  transferCode: string;
+  expiresAt: string | null;
 };
 
 type GameCardImage = {
@@ -502,6 +524,12 @@ function formatClockTime(value: string | number | Date) {
   });
 }
 
+function formatTransferExpiry(value: string | null) {
+  if (!value) return "";
+  const clockTime = formatClockTime(value);
+  return clockTime ? `${clockTime}まで` : "";
+}
+
 type SyncedTimerFields = {
   remainingSeconds: number;
   timerRunning: boolean;
@@ -800,6 +828,9 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   const [hostName, setHostName] = useState("");
   const [joinCode, setJoinCode] = useState("");
   const [joinName, setJoinName] = useState("");
+  const [transferRoomCode, setTransferRoomCode] = useState("");
+  const [transferCode, setTransferCode] = useState("");
+  const [issuedTransferCode, setIssuedTransferCode] = useState<IssuedTransferCode | null>(null);
   const [observerCode, setObserverCode] = useState("");
   const [spectatorRoomCode, setSpectatorRoomCode] = useState<string | null>(null);
   const [selectedRoomGame, setSelectedRoomGame] = useState<GameKey>("werewolf-game");
@@ -944,6 +975,12 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   const progress = snapshot ? parseRoomProgress(snapshot) : null;
   const currentGame = progress?.gameKey ? findGameMeta(progress.gameKey) : null;
   const connectedCount = snapshot?.participants.filter((item) => item.connected).length ?? 0;
+  const issuedTransferCodeIsVisible = Boolean(
+    issuedTransferCode &&
+      isHost &&
+      !roomClosed &&
+      snapshot?.participants.some((item) => item.id === issuedTransferCode.participantId),
+  );
   const socketStatusLabel =
     socketStatus === "connected"
       ? "接続中"
@@ -953,6 +990,12 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
           ? "再接続中"
           : "未接続";
   const savedSessionRoleLabel = savedSession?.participantRole === "host" ? "ホスト" : "参加者";
+
+  useEffect(() => {
+    if (issuedTransferCode && !issuedTransferCodeIsVisible) {
+      setIssuedTransferCode(null);
+    }
+  }, [issuedTransferCode, issuedTransferCodeIsVisible]);
 
   async function restoreSavedRoomSession(session = savedSession) {
     if (!session) {
@@ -964,8 +1007,10 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     setResumeStatus("checking");
     setError("");
     setNotice("");
+    setIssuedTransferCode(null);
     setJoinCode(session.roomCode);
     setObserverCode(session.roomCode);
+    setTransferRoomCode(session.roomCode);
     try {
       const roomSnapshot = await fetchRoomSnapshot(session.roomCode, session.participantId);
       const savedParticipant = roomSnapshot.participants.find((item) => item.id === session.participantId) ?? null;
@@ -1011,6 +1056,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     setLastRoomSyncAt(null);
     setResumeStatus("idle");
     setSocketStatus("idle");
+    setIssuedTransferCode(null);
     setNotice("保存済みのルーム情報を消しました。");
     setError("");
   }
@@ -1074,6 +1120,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     setIsBusy(true);
     setError("");
     setNotice("");
+    setIssuedTransferCode(null);
     try {
       const result = await requestJson<{ room: RoomInfo; host: RoomParticipant | null }>("/rooms", {
         method: "POST",
@@ -1088,6 +1135,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       void loadRoomEvents(result.room.code, result.host?.id ?? null);
       setJoinCode(result.room.code);
       setObserverCode(result.room.code);
+      setTransferRoomCode(result.room.code);
       setNotice("ルームを作成しました。コードを参加者に共有してください。");
     } catch (caught) {
       setError(toErrorMessage(caught));
@@ -1107,6 +1155,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     setIsBusy(true);
     setError("");
     setNotice("");
+    setIssuedTransferCode(null);
     try {
       const result = await requestJson<{ participant: RoomParticipant; room: RoomInfo | null }>(
         `/rooms/${encodeURIComponent(code)}/join`,
@@ -1124,7 +1173,57 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       void loadRoomEvents(code, result.participant.id);
       setJoinCode(code);
       setObserverCode(code);
+      setTransferRoomCode(code);
       setNotice("ルームに参加しました。");
+    } catch (caught) {
+      setError(toErrorMessage(caught));
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function claimTransferCode() {
+    const code = normalizeInputRoomCode(transferRoomCode);
+    const codeToClaim = normalizeInputTransferCode(transferCode);
+    if (!code || !codeToClaim) {
+      setError("ルームコードと引き継ぎコードを入力してください。");
+      return;
+    }
+
+    setIsBusy(true);
+    setError("");
+    setNotice("");
+    setIssuedTransferCode(null);
+    try {
+      const result = await requestJson<ClaimTransferResponse>(`/rooms/${encodeURIComponent(code)}/claim-transfer`, {
+        method: "POST",
+        body: { transferCode: codeToClaim },
+      });
+      const claimedParticipant =
+        result.participant ??
+        (result.participantId && result.participants
+          ? result.participants.find((item) => item.id === result.participantId) ?? null
+          : null);
+      if (!claimedParticipant) throw new Error("participant_required");
+
+      const roomSnapshot =
+        result.room && Array.isArray(result.participants)
+          ? { room: result.room, participants: result.participants }
+          : await fetchRoomSnapshot(result.room?.code ?? code, claimedParticipant.id);
+
+      setSnapshot(roomSnapshot);
+      setParticipant(claimedParticipant);
+      setSpectatorRoomCode(null);
+      rememberRoomSession(roomSnapshot.room.code, claimedParticipant);
+      markRoomSynced();
+      void loadRoomEvents(roomSnapshot.room.code, claimedParticipant.id);
+      const runningGame = toGameKey(roomSnapshot.room.currentGame);
+      if (runningGame) setSelectedRoomGame(runningGame);
+      setJoinCode(roomSnapshot.room.code);
+      setObserverCode(roomSnapshot.room.code);
+      setTransferRoomCode(roomSnapshot.room.code);
+      setTransferCode("");
+      setNotice(`${claimedParticipant.name}さんとして復帰しました。`);
     } catch (caught) {
       setError(toErrorMessage(caught));
     } finally {
@@ -1142,6 +1241,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     setIsBusy(true);
     setError("");
     setNotice("");
+    setIssuedTransferCode(null);
     try {
       const roomSnapshot = await fetchRoomSnapshot(code);
       setSnapshot(roomSnapshot);
@@ -1153,6 +1253,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       if (runningGame) setSelectedRoomGame(runningGame);
       setJoinCode(roomSnapshot.room.code);
       setObserverCode(roomSnapshot.room.code);
+      setTransferRoomCode(roomSnapshot.room.code);
       setNotice("観戦モードでルームを開きました。参加者としては追加されず、操作はできません。");
     } catch (caught) {
       setError(toErrorMessage(caught));
@@ -1273,6 +1374,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     if (wasParticipant) forgetRoomSession();
     setLastRoomSyncAt(null);
     setSocketStatus("idle");
+    setIssuedTransferCode(null);
     setNotice("");
     setError("");
   }
@@ -1284,6 +1386,45 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       setNotice("ルームコードをコピーしました。");
     } catch {
       setNotice(`ルームコード: ${snapshot.room.code}`);
+    }
+  }
+
+  async function issueTransferCode(targetParticipant: RoomParticipant) {
+    if (!snapshot || !participant || !isHost || roomClosed) return;
+    setIsBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await requestJson<TransferCodeResponse>(
+        `/rooms/${encodeURIComponent(snapshot.room.code)}/participants/${encodeURIComponent(targetParticipant.id)}/transfer-code`,
+        {
+          method: "POST",
+          body: { participantId: participant.id },
+        },
+      );
+      if (!result.transferCode) throw new Error("transfer_code_required");
+      const target = result.participant ?? targetParticipant;
+      setIssuedTransferCode({
+        participantId: target.id,
+        participantName: target.name,
+        transferCode: result.transferCode,
+        expiresAt: result.expiresAt ?? null,
+      });
+      setNotice("引き継ぎコードを発行しました。");
+    } catch (caught) {
+      setError(toErrorMessage(caught));
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
+  async function copyIssuedTransferCode() {
+    if (!issuedTransferCode) return;
+    try {
+      await navigator.clipboard.writeText(issuedTransferCode.transferCode);
+      setNotice("引き継ぎコードをコピーしました。");
+    } catch {
+      setNotice(`引き継ぎコード: ${issuedTransferCode.transferCode}`);
     }
   }
 
@@ -1410,6 +1551,31 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
           </div>
         </div>
 
+        <div className="room-form room-transfer-form">
+          <h3>引き継ぎコードで復帰</h3>
+          <p className="soft-note">別端末でも同じ参加者として戻れます。</p>
+          <div className="room-button-row">
+            <input
+              value={transferRoomCode}
+              onChange={(event) => setTransferRoomCode(event.currentTarget.value.toUpperCase())}
+              placeholder="ルームコード"
+              inputMode="text"
+            />
+            <input
+              value={transferCode}
+              onChange={(event) => setTransferCode(normalizeInputTransferCode(event.currentTarget.value))}
+              placeholder="引き継ぎコード"
+              inputMode="text"
+              autoComplete="one-time-code"
+              maxLength={8}
+            />
+            <button className="secondary-button" type="button" disabled={isBusy || apiStatus !== "ready"} onClick={claimTransferCode}>
+              <KeyRound size={18} />
+              復帰
+            </button>
+          </div>
+        </div>
+
         <div className="room-form">
           <h3>観戦で見る</h3>
           <p className="soft-note">参加者に数えず、進行・履歴・接続状況だけを確認します。</p>
@@ -1433,7 +1599,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
           <div>
             <h3>前回のルームに戻る</h3>
             <p className="soft-note">
-              {savedSession.roomCode} / {savedSession.participantName}（{savedSessionRoleLabel}）としてこのブラウザに保存されています。別端末ではルームコードで参加してください。
+              {savedSession.roomCode} / {savedSession.participantName}（{savedSessionRoleLabel}）としてこのブラウザに保存されています。別端末で同じ参加者として戻る場合は、ホストに引き継ぎコードを発行してもらってください。
             </p>
           </div>
           <div className="room-game-controls">
@@ -1582,6 +1748,10 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
                     </div>
                     {isHost && !roomClosed && (
                       <div className="participant-actions">
+                        <button className="secondary-button" type="button" disabled={isBusy} onClick={() => issueTransferCode(item)}>
+                          <KeyRound size={16} />
+                          発行
+                        </button>
                         {item.role !== "host" && (
                           <button className="secondary-button" type="button" disabled={isBusy} onClick={() => transferHost(item)}>
                             <Users size={16} />
@@ -1599,6 +1769,19 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
                 );
               })}
             </div>
+            {issuedTransferCodeIsVisible && issuedTransferCode && (
+              <div className="transfer-code-panel" role="status">
+                <div className="transfer-code-copy">
+                  <span>{issuedTransferCode.participantName}さん用</span>
+                  <strong>{issuedTransferCode.transferCode}</strong>
+                  {issuedTransferCode.expiresAt && <small>{formatTransferExpiry(issuedTransferCode.expiresAt)}</small>}
+                </div>
+                <button className="secondary-button" type="button" onClick={copyIssuedTransferCode}>
+                  <Copy size={16} />
+                  コピー
+                </button>
+              </div>
+            )}
             {isSpectating ? (
               <p className="soft-note">観戦中は参加者として数えられず、ホスト交代や参加者整理もできません。</p>
             ) : roomClosed ? (
@@ -1742,6 +1925,10 @@ function normalizeInputRoomCode(value: string) {
   return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
+function normalizeInputTransferCode(value: string) {
+  return value.trim().toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 8);
+}
+
 function toErrorMessage(error: unknown) {
   const value = error instanceof Error ? error.message : String(error);
   const messages: Record<string, string> = {
@@ -1762,6 +1949,11 @@ function toErrorMessage(error: unknown) {
     game_mismatch: "現在のゲームと更新内容が一致しません。画面を更新してください。",
     participant_update_mismatch: "別の参加者としての更新はできません。",
     participant_field_forbidden: "この端末では、その回答欄や投票欄は変更できません。",
+    transfer_code_required: "引き継ぎコードを入力してください。",
+    transfer_code_invalid: "引き継ぎコードが違います。",
+    transfer_code_expired: "引き継ぎコードの期限が切れています。",
+    transfer_code_used: "この引き継ぎコードは使用済みです。",
+    transfer_code_rate_limited: "引き継ぎコードの試行回数が多すぎます。少し待ってからやり直してください。",
     Failed_to_fetch: "APIに接続できません。Docker版が起動しているか確認してください。",
   };
   return messages[value] ?? "処理に失敗しました。APIサーバーの状態を確認してください。";

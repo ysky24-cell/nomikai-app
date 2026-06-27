@@ -44,6 +44,8 @@ VITE_API_URL=http://192.168.1.10:3000
 
 ポートを変えた場合は、`CLIENT_ORIGIN` と `VITE_API_URL` にも外から見えるポートを反映します。ブラウザ上の `localhost` はNASではなく閲覧端末自身を指すため、Synology運用では `localhost` を使わないでください。
 
+参加者のスマホや別PCから開く場合も、共有するURLは `http://NAS_IP:5173/nomikai-app/` です。`VITE_API_URL` が `http://localhost:3000` のままだと、ルーム参加、Socket.IO同期、引き継ぎコードでの復帰が参加者端末から失敗します。
+
 ## 起動
 
 SSHでNASに入り、配置先ディレクトリで実行します。
@@ -66,6 +68,14 @@ http://192.168.1.10:5173/nomikai-app/
 ```
 
 Container Manager の「プロジェクト」から作成する場合も、Compose ファイルには `docker-compose.synology.yml` を使い、環境変数には上記 `.env` と同じ値を入れます。
+
+## 参加者引き継ぎコード
+
+別端末や別ブラウザで同じ参加者として復帰する場合は、ホスト端末で参加者一覧の「発行」を押し、対象参加者用の引き継ぎコードを出します。参加者は新しい端末で `http://NAS_IP:5173/nomikai-app/` を開き、「引き継ぎコードで復帰」にルームコードと引き継ぎコードを入力します。
+
+引き継ぎコードは8桁、10分有効で、一回使用すると無効になります。同じ参加者へ再発行した場合も、前に出した未使用コードは無効です。期限切れ、使用済み、対象参加者が削除済みの場合は復帰できないため、ホストが新しいコードを発行します。
+
+この操作も参加者端末のブラウザからAPIへ直接アクセスします。Synology上で動いていても `localhost` ではなく、参加者端末から到達できるNAS IPまたは設定済みドメインを `VITE_API_URL` に入れてください。
 
 ## このComposeでの違い
 
@@ -106,7 +116,7 @@ cat nomikai-backup.sql | docker compose -p nomikai-app -f docker-compose.synolog
 
 - ポート競合: `5173` や `3000` が他コンテナと重なる場合は `WEB_PORT` / `API_PORT` を変え、`CLIENT_ORIGIN` / `VITE_API_URL` も合わせます。
 - CORS: フロントを開いたURLのオリジンと `CLIENT_ORIGIN` が一致していないと、APIやSocket.IO接続が失敗します。
-- API URL: `VITE_API_URL=http://localhost:3000` のままだと、参加者のスマホが自分自身へ接続しに行きます。
+- API URL: `VITE_API_URL=http://localhost:3000` のままだと、参加者のスマホが自分自身へ接続しに行きます。引き継ぎコードでの復帰もAPIに届かないため、LAN内運用では `http://NAS_IP:3000` を使います。
 - DB永続化: `postgres_data` ボリュームを削除するとルーム履歴も消えます。Container Manager の削除操作でボリュームまで消さないよう注意します。
 - DB初期値: `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` は初回に `postgres_data` が作られる時だけ反映されます。ボリューム作成後に変える場合は、DB内のユーザー変更またはバックアップ後の再作成が必要です。
 - 日本語パス: NAS上の配置先は `/volume1/docker/nomikai-app` のようなASCIIパスを推奨します。

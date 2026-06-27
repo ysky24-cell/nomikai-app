@@ -6,7 +6,9 @@ import { config } from "./config.js";
 import {
   addParticipant,
   checkDatabase,
+  claimParticipantTransfer,
   closeRoom,
+  createParticipantTransferCode,
   createRoom,
   findRoomByCode,
   listRoomEvents,
@@ -21,6 +23,9 @@ import { checkRedis, redis } from "./redis.js";
 
 const app = express();
 const server = http.createServer(app);
+const transferClaimWindowMs = 10 * 60 * 1000;
+const transferClaimMaxAttempts = 30;
+const transferClaimAttempts = new Map<string, { attempts: number; resetAt: number }>();
 const io = new Server(server, {
   cors: {
     origin: config.clientOrigin,
@@ -126,6 +131,52 @@ app.post("/rooms/:code/host/transfer", async (request, response, next) => {
 
     await emitRoomSnapshot(snapshot.room.code);
     response.json(sanitizeRoomSnapshotForParticipant(snapshot, findParticipant(snapshot, requesterParticipantId)));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/rooms/:code/participants/:targetParticipantId/transfer-code", async (request, response, next) => {
+  try {
+    const requesterParticipantId = readRequiredString(request.body?.participantId, "participant_id");
+    const result = await createParticipantTransferCode(request.params.code, requesterParticipantId, request.params.targetParticipantId);
+    if (!result) {
+      response.status(404).json({ error: "room_not_found" });
+      return;
+    }
+
+    const snapshot = await findRoomByCode(request.params.code);
+    if (snapshot) {
+      await emitRoomSnapshot(snapshot.room.code);
+    }
+
+    response.status(201).json({
+      participant: result.participant,
+      transferCode: result.transferCode,
+      expiresAt: result.expiresAt,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/rooms/:code/claim-transfer", async (request, response, next) => {
+  try {
+    if (!allowTransferClaimAttempt(request)) {
+      response.status(429).json({ error: "transfer_code_rate_limited" });
+      return;
+    }
+
+    const transferCode = readRequiredString(request.body?.transferCode, "transfer_code");
+    const result = await claimParticipantTransfer(request.params.code, transferCode);
+    if (!result) {
+      response.status(404).json({ error: "room_not_found" });
+      return;
+    }
+
+    await emitRoomSnapshot(result.snapshot.room.code);
+    const participantSnapshot = sanitizeRoomSnapshotForParticipant(result.snapshot, result.participant);
+    response.json({ participant: result.participant, room: participantSnapshot.room });
   } catch (error) {
     next(error);
   }
@@ -515,6 +566,10 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
     response.status(404).json({ error: message });
     return;
   }
+  if (message === "transfer_code_invalid") {
+    response.status(404).json({ error: message });
+    return;
+  }
   response.status(400).json({ error: message });
 });
 
@@ -541,6 +596,32 @@ function readRequiredString(value: unknown, field: string) {
     throw new Error(`${field}_required`);
   }
   return value.trim();
+}
+
+function allowTransferClaimAttempt(request: express.Request) {
+  const now = Date.now();
+  const codeParam = request.params.code;
+  const roomCode = typeof codeParam === "string" ? codeParam.trim().toUpperCase() || "unknown" : "unknown";
+  const address = request.ip || request.socket.remoteAddress || "unknown";
+  const key = `${roomCode}:${address}`;
+  const current = transferClaimAttempts.get(key);
+
+  if (!current || current.resetAt <= now) {
+    transferClaimAttempts.set(key, { attempts: 1, resetAt: now + transferClaimWindowMs });
+    pruneTransferClaimAttempts(now);
+    return true;
+  }
+
+  if (current.attempts >= transferClaimMaxAttempts) return false;
+  current.attempts += 1;
+  return true;
+}
+
+function pruneTransferClaimAttempts(now: number) {
+  if (transferClaimAttempts.size < 1000) return;
+  for (const [key, value] of transferClaimAttempts) {
+    if (value.resetAt <= now) transferClaimAttempts.delete(key);
+  }
 }
 
 function readRoomStatusFromState(stateValue: unknown, currentGame: string | null) {
@@ -701,6 +782,14 @@ function summarizeRoomEventPayload(eventType: string, value: unknown) {
   const state = asRecord(payload.state);
   const summary: Record<string, unknown> = {};
 
+  if (eventType === "participant_transfer_code_created" || eventType === "participant_transfer_claimed") {
+    copyStringField(summary, "message", defaultRoomEventMessage(eventType));
+    copyStringField(summary, "targetParticipantId", payload.targetParticipantId);
+    copyStringField(summary, "targetName", payload.targetName);
+    copyStringField(summary, "expiresAt", payload.expiresAt);
+    return summary;
+  }
+
   copyStringField(summary, "status", payload.status);
   copyStringField(summary, "currentGame", payload.currentGame);
   copyStringField(summary, "gameKey", payload.gameKey ?? state?.gameKey ?? payload.currentGame);
@@ -736,6 +825,8 @@ function defaultRoomEventMessage(eventType: string) {
   if (eventType === "participant_joined") return "参加者が入りました";
   if (eventType === "participant_removed") return "参加者を外しました";
   if (eventType === "host_transferred") return "ホストを交代しました";
+  if (eventType === "participant_transfer_code_created") return "参加者引き継ぎコードを発行しました";
+  if (eventType === "participant_transfer_claimed") return "参加者を引き継ぎました";
   if (eventType === "game_started") return "ゲームを開始しました";
   if (eventType === "game_advanced") return "次の進行へ進みました";
   if (eventType === "game_completed") return "ゲームを完了しました";

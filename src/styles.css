@@ -404,7 +404,7 @@ select:focus {
 
 .room-actions-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
   gap: 12px;
 }
 
@@ -602,6 +602,43 @@ select:focus {
 
 .participant-actions .secondary-button {
   padding: 8px 10px;
+}
+
+.participant-actions .ghost-icon-button {
+  padding: 8px;
+}
+
+.transfer-code-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid #b9d9ca;
+  border-radius: 8px;
+  background: #eff8f3;
+  padding: 10px;
+}
+
+.transfer-code-copy {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+}
+
+.transfer-code-copy span,
+.transfer-code-copy small {
+  color: var(--muted);
+  font-size: 0.82rem;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.transfer-code-copy strong {
+  color: var(--teal);
+  font-size: 1.16rem;
+  font-weight: 900;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .room-message {
@@ -1741,6 +1778,14 @@ select:focus {
 
   .room-participant-card {
     grid-template-columns: 1fr;
+  }
+
+  .transfer-code-panel {
+    grid-template-columns: 1fr;
+  }
+
+  .transfer-code-panel .secondary-button {
+    width: 100%;
   }
 
   .room-history-heading,
