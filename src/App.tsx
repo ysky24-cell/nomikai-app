@@ -128,6 +128,16 @@ type RoomSnapshot = {
   participants: RoomParticipant[];
 };
 
+type RoomEvent = {
+  id: string;
+  roomId: string;
+  participantId: string | null;
+  participantName: string | null;
+  eventType: string;
+  payload: unknown;
+  createdAt: string;
+};
+
 type RoomProgressPhase = "lobby" | "playing" | "complete";
 
 type RoomProgressState = {
@@ -795,6 +805,9 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   const [selectedRoomGame, setSelectedRoomGame] = useState<GameKey>("werewolf-game");
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
   const [participant, setParticipant] = useState<RoomParticipant | null>(null);
+  const [roomEvents, setRoomEvents] = useState<RoomEvent[]>([]);
+  const [eventsLoading, setEventsLoading] = useState(false);
+  const [eventsError, setEventsError] = useState("");
   const [isBusy, setIsBusy] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
@@ -890,6 +903,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       if (!nextSnapshot) return;
       markRoomSynced();
       setSnapshot(nextSnapshot);
+      void loadRoomEvents(nextSnapshot.room.code, participant?.id ?? null);
       const runningGame = toGameKey(nextSnapshot.room.currentGame);
       if (runningGame) setSelectedRoomGame(runningGame);
       if (!participant) return;
@@ -900,6 +914,8 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
         socketRef.current = null;
         setParticipant(null);
         setSnapshot(null);
+        setRoomEvents([]);
+        setEventsError("");
         forgetRoomSession();
         setSocketStatus("idle");
         setNotice("この端末の参加者はルームから退出しました。");
@@ -924,6 +940,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
 
   const isHost = participant?.role === "host";
   const isSpectating = Boolean(snapshot && !participant && spectatorRoomCode === snapshot.room.code);
+  const roomClosed = snapshot?.room.status === "closed";
   const progress = snapshot ? parseRoomProgress(snapshot) : null;
   const currentGame = progress?.gameKey ? findGameMeta(progress.gameKey) : null;
   const connectedCount = snapshot?.participants.filter((item) => item.connected).length ?? 0;
@@ -957,6 +974,8 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
         socketRef.current = null;
         setSnapshot(null);
         setParticipant(null);
+        setRoomEvents([]);
+        setEventsError("");
         forgetRoomSession();
         setResumeStatus("failed");
         setSocketStatus("idle");
@@ -969,6 +988,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       setSpectatorRoomCode(null);
       rememberRoomSession(roomSnapshot.room.code, savedParticipant);
       markRoomSynced();
+      void loadRoomEvents(roomSnapshot.room.code, savedParticipant.id);
       const runningGame = toGameKey(roomSnapshot.room.currentGame);
       if (runningGame) setSelectedRoomGame(runningGame);
       setResumeStatus("idle");
@@ -986,6 +1006,8 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     setSnapshot(null);
     setParticipant(null);
     setSpectatorRoomCode(null);
+    setRoomEvents([]);
+    setEventsError("");
     setLastRoomSyncAt(null);
     setResumeStatus("idle");
     setSocketStatus("idle");
@@ -993,9 +1015,29 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     setError("");
   }
 
+  async function loadRoomEvents(roomCode = snapshot?.room.code, requesterParticipantId = participant?.id ?? null) {
+    if (!roomCode) {
+      setEventsError("履歴を取得するルームがありません。");
+      return;
+    }
+
+    setEventsLoading(true);
+    setEventsError("");
+    try {
+      const query = requesterParticipantId ? `?participantId=${encodeURIComponent(requesterParticipantId)}` : "";
+      const result = await requestJson<{ events: RoomEvent[] }>(`/rooms/${encodeURIComponent(roomCode)}/events${query}`);
+      setRoomEvents(Array.isArray(result.events) ? result.events : []);
+    } catch (caught) {
+      setEventsError(toErrorMessage(caught));
+    } finally {
+      setEventsLoading(false);
+    }
+  }
+
   function applyRoomSnapshot(nextSnapshot: RoomSnapshot, nextNotice?: string) {
     markRoomSynced();
     setSnapshot(nextSnapshot);
+    void loadRoomEvents(nextSnapshot.room.code, participant?.id ?? null);
     if (!participant) {
       if (nextNotice) setNotice(nextNotice);
       return;
@@ -1007,6 +1049,8 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       socketRef.current = null;
       setSnapshot(null);
       setParticipant(null);
+      setRoomEvents([]);
+      setEventsError("");
       forgetRoomSession();
       setSocketStatus("idle");
       setNotice("この端末の参加者はルームから退出しました。もう一度参加する場合はコードで入り直してください。");
@@ -1041,6 +1085,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       setSpectatorRoomCode(null);
       rememberRoomSession(result.room.code, result.host);
       markRoomSynced();
+      void loadRoomEvents(result.room.code, result.host?.id ?? null);
       setJoinCode(result.room.code);
       setObserverCode(result.room.code);
       setNotice("ルームを作成しました。コードを参加者に共有してください。");
@@ -1076,6 +1121,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       setSpectatorRoomCode(null);
       rememberRoomSession(code, result.participant);
       markRoomSynced();
+      void loadRoomEvents(code, result.participant.id);
       setJoinCode(code);
       setObserverCode(code);
       setNotice("ルームに参加しました。");
@@ -1102,6 +1148,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       setParticipant(null);
       setSpectatorRoomCode(roomSnapshot.room.code);
       markRoomSynced();
+      void loadRoomEvents(roomSnapshot.room.code, null);
       const runningGame = toGameKey(roomSnapshot.room.currentGame);
       if (runningGame) setSelectedRoomGame(runningGame);
       setJoinCode(roomSnapshot.room.code);
@@ -1115,7 +1162,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   }
 
   async function startRoomGame() {
-    if (!snapshot || !participant) return;
+    if (!snapshot || !participant || roomClosed) return;
     const game = findGameMeta(selectedRoomGame);
     if (!game) return;
 
@@ -1136,7 +1183,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   }
 
   async function advanceRoomGame() {
-    if (!snapshot || !participant) return;
+    if (!snapshot || !participant || roomClosed) return;
     setIsBusy(true);
     setError("");
     try {
@@ -1156,7 +1203,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   }
 
   async function completeRoomGame() {
-    if (!snapshot || !participant) return;
+    if (!snapshot || !participant || roomClosed) return;
     setIsBusy(true);
     setError("");
     try {
@@ -1176,7 +1223,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   }
 
   async function resetRoomGame() {
-    if (!snapshot || !participant) return;
+    if (!snapshot || !participant || roomClosed) return;
     setIsBusy(true);
     setError("");
     try {
@@ -1192,6 +1239,28 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     }
   }
 
+  async function closeRoomForEveryone() {
+    if (!snapshot || !participant || !isHost || roomClosed) return;
+    const confirmed = window.confirm("このルームを終了しますか？終了後は進行や参加者整理ができず、履歴だけ確認できます。");
+    if (!confirmed) return;
+
+    setIsBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const nextSnapshot = await requestJson<RoomSnapshot>(`/rooms/${encodeURIComponent(snapshot.room.code)}/close`, {
+        method: "POST",
+        body: { participantId: participant.id },
+      });
+      applyRoomSnapshot(nextSnapshot, "ルームを終了しました。履歴だけ確認できます。");
+      void loadRoomEvents(nextSnapshot.room.code, participant.id);
+    } catch (caught) {
+      setError(toErrorMessage(caught));
+    } finally {
+      setIsBusy(false);
+    }
+  }
+
   function leaveLocalRoom() {
     const wasParticipant = Boolean(participant);
     socketRef.current?.disconnect();
@@ -1199,6 +1268,8 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     setSnapshot(null);
     setParticipant(null);
     setSpectatorRoomCode(null);
+    setRoomEvents([]);
+    setEventsError("");
     if (wasParticipant) forgetRoomSession();
     setLastRoomSyncAt(null);
     setSocketStatus("idle");
@@ -1228,6 +1299,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     try {
       const roomSnapshot = await fetchRoomSnapshot(code, participant?.id ?? (isSpectating ? null : readRoomSession()?.participantId));
       applyRoomSnapshot(roomSnapshot, "ルーム情報を更新しました。");
+      void loadRoomEvents(roomSnapshot.room.code, participant?.id ?? null);
     } catch (caught) {
       setError(toErrorMessage(caught));
     } finally {
@@ -1236,7 +1308,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   }
 
   async function transferHost(targetParticipant: RoomParticipant) {
-    if (!snapshot || !participant || !isHost) return;
+    if (!snapshot || !participant || !isHost || roomClosed) return;
     setIsBusy(true);
     setError("");
     setNotice("");
@@ -1254,7 +1326,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   }
 
   async function removeParticipant(targetParticipant: RoomParticipant) {
-    if (!snapshot || !participant || !isHost) return;
+    if (!snapshot || !participant || !isHost || roomClosed) return;
     const confirmed = window.confirm(`${targetParticipant.name}さんをこのルームから外しますか？`);
     if (!confirmed) return;
 
@@ -1278,7 +1350,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   }
 
   function openCurrentRoomGame() {
-    if (progress?.gameKey && snapshot && participant) {
+    if (progress?.gameKey && snapshot && participant && !roomClosed) {
       const roomSession: RoomSession = {
         roomCode: snapshot.room.code,
         participantId: participant.id,
@@ -1302,6 +1374,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
           <span>API: {apiStatus === "ready" ? "OK" : apiStatus === "checking" ? "確認中" : "停止中"}</span>
           <span>同期: {socketStatusLabel}</span>
           {isSpectating && <span>表示: 観戦中</span>}
+          {roomClosed && <span>状態: 終了済み</span>}
           {snapshot && <span>参加: {connectedCount}/{snapshot.participants.length} 接続</span>}
           {lastRoomSyncAt && <span>最終同期: {formatClockTime(lastRoomSyncAt)}</span>}
         </div>
@@ -1385,6 +1458,11 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
               同期接続が切れています。自動再接続を待つか、「更新」で現在の状態を取り直してください。
             </p>
           )}
+          {roomClosed && (
+            <p className="room-message">
+              ルーム終了済みです。ゲーム進行と参加者整理は停止し、現在の履歴だけ確認できます。
+            </p>
+          )}
 
           <div className="room-current">
             <div>
@@ -1395,10 +1473,12 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
             </div>
             <div>
               <p className="eyebrow">現在のゲーム</p>
-              <h3>{currentGame ? currentGame.title : "待機中"}</h3>
+              <h3>{roomClosed ? "終了済み" : currentGame ? currentGame.title : "待機中"}</h3>
               <p className="soft-note">
-                {progress?.message || "ホストがゲームを開始すると参加者に同期されます。"}
-                {progress && progress.step > 0 ? ` / ステップ ${progress.step}` : ""}
+                {roomClosed
+                  ? "このルームは終了しています。下の履歴を見ながら振り返れます。"
+                  : progress?.message || "ホストがゲームを開始すると参加者に同期されます。"}
+                {!roomClosed && progress && progress.step > 0 ? ` / ステップ ${progress.step}` : ""}
               </p>
             </div>
             <div className="room-current-actions">
@@ -1406,6 +1486,12 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
                 <RotateCcw size={18} />
                 更新
               </button>
+              {isHost && (
+                <button className="danger-button" type="button" disabled={isBusy || roomClosed} onClick={closeRoomForEveryone}>
+                  <ShieldAlert size={18} />
+                  ルーム終了
+                </button>
+              )}
               <button className="secondary-button" type="button" onClick={leaveLocalRoom}>
                 {isSpectating ? "観戦を終了" : "この端末だけ退出"}
               </button>
@@ -1419,7 +1505,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
                 <select
                   value={selectedRoomGame}
                   onChange={(event) => setSelectedRoomGame(event.currentTarget.value as GameKey)}
-                  disabled={!isHost || isBusy}
+                  disabled={!isHost || isBusy || roomClosed}
                 >
                   {activeGames.map((game) => (
                     <option value={game.key} key={game.key}>
@@ -1429,23 +1515,24 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
                 </select>
               </label>
               <div className="room-game-controls">
-                <button className="primary-button" type="button" disabled={!isHost || isBusy} onClick={startRoomGame}>
+                <button className="primary-button" type="button" disabled={!isHost || isBusy || roomClosed} onClick={startRoomGame}>
                   <Play size={18} />
                   ルームで開始
                 </button>
-                <button className="secondary-button" type="button" disabled={!isHost || isBusy || !currentGame} onClick={advanceRoomGame}>
+                <button className="secondary-button" type="button" disabled={!isHost || isBusy || roomClosed || !currentGame} onClick={advanceRoomGame}>
                   <ChevronRight size={18} />
                   次へ
                 </button>
-                <button className="secondary-button" type="button" disabled={!isHost || isBusy || !currentGame} onClick={completeRoomGame}>
+                <button className="secondary-button" type="button" disabled={!isHost || isBusy || roomClosed || !currentGame} onClick={completeRoomGame}>
                   <Trophy size={18} />
                   完了
                 </button>
-                <button className="secondary-button" type="button" disabled={!isHost || isBusy} onClick={resetRoomGame}>
+                <button className="secondary-button" type="button" disabled={!isHost || isBusy || roomClosed} onClick={resetRoomGame}>
                   <RotateCcw size={18} />
                   待機に戻す
                 </button>
               </div>
+              {roomClosed && <p className="soft-note">終了済みのルームでは、進行操作はできません。</p>}
               {!isHost && <p className="soft-note">ゲーム開始や進行操作はホスト端末で行います。</p>}
             </div>
           ) : (
@@ -1455,12 +1542,14 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
                 <h3>観戦中</h3>
               </div>
               <p className="soft-note">
-                参加者としては追加されません。現在のゲーム、進行メッセージ、参加者の接続状況だけを確認できます。
+                {roomClosed
+                  ? "このルームは終了済みです。参加者として追加されず、履歴と接続状況だけを確認できます。"
+                  : "参加者としては追加されません。現在のゲーム、進行メッセージ、参加者の接続状況だけを確認できます。"}
               </p>
             </div>
           )}
 
-          {currentGame && participant && (
+          {currentGame && participant && !roomClosed && (
             <button className="primary-button room-open-game" type="button" onClick={openCurrentRoomGame}>
               <Play size={18} />
               この端末で開く
@@ -1486,7 +1575,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
                         {item.role === "host" ? "ホスト" : "参加者"} / {item.connected ? "接続中" : "離席"}
                       </span>
                     </div>
-                    {isHost && (
+                    {isHost && !roomClosed && (
                       <div className="participant-actions">
                         {item.role !== "host" && (
                           <button className="secondary-button" type="button" disabled={isBusy} onClick={() => transferHost(item)}>
@@ -1507,8 +1596,46 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
             </div>
             {isSpectating ? (
               <p className="soft-note">観戦中は参加者として数えられず、ホスト交代や参加者整理もできません。</p>
+            ) : roomClosed ? (
+              <p className="soft-note">終了済みのため、ホスト交代や参加者整理はできません。</p>
             ) : (
               !isHost && <p className="soft-note">ホスト交代や参加者整理はホスト端末から行います。</p>
+            )}
+          </div>
+
+          <div className="room-history-panel">
+            <div className="room-history-heading">
+              <div className="section-heading compact">
+                <ListChecks size={20} />
+                <h3>ルーム履歴</h3>
+              </div>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={eventsLoading || isBusy}
+                onClick={() => loadRoomEvents(snapshot.room.code, participant?.id ?? null)}
+              >
+                <RotateCcw size={18} />
+                {eventsLoading ? "取得中..." : "履歴更新"}
+              </button>
+            </div>
+            {eventsError && <p className="room-message error">履歴を取得できませんでした: {eventsError}</p>}
+            {!eventsError && roomEvents.length === 0 && (
+              <p className="soft-note">{eventsLoading ? "履歴を取得しています。" : "まだ表示できる履歴がありません。"}</p>
+            )}
+            {roomEvents.length > 0 && (
+              <ol className="room-events-list">
+                {roomEvents.map((event) => {
+                  const summary = summarizeRoomEvent(event);
+                  return (
+                    <li className="room-event-item" key={event.id}>
+                      <span className="room-event-time">{formatClockTime(event.createdAt)}</span>
+                      <strong>{getRoomEventLabel(event.eventType)}</strong>
+                      {summary && <span>{summary}</span>}
+                    </li>
+                  );
+                })}
+              </ol>
             )}
           </div>
         </>
@@ -1538,6 +1665,49 @@ async function requestJson<T>(path: string, options: { method?: string; body?: u
 async function fetchRoomSnapshot(code: string, participantId?: string | null) {
   const query = participantId ? `?participantId=${encodeURIComponent(participantId)}` : "";
   return requestJson<RoomSnapshot>(`/rooms/${encodeURIComponent(code)}${query}`);
+}
+
+const roomEventLabels: Record<string, string> = {
+  room_created: "作成",
+  participant_joined: "参加",
+  game_started: "開始",
+  game_advanced: "次へ",
+  game_completed: "完了",
+  game_reset: "待機戻し",
+  host_transferred: "ホスト交代",
+  participant_removed: "削除",
+  room_closed: "終了",
+};
+
+function getRoomEventLabel(eventType: string) {
+  return roomEventLabels[eventType] ?? eventType;
+}
+
+function summarizeRoomEvent(event: RoomEvent) {
+  const payload = isRecordPayload(event.payload) ? event.payload : {};
+  const details: string[] = [];
+  const actor = event.participantName ?? readPayloadText(payload, "name") ?? readPayloadText(payload, "hostName");
+  const targetName = readPayloadText(payload, "targetName");
+  const promotedHostName = readPayloadText(payload, "promotedHostName");
+  const currentGameKey = readPayloadText(payload, "currentGame");
+  const currentGame = currentGameKey ? findGameMeta(toGameKey(currentGameKey)) : null;
+
+  if (actor) details.push(actor);
+  if (targetName) details.push(`対象: ${targetName}`);
+  if (promotedHostName) details.push(`新ホスト: ${promotedHostName}`);
+  if (currentGame) details.push(currentGame.title);
+  if (event.eventType === "room_closed") details.push("終了済み");
+
+  return details.slice(0, 3).join(" / ");
+}
+
+function isRecordPayload(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readPayloadText(payload: Record<string, unknown>, key: string) {
+  const value = payload[key];
+  return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
 function parseRoomProgress(snapshot: RoomSnapshot): RoomProgressState {
@@ -1576,6 +1746,7 @@ function toErrorMessage(error: unknown) {
     game_title_required: "ゲーム名が取得できません。",
     game_not_started: "先にゲームを開始してください。",
     host_required: "この操作はホストだけが実行できます。",
+    room_closed: "このルームは終了済みです。",
     participant_id_required: "参加者情報が取得できません。",
     participant_required: "ルーム参加者として接続してから操作してください。",
     target_participant_id_required: "対象の参加者が取得できません。",

@@ -1,4 +1,4 @@
-export type RoomStatus = "waiting" | "playing" | "complete";
+export type RoomStatus = "waiting" | "playing" | "complete" | "closed";
 
 export type RoomRow = {
   id: string;
@@ -18,4 +18,14 @@ export type ParticipantRow = {
   connected: boolean;
   createdAt: string;
   updatedAt: string;
+};
+
+export type RoomEventRow = {
+  id: string;
+  roomId: string;
+  participantId: string | null;
+  participantName: string | null;
+  eventType: string;
+  payload: unknown;
+  createdAt: string;
 };

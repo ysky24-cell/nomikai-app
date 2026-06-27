@@ -6,8 +6,10 @@ import { config } from "./config.js";
 import {
   addParticipant,
   checkDatabase,
+  closeRoom,
   createRoom,
   findRoomByCode,
+  listRoomEvents,
   pool,
   removeRoomParticipant,
   setParticipantConnected,
@@ -64,6 +66,28 @@ app.get("/rooms/:code", async (request, response, next) => {
     }
     const participantId = readOptionalString(request.query.participantId);
     response.json(sanitizeRoomSnapshotForParticipant(snapshot, findParticipant(snapshot, participantId)));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/rooms/:code/events", async (request, response, next) => {
+  try {
+    const snapshot = await findRoomByCode(request.params.code);
+    if (!snapshot) {
+      response.status(404).json({ error: "room_not_found" });
+      return;
+    }
+
+    const events = await listRoomEvents(snapshot.room.code);
+    response.json({
+      room: {
+        code: snapshot.room.code,
+        status: snapshot.room.status,
+        currentGame: snapshot.room.currentGame,
+      },
+      events: events.map(sanitizeRoomEvent),
+    });
   } catch (error) {
     next(error);
   }
@@ -133,6 +157,10 @@ app.post("/rooms/:code/game/start", async (request, response, next) => {
       response.status(404).json({ error: "room_not_found" });
       return;
     }
+    if (isClosedRoom(currentSnapshot)) {
+      response.status(409).json({ error: "room_closed" });
+      return;
+    }
     if (!isHostParticipant(currentSnapshot, participantId)) {
       response.status(403).json({ error: "host_required" });
       return;
@@ -173,6 +201,10 @@ app.post("/rooms/:code/game/advance", async (request, response, next) => {
     const snapshot = await findRoomByCode(request.params.code);
     if (!snapshot) {
       response.status(404).json({ error: "room_not_found" });
+      return;
+    }
+    if (isClosedRoom(snapshot)) {
+      response.status(409).json({ error: "room_closed" });
       return;
     }
 
@@ -224,6 +256,10 @@ app.post("/rooms/:code/game/complete", async (request, response, next) => {
       response.status(404).json({ error: "room_not_found" });
       return;
     }
+    if (isClosedRoom(snapshot)) {
+      response.status(409).json({ error: "room_closed" });
+      return;
+    }
 
     const currentState = readProgressState(snapshot.room.state, snapshot.room.currentGame);
     if (!currentState.gameKey) {
@@ -273,6 +309,10 @@ app.post("/rooms/:code/game/reset", async (request, response, next) => {
       response.status(404).json({ error: "room_not_found" });
       return;
     }
+    if (isClosedRoom(currentSnapshot)) {
+      response.status(409).json({ error: "room_closed" });
+      return;
+    }
     if (!isHostParticipant(currentSnapshot, participantId)) {
       response.status(403).json({ error: "host_required" });
       return;
@@ -304,6 +344,52 @@ app.post("/rooms/:code/game/reset", async (request, response, next) => {
     await emitRoomSnapshot(snapshot.room.code);
     response.json(sanitizeRoomSnapshotForParticipant(snapshot, findParticipant(snapshot, participantId)));
   } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/rooms/:code/close", async (request, response, next) => {
+  try {
+    const participantId = readRequiredString(request.body?.participantId, "participant_id");
+    const snapshot = await findRoomByCode(request.params.code);
+    if (!snapshot) {
+      response.status(404).json({ error: "room_not_found" });
+      return;
+    }
+    if (!isHostParticipant(snapshot, participantId)) {
+      response.status(403).json({ error: "host_required" });
+      return;
+    }
+    if (isClosedRoom(snapshot)) {
+      response.status(409).json({ error: "room_closed" });
+      return;
+    }
+
+    const currentState = readProgressState(snapshot.room.state, snapshot.room.currentGame);
+    const nextState = buildProgressState({
+      ...currentState,
+      phase: "complete",
+      message: "ルームを終了しました",
+      updatedBy: participantId,
+    });
+
+    const updatedSnapshot = await closeRoom(snapshot.room.code, participantId, nextState);
+    if (!updatedSnapshot) {
+      response.status(404).json({ error: "room_not_found" });
+      return;
+    }
+
+    await emitRoomSnapshot(updatedSnapshot.room.code);
+    response.json(sanitizeRoomSnapshotForParticipant(updatedSnapshot, findParticipant(updatedSnapshot, participantId)));
+  } catch (error) {
+    if (error instanceof Error && error.message === "host_required") {
+      response.status(403).json({ error: "host_required" });
+      return;
+    }
+    if (error instanceof Error && error.message === "room_closed") {
+      response.status(409).json({ error: "room_closed" });
+      return;
+    }
     next(error);
   }
 });
@@ -349,6 +435,10 @@ io.on("connection", (socket) => {
     const currentSnapshot = await findRoomByCode(roomCode);
     if (!currentSnapshot) {
       socket.emit("room:error", { error: "room_not_found" });
+      return;
+    }
+    if (isClosedRoom(currentSnapshot)) {
+      socket.emit("room:error", { error: "room_closed" });
       return;
     }
 
@@ -409,6 +499,18 @@ io.on("connection", (socket) => {
 
 app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
   const message = error instanceof Error ? error.message : "unknown_error";
+  if (message === "room_closed") {
+    response.status(409).json({ error: message });
+    return;
+  }
+  if (message === "host_required") {
+    response.status(403).json({ error: message });
+    return;
+  }
+  if (message === "participant_not_found") {
+    response.status(404).json({ error: message });
+    return;
+  }
   response.status(400).json({ error: message });
 });
 
@@ -524,6 +626,78 @@ function findParticipant(snapshot: RoomSnapshot, participantId: string | null | 
 
 function isHostParticipant(snapshot: RoomSnapshot, participantId: string | null | undefined) {
   return findParticipant(snapshot, participantId)?.role === "host";
+}
+
+function isClosedRoom(snapshot: RoomSnapshot) {
+  return snapshot.room.status === "closed";
+}
+
+function sanitizeRoomEvent(event: {
+  id: string;
+  roomId: string;
+  participantId: string | null;
+  participantName: string | null;
+  eventType: string;
+  payload: unknown;
+  createdAt: string;
+}) {
+  return {
+    id: event.id,
+    roomId: event.roomId,
+    participantId: event.participantId,
+    participantName: event.participantName,
+    eventType: event.eventType,
+    payload: summarizeRoomEventPayload(event.eventType, event.payload),
+    createdAt: event.createdAt,
+  };
+}
+
+function summarizeRoomEventPayload(eventType: string, value: unknown) {
+  const payload = asRecord(value) ?? {};
+  const state = asRecord(payload.state);
+  const summary: Record<string, unknown> = {};
+
+  copyStringField(summary, "status", payload.status);
+  copyStringField(summary, "currentGame", payload.currentGame);
+  copyStringField(summary, "gameKey", payload.gameKey ?? state?.gameKey ?? payload.currentGame);
+  copyStringField(summary, "gameTitle", payload.gameTitle ?? state?.gameTitle);
+  copyNumberField(summary, "step", payload.step ?? state?.step);
+  copyStringField(summary, "message", payload.message ?? state?.message ?? defaultRoomEventMessage(eventType));
+  copyStringField(summary, "targetParticipantId", payload.targetParticipantId);
+  copyStringField(summary, "targetName", payload.targetName);
+  copyStringField(summary, "promotedHostId", payload.promotedHostId);
+  copyStringField(summary, "promotedHostName", payload.promotedHostName);
+  copyStringField(summary, "hostName", payload.hostName);
+  copyStringField(summary, "name", payload.name);
+
+  return summary;
+}
+
+function copyStringField(target: Record<string, unknown>, key: string, value: unknown) {
+  const text = readString(value);
+  if (text) {
+    target[key] = text;
+  }
+}
+
+function copyNumberField(target: Record<string, unknown>, key: string, value: unknown) {
+  const number = readFiniteNumber(value);
+  if (number !== null) {
+    target[key] = number;
+  }
+}
+
+function defaultRoomEventMessage(eventType: string) {
+  if (eventType === "room_created") return "ルームを作成しました";
+  if (eventType === "participant_joined") return "参加者が入りました";
+  if (eventType === "participant_removed") return "参加者を外しました";
+  if (eventType === "host_transferred") return "ホストを交代しました";
+  if (eventType === "game_started") return "ゲームを開始しました";
+  if (eventType === "game_advanced") return "次の進行へ進みました";
+  if (eventType === "game_completed") return "ゲームを完了しました";
+  if (eventType === "game_reset") return "待機中に戻しました";
+  if (eventType === "room_closed") return "ルームを終了しました";
+  return null;
 }
 
 function validateStateUpdateAuthorization(

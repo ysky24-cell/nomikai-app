@@ -492,6 +492,22 @@ select:focus {
   gap: 10px;
 }
 
+.room-history-panel {
+  display: grid;
+  gap: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fbfcfb;
+  padding: 14px;
+}
+
+.room-history-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
 .section-heading.compact h3 {
   margin: 0;
 }
@@ -515,6 +531,38 @@ select:focus {
 .room-participant-card.self {
   border-color: #b9d9ca;
   background: #eff8f3;
+}
+
+.room-events-list {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.room-event-item {
+  display: grid;
+  grid-template-columns: 82px 82px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 9px 10px;
+  color: var(--muted);
+  font-size: 0.92rem;
+  font-weight: 800;
+}
+
+.room-event-item strong {
+  color: var(--text);
+  font-weight: 900;
+}
+
+.room-event-time {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
 }
 
 .room-participant-card strong,
@@ -1683,6 +1731,19 @@ select:focus {
 
   .room-participant-card {
     grid-template-columns: 1fr;
+  }
+
+  .room-history-heading,
+  .room-event-item {
+    grid-template-columns: 1fr;
+  }
+
+  .room-history-heading {
+    display: grid;
+  }
+
+  .room-event-item {
+    align-items: start;
   }
 
   .room-sync-strip {

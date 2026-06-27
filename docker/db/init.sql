@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS rooms (
   id uuid PRIMARY KEY,
   code text NOT NULL UNIQUE,
-  status text NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting', 'playing', 'complete')),
+  status text NOT NULL DEFAULT 'waiting' CHECK (status IN ('waiting', 'playing', 'complete', 'closed')),
   current_game text,
   state jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now(),

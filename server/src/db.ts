@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import pg from "pg";
 import { config } from "./config.js";
-import type { ParticipantRow, RoomRow, RoomStatus } from "./types.js";
+import type { ParticipantRow, RoomEventRow, RoomRow, RoomStatus } from "./types.js";
 
 const { Pool } = pg;
 
@@ -9,8 +9,19 @@ export const pool = new Pool({
   connectionString: config.databaseUrl,
 });
 
+let migrationPromise: Promise<void> | null = null;
+
 export async function checkDatabase() {
+  await ensureDatabaseMigrations();
   await pool.query("SELECT 1");
+}
+
+export async function ensureDatabaseMigrations() {
+  migrationPromise ??= migrateDatabase().catch((error) => {
+    migrationPromise = null;
+    throw error;
+  });
+  await migrationPromise;
 }
 
 export async function createRoom(hostName?: string) {
@@ -76,6 +87,9 @@ export async function addParticipant(code: string, name: string) {
   if (!roomSnapshot) {
     return null;
   }
+  if (roomSnapshot.room.status === "closed") {
+    throw new Error("room_closed");
+  }
 
   const participantResult = await pool.query<ParticipantRow>(
     `INSERT INTO participants (id, room_id, name, connected)
@@ -125,6 +139,9 @@ export async function transferRoomHost(code: string, requesterParticipantId: str
       await client.query("ROLLBACK");
       return null;
     }
+    if (room.status === "closed") {
+      throw new Error("room_closed");
+    }
 
     await assertRoomHost(client, room.id, requesterParticipantId);
     const target = await findParticipantInRoom(client, room.id, targetParticipantId);
@@ -166,6 +183,9 @@ export async function removeRoomParticipant(code: string, requesterParticipantId
     if (!room) {
       await client.query("ROLLBACK");
       return null;
+    }
+    if (room.status === "closed") {
+      throw new Error("room_closed");
     }
 
     await assertRoomHost(client, room.id, requesterParticipantId);
@@ -211,6 +231,52 @@ export async function removeRoomParticipant(code: string, requesterParticipantId
 
     await client.query("COMMIT");
     return findRoomByCode(room.code);
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function closeRoom(code: string, requesterParticipantId: string, state: unknown) {
+  await ensureDatabaseMigrations();
+
+  const normalizedCode = normalizeRoomCode(code);
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    const room = await findRoomForUpdate(client, normalizedCode);
+    if (!room) {
+      await client.query("ROLLBACK");
+      return null;
+    }
+
+    await assertRoomHost(client, room.id, requesterParticipantId);
+    if (room.status === "closed") {
+      throw new Error("room_closed");
+    }
+
+    const roomResult = await client.query<RoomRow>(
+      `UPDATE rooms
+       SET status = 'closed',
+           current_game = NULL,
+           state = $2::jsonb,
+           updated_at = now()
+       WHERE id = $1
+       RETURNING id, code, status, current_game AS "currentGame", state, created_at AS "createdAt", updated_at AS "updatedAt"`,
+      [room.id, JSON.stringify(state)],
+    );
+
+    await client.query(
+      `INSERT INTO room_events (room_id, participant_id, event_type, payload)
+       VALUES ($1, $2, 'room_closed', $3::jsonb)`,
+      [room.id, requesterParticipantId, JSON.stringify({ status: "closed", currentGame: null, state })],
+    );
+
+    await client.query("COMMIT");
+    return findRoomByCode(roomResult.rows[0].code);
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -286,8 +352,55 @@ export async function updateRoomProgress({
   }
 }
 
+export async function listRoomEvents(code: string) {
+  const eventsResult = await pool.query<RoomEventRow>(
+    `SELECT e.id::text AS id,
+            e.room_id AS "roomId",
+            e.participant_id AS "participantId",
+            p.name AS "participantName",
+            e.event_type AS "eventType",
+            e.payload,
+            e.created_at AS "createdAt"
+     FROM room_events e
+     INNER JOIN rooms r ON r.id = e.room_id
+     LEFT JOIN participants p ON p.id = e.participant_id
+     WHERE r.code = $1
+     ORDER BY e.created_at ASC, e.id ASC`,
+    [normalizeRoomCode(code)],
+  );
+
+  return eventsResult.rows;
+}
+
 function normalizeRoomCode(code: string) {
   return code.trim().toUpperCase();
+}
+
+async function migrateDatabase() {
+  await pool.query(`
+    DO $$
+    DECLARE
+      constraint_record record;
+    BEGIN
+      IF to_regclass('public.rooms') IS NULL THEN
+        RETURN;
+      END IF;
+
+      FOR constraint_record IN
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'public.rooms'::regclass
+          AND contype = 'c'
+          AND pg_get_constraintdef(oid) ILIKE '%status%'
+      LOOP
+        EXECUTE format('ALTER TABLE public.rooms DROP CONSTRAINT %I', constraint_record.conname);
+      END LOOP;
+
+      ALTER TABLE public.rooms
+        ADD CONSTRAINT rooms_status_check
+        CHECK (status IN ('waiting', 'playing', 'complete', 'closed'));
+    END $$;
+  `);
 }
 
 async function findRoomForUpdate(client: pg.PoolClient, code: string) {
