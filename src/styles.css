@@ -1190,6 +1190,27 @@ select:focus {
   color: var(--teal);
 }
 
+.target-selector {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.target-selector button {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--text);
+  padding: 9px 12px;
+  font-weight: 900;
+}
+
+.target-selector button.selected-choice {
+  border-color: var(--teal);
+  background: var(--teal-soft);
+  color: var(--teal);
+}
+
 .quadrant-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

@@ -26,6 +26,8 @@ export async function ensureDatabaseMigrations() {
 }
 
 export async function createRoom(hostName?: string) {
+  await ensureDatabaseMigrations();
+
   const client = await pool.connect();
   const roomId = randomUUID();
   const code = await createUniqueRoomCode(client);
@@ -42,8 +44,8 @@ export async function createRoom(hostName?: string) {
     let host: ParticipantRow | null = null;
     if (hostName?.trim()) {
       const hostResult = await client.query<ParticipantRow>(
-        `INSERT INTO participants (id, room_id, name, role, connected)
-         VALUES ($1, $2, $3, 'host', true)
+        `INSERT INTO participants (id, room_id, name, role)
+         VALUES ($1, $2, $3, 'host')
          RETURNING id, room_id AS "roomId", name, role, connected, created_at AS "createdAt", updated_at AS "updatedAt"`,
         [randomUUID(), roomId, hostName.trim()],
       );
@@ -84,6 +86,8 @@ export async function findRoomByCode(code: string) {
 }
 
 export async function addParticipant(code: string, name: string) {
+  await ensureDatabaseMigrations();
+
   const roomSnapshot = await findRoomByCode(code);
   if (!roomSnapshot) {
     return null;
@@ -93,8 +97,8 @@ export async function addParticipant(code: string, name: string) {
   }
 
   const participantResult = await pool.query<ParticipantRow>(
-    `INSERT INTO participants (id, room_id, name, connected)
-     VALUES ($1, $2, $3, true)
+    `INSERT INTO participants (id, room_id, name)
+     VALUES ($1, $2, $3)
      RETURNING id, room_id AS "roomId", name, role, connected, created_at AS "createdAt", updated_at AS "updatedAt"`,
     [randomUUID(), roomSnapshot.room.id, name.trim()],
   );
@@ -121,12 +125,90 @@ export async function listParticipants(roomId: string) {
 }
 
 export async function setParticipantConnected(participantId: string, connected: boolean) {
+  await ensureDatabaseMigrations();
+
   await pool.query(
     `UPDATE participants
      SET connected = $2, updated_at = now()
      WHERE id = $1`,
     [participantId, connected],
   );
+}
+
+export async function registerParticipantSocketConnection(roomId: string, participantId: string, socketId: string) {
+  await ensureDatabaseMigrations();
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const previousConnection = await client.query<{ roomId: string; participantId: string }>(
+      `SELECT room_id AS "roomId", participant_id AS "participantId"
+       FROM participant_socket_connections
+       WHERE socket_id = $1
+       FOR UPDATE`,
+      [socketId],
+    );
+    const previous = previousConnection.rows[0] ?? null;
+
+    if (previous && (previous.roomId !== roomId || previous.participantId !== participantId)) {
+      await client.query("DELETE FROM participant_socket_connections WHERE socket_id = $1", [socketId]);
+      await updateParticipantConnectionFromSockets(client, previous.participantId);
+    }
+
+    await client.query(
+      `INSERT INTO participant_socket_connections (socket_id, room_id, participant_id)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (socket_id)
+       DO UPDATE SET room_id = EXCLUDED.room_id,
+                     participant_id = EXCLUDED.participant_id,
+                     updated_at = now()`,
+      [socketId, roomId, participantId],
+    );
+
+    await client.query(
+      `UPDATE participants
+       SET connected = true,
+           updated_at = now()
+       WHERE id = $1 AND room_id = $2`,
+      [participantId, roomId],
+    );
+
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+export async function unregisterParticipantSocketConnection(socketId: string) {
+  await ensureDatabaseMigrations();
+
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+
+    const deletedConnection = await client.query<{ roomId: string; participantId: string }>(
+      `DELETE FROM participant_socket_connections
+       WHERE socket_id = $1
+       RETURNING room_id AS "roomId", participant_id AS "participantId"`,
+      [socketId],
+    );
+    const deleted = deletedConnection.rows[0] ?? null;
+    if (deleted) {
+      await updateParticipantConnectionFromSockets(client, deleted.participantId);
+    }
+
+    await client.query("COMMIT");
+    return deleted;
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }
 
 export async function createParticipantTransferCode(code: string, requesterParticipantId: string, targetParticipantId: string) {
@@ -231,11 +313,9 @@ export async function claimParticipantTransfer(code: string, transferCode: strin
     );
 
     const participantResult = await client.query<ParticipantRow>(
-      `UPDATE participants
-       SET connected = true,
-           updated_at = now()
-       WHERE id = $1 AND room_id = $2
-       RETURNING id, room_id AS "roomId", name, role, connected, created_at AS "createdAt", updated_at AS "updatedAt"`,
+      `SELECT id, room_id AS "roomId", name, role, connected, created_at AS "createdAt", updated_at AS "updatedAt"
+       FROM participants
+       WHERE id = $1 AND room_id = $2`,
       [activeTransferCode.participantId, room.id],
     );
     const participant = participantResult.rows[0] ?? null;
@@ -554,6 +634,20 @@ async function migrateDatabase() {
         created_at timestamptz NOT NULL DEFAULT now()
       );
 
+      CREATE TABLE IF NOT EXISTS public.participant_socket_connections (
+        socket_id text PRIMARY KEY,
+        room_id uuid NOT NULL REFERENCES public.rooms(id) ON DELETE CASCADE,
+        participant_id uuid NOT NULL REFERENCES public.participants(id) ON DELETE CASCADE,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        updated_at timestamptz NOT NULL DEFAULT now()
+      );
+
+      CREATE INDEX IF NOT EXISTS participant_socket_connections_room_id_idx
+        ON public.participant_socket_connections(room_id);
+
+      CREATE INDEX IF NOT EXISTS participant_socket_connections_participant_id_idx
+        ON public.participant_socket_connections(participant_id);
+
       CREATE UNIQUE INDEX IF NOT EXISTS participant_transfer_codes_room_hash_idx
         ON public.participant_transfer_codes(room_id, code_hash);
 
@@ -593,6 +687,20 @@ async function assertRoomHost(client: pg.PoolClient, roomId: string, participant
   if (!requester || requester.role !== "host") {
     throw new Error("host_required");
   }
+}
+
+async function updateParticipantConnectionFromSockets(client: pg.PoolClient, participantId: string) {
+  await client.query(
+    `UPDATE participants p
+     SET connected = EXISTS (
+           SELECT 1
+           FROM participant_socket_connections c
+           WHERE c.participant_id = p.id
+         ),
+         updated_at = now()
+     WHERE p.id = $1`,
+    [participantId],
+  );
 }
 
 async function createUniqueRoomCode(client: pg.PoolClient) {

@@ -13,9 +13,10 @@ import {
   findRoomByCode,
   listRoomEvents,
   pool,
+  registerParticipantSocketConnection,
   removeRoomParticipant,
-  setParticipantConnected,
   transferRoomHost,
+  unregisterParticipantSocketConnection,
   updateRoomProgress,
   updateRoomState,
 } from "./db.js";
@@ -469,12 +470,25 @@ io.on("connection", (socket) => {
       return;
     }
 
+    const previousRoomCode = typeof socket.data.roomCode === "string" ? socket.data.roomCode : null;
+    const previousParticipantId = typeof socket.data.participantId === "string" ? socket.data.participantId : null;
+    if (previousParticipantId && (previousRoomCode !== snapshot.room.code || previousParticipantId !== participantId)) {
+      await unregisterParticipantSocketConnection(socket.id);
+      if (previousRoomCode && previousRoomCode !== snapshot.room.code) {
+        await emitRoomSnapshot(previousRoomCode);
+      }
+    }
+
+    if (previousRoomCode && previousRoomCode !== snapshot.room.code) {
+      socket.leave(previousRoomCode);
+    }
+
     socket.join(snapshot.room.code);
     socket.data.roomCode = snapshot.room.code;
     socket.data.participantId = participantId;
 
     if (participantId) {
-      await setParticipantConnected(participantId, true);
+      await registerParticipantSocketConnection(snapshot.room.id, participantId, socket.id);
     }
 
     await emitRoomSnapshot(snapshot.room.code);
@@ -539,12 +553,9 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", async () => {
-    const participantId = socket.data.participantId as string | undefined;
     const roomCode = socket.data.roomCode as string | undefined;
 
-    if (participantId) {
-      await setParticipantConnected(participantId, false);
-    }
+    await unregisterParticipantSocketConnection(socket.id);
 
     if (roomCode) {
       await emitRoomSnapshot(roomCode);
@@ -2017,42 +2028,23 @@ function validateJohariParticipantChange(
   }
 
   if (currentStep === "self" && nextStep === "self") {
-    const targetId = getIndexedPlayerId(change.currentBranch, "targetIndex");
-    if (requesterId !== targetId) return "participant_field_forbidden";
-    const changedKeys = getChangedKeys(change.currentBranch, change.nextBranch);
-    return isOnlyChangedKeys(changedKeys, ["selfWordIds"]) && validateWordSelection(change.nextBranch.selfWordIds, change.currentBranch.deckWordIds)
+    return validateJohariSelfParticipantUpdate(change.currentBranch, change.nextBranch, requesterId)
       ? null
       : "participant_field_forbidden";
   }
 
   if (currentStep === "self" && nextStep === "peer") {
-    const targetId = getIndexedPlayerId(change.currentBranch, "targetIndex");
-    if (requesterId !== targetId) return "participant_field_forbidden";
-    const expectedBranch = { ...change.currentBranch, step: "peer", peerIndex: 0 };
-    return isDeepEqual(change.nextBranch, expectedBranch) ? null : "participant_field_forbidden";
+    return "host_required";
   }
 
   if (currentStep === "peer" && nextStep === "peer") {
-    const currentPeerId = getJohariCurrentPeerId(change.currentBranch);
-    if (requesterId !== currentPeerId) return "participant_field_forbidden";
-    const changedKeys = getChangedKeys(change.currentBranch, change.nextBranch);
-    if (isOnlyChangedKeys(changedKeys, ["peerSelections"])) {
-      return validateOwnedWordSelectionMap(change.currentBranch.peerSelections, change.nextBranch.peerSelections, requesterId, change.currentBranch.deckWordIds)
-        ? null
-        : "participant_field_forbidden";
-    }
-    const currentPeerIndex = readNonnegativeInteger(change.currentBranch.peerIndex);
-    const nextPeerIndex = readNonnegativeInteger(change.nextBranch.peerIndex);
-    if (isOnlyChangedKeys(changedKeys, ["peerIndex"]) && currentPeerIndex !== null && nextPeerIndex === currentPeerIndex + 1) {
-      return null;
-    }
+    return validateJohariPeerParticipantUpdate(change.currentBranch, change.nextBranch, requesterId)
+      ? null
+      : "participant_field_forbidden";
   }
 
   if (currentStep === "peer" && nextStep === "result") {
-    const currentPeerId = getJohariCurrentPeerId(change.currentBranch);
-    if (requesterId !== currentPeerId) return "participant_field_forbidden";
-    const expectedBranch = { ...change.currentBranch, step: "result" };
-    return isDeepEqual(change.nextBranch, expectedBranch) ? null : "participant_field_forbidden";
+    return "host_required";
   }
 
   return "participant_field_forbidden";
@@ -2225,6 +2217,109 @@ function getJohariCurrentPeerId(state: Record<string, unknown>) {
   const peerIndex = readNonnegativeInteger(state.peerIndex);
   if (peerIndex === null) return null;
   return readString(peers[peerIndex]?.id);
+}
+
+function validateJohariSelfParticipantUpdate(
+  currentBranch: Record<string, unknown>,
+  nextBranch: Record<string, unknown>,
+  requesterId: string,
+) {
+  const playerIds = new Set(readRecordArray(currentBranch.players).map((player) => readString(player.id)).filter(isString));
+  if (!playerIds.has(requesterId)) return false;
+
+  const changedKeys = getChangedKeys(currentBranch, nextBranch);
+  if (changedKeys.length === 0 || changedKeys.some((key) => !["selfSelections", "selfSubmitted"].includes(key))) {
+    return false;
+  }
+
+  if (changedKeys.includes("selfSelections")) {
+    const currentMap = asRecord(currentBranch.selfSelections) ?? {};
+    const nextMap = asRecord(nextBranch.selfSelections) ?? {};
+    const changedParticipantIds = getChangedKeys(currentMap, nextMap);
+    if (changedParticipantIds.length !== 1 || changedParticipantIds[0] !== requesterId) return false;
+    if (!validateWordSelection(nextMap[requesterId], currentBranch.deckWordIds)) return false;
+  }
+
+  if (changedKeys.includes("selfSubmitted")) {
+    const currentMap = asRecord(currentBranch.selfSubmitted) ?? {};
+    const nextMap = asRecord(nextBranch.selfSubmitted) ?? {};
+    const changedParticipantIds = getChangedKeys(currentMap, nextMap);
+    if (changedParticipantIds.length !== 1 || changedParticipantIds[0] !== requesterId) return false;
+    if (typeof nextMap[requesterId] !== "boolean") return false;
+  }
+
+  return true;
+}
+
+function validateJohariPeerParticipantUpdate(
+  currentBranch: Record<string, unknown>,
+  nextBranch: Record<string, unknown>,
+  requesterId: string,
+) {
+  const playerIds = new Set(readRecordArray(currentBranch.players).map((player) => readString(player.id)).filter(isString));
+  if (!playerIds.has(requesterId)) return false;
+
+  const changedKeys = getChangedKeys(currentBranch, nextBranch);
+  if (changedKeys.length === 0 || changedKeys.some((key) => !["peerSelections", "peerSubmitted"].includes(key))) {
+    return false;
+  }
+
+  if (changedKeys.includes("peerSelections")) {
+    if (!validateJohariNestedSelectionUpdate(currentBranch.peerSelections, nextBranch.peerSelections, requesterId, playerIds, currentBranch.deckWordIds)) {
+      return false;
+    }
+  }
+
+  if (changedKeys.includes("peerSubmitted")) {
+    if (!validateJohariNestedSubmitUpdate(currentBranch.peerSubmitted, nextBranch.peerSubmitted, requesterId, playerIds)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function validateJohariNestedSelectionUpdate(
+  currentValue: unknown,
+  nextValue: unknown,
+  requesterId: string,
+  playerIds: Set<string>,
+  deckWordIdsValue: unknown,
+) {
+  const currentMap = asRecord(currentValue) ?? {};
+  const nextMap = asRecord(nextValue) ?? {};
+  const changedTargetIds = getChangedKeys(currentMap, nextMap);
+  if (changedTargetIds.length !== 1) return false;
+  const targetId = changedTargetIds[0];
+  if (!playerIds.has(targetId) || targetId === requesterId) return false;
+
+  const currentTargetMap = asRecord(currentMap[targetId]) ?? {};
+  const nextTargetMap = asRecord(nextMap[targetId]) ?? {};
+  const changedParticipantIds = getChangedKeys(currentTargetMap, nextTargetMap);
+  return changedParticipantIds.length === 1 &&
+    changedParticipantIds[0] === requesterId &&
+    validateWordSelection(nextTargetMap[requesterId], deckWordIdsValue);
+}
+
+function validateJohariNestedSubmitUpdate(
+  currentValue: unknown,
+  nextValue: unknown,
+  requesterId: string,
+  playerIds: Set<string>,
+) {
+  const currentMap = asRecord(currentValue) ?? {};
+  const nextMap = asRecord(nextValue) ?? {};
+  const changedTargetIds = getChangedKeys(currentMap, nextMap);
+  if (changedTargetIds.length !== 1) return false;
+  const targetId = changedTargetIds[0];
+  if (!playerIds.has(targetId) || targetId === requesterId) return false;
+
+  const currentTargetMap = asRecord(currentMap[targetId]) ?? {};
+  const nextTargetMap = asRecord(nextMap[targetId]) ?? {};
+  const changedParticipantIds = getChangedKeys(currentTargetMap, nextTargetMap);
+  return changedParticipantIds.length === 1 &&
+    changedParticipantIds[0] === requesterId &&
+    typeof nextTargetMap[requesterId] === "boolean";
 }
 
 function validateWordSelection(value: unknown, deckWordIdsValue: unknown) {

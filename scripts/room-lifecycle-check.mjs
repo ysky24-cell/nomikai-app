@@ -131,6 +131,27 @@ async function main() {
     return socket;
   });
 
+  const hostMirrorSocket = await step("keep host connected while one of multiple sockets remains", async () => {
+    const socket = await connectSocket("host-mirror");
+    socket.emit("room:join", { roomCode, participantId: host.id });
+    await waitForEvent(
+      socket,
+      "room:updated",
+      (payload) => payload?.participants?.some((item) => item.id === host.id && item.connected),
+      "host mirror initial room:updated",
+    );
+
+    hostSocket.disconnect();
+    await delay(300);
+    const result = await request("GET", `/rooms/${roomCode}?participantId=${encodeURIComponent(host.id)}`);
+    const snapshot = requireSnapshot(result.data, "host mirror room snapshot");
+    assert.ok(
+      snapshot.participants.some((item) => item.id === host.id && item.connected),
+      "host must remain connected while another socket for the same participant is active",
+    );
+    return socket;
+  });
+
   await step("start game", async () => {
     const result = await request("POST", `/rooms/${roomCode}/game/start`, {
       body: { participantId: host.id, gameKey, gameTitle },
@@ -271,14 +292,14 @@ async function main() {
 
   await step("reject socket state update after room close", async () => {
     const errorPromise = waitForEvent(
-      hostSocket,
+      hostMirrorSocket,
       "room:error",
       (payload) => Boolean(payload?.error),
       "room:error after closed socket state update",
       timeoutMs,
       { rejectOnRoomError: false },
     );
-    hostSocket.emit("room:state:update", {
+    hostMirrorSocket.emit("room:state:update", {
       roomCode,
       currentGame: gameKey,
       state: {
@@ -304,6 +325,12 @@ async function step(label, action) {
     process.stdout.write("failed\n");
     throw addContext(error, label);
   }
+}
+
+function delay(ms) {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 async function request(method, path, options = {}) {
