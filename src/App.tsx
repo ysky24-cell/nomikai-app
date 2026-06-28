@@ -2436,6 +2436,9 @@ function UrlCandidateGame({
   const isUrlCandidateRoom = Boolean(supportsRoomSync && roomSession && (!roomSnapshot || roomSnapshot.room.currentGame === config.key));
   const activeUrlCandidateState = isUrlCandidateRoom ? (roomUrlCandidateState ?? initialUrlCandidateState) : storedState;
   const state = { ...initialUrlCandidateState, ...activeUrlCandidateState };
+  const roomParticipantPlayers = roomSnapshot ? roomParticipantsToPlayers(roomSnapshot, true) : [];
+  const usesRoomRosterForUrlCandidate = isUrlCandidateRoom && Boolean(roomSnapshot) && (config.key === "majority-game" || config.key === "large-majority-game");
+  const setupPlayers = usesRoomRosterForUrlCandidate ? roomParticipantPlayers : state.players;
   const isRoomHost = isUrlCandidateRoom && roomSession?.participantRole === "host";
   const canControlUrlCandidate = !isUrlCandidateRoom || (isRoomHost && Boolean(roomSnapshot));
   const usesTurnSync = isTurnSyncableUrlCandidateKey(config.key);
@@ -2455,7 +2458,7 @@ function UrlCandidateGame({
   const canActForCurrentUrlPlayer = !isUrlCandidateRoom || canControlUrlCandidate || roomSession?.participantId === currentPlayer?.id;
   const canPeekUrlAnswer = !isUrlCandidateRoom || canControlUrlCandidate || (usesGuessSync && roomSession?.participantId === currentPlayer?.id);
   const canRevealUrlAnswer = !isUrlCandidateRoom || canControlUrlCandidate || (usesGuessSync && canActForCurrentUrlPlayer);
-  const canStart = state.players.length >= config.minPlayers && state.players.every((player) => player.name.trim());
+  const canStart = setupPlayers.length >= config.minPlayers && setupPlayers.every((player) => player.name.trim());
   const progressLabel = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "";
   const normalCount = config.prompts.filter((item) => item.rating === "normal").length;
   const adultCount = config.prompts.filter((item) => item.rating === "adult").length;
@@ -2544,29 +2547,31 @@ function UrlCandidateGame({
   }, [prompt, setState, state.step]);
 
   function startUrlCandidateGame() {
+    const players = usesRoomRosterForUrlCandidate ? roomParticipantPlayers : state.players;
     const deckPromptIds = shuffle([...promptPool])
       .slice(0, selectedQuestionCount)
       .map((item) => item.id);
     setState({
       ...state,
+      players,
       step: "play",
       deckPromptIds,
       deckIndex: 0,
       answerVisible: false,
       currentPlayerIndex: 0,
       numberValue: 0,
-      positions: createPlayerPositions(state.players),
+      positions: createPlayerPositions(players),
       territory: {},
       drawnCount: 0,
       hazardIndex: createHazardIndex(),
       completedPairs: 0,
       actionLog: [],
       votes: {},
-      safeCounts: createPlayerCountMap(state.players),
-      missCounts: createPlayerCountMap(state.players),
+      safeCounts: createPlayerCountMap(players),
+      missCounts: createPlayerCountMap(players),
       guesses: {},
-      scoreCounts: createPlayerCountMap(state.players),
-      resourceCounts: createPlayerResourceMap(state.players),
+      scoreCounts: createPlayerCountMap(players),
+      resourceCounts: createPlayerResourceMap(players),
     });
   }
 
@@ -2610,7 +2615,9 @@ function UrlCandidateGame({
             </h3>
             <p className="soft-note">
               {isRoomHost
-                ? usesTurnSync
+                ? usesRoomRosterForUrlCandidate
+                  ? "この端末が進行役です。ルーム参加者一覧、回答、集計、次のお題を同期します。"
+                  : usesTurnSync
                   ? "この端末が進行役です。参加者取り込み、手番、セーフ、アウト、次のお題を同期します。"
                   : usesGuessSync
                     ? "この端末が進行役です。参加者取り込み、親、回答、正解表示、次のお題を同期します。"
@@ -2655,100 +2662,123 @@ function UrlCandidateGame({
 
           {isUrlCandidateRoom && roomSnapshot && (
             <div className="notice-panel calm">
-              <strong>ルーム参加者を{config.title}メンバーに使えます</strong>
-              <p>
-                {usesTurnSync
-                  ? "参加者それぞれの端末で自分の番を操作するには、ルーム参加者を取り込んでください。"
-                  : usesGuessSync
-                    ? "親、回答者、正解表示を端末ごとに同期するには、ルーム参加者を取り込んでください。"
-                    : usesBoardSync
-                      ? "手番、盤面、コマ、資源を端末ごとに同期するには、ルーム参加者を取り込んでください。"
-                      : usesAnswerSync
-                        ? "回答、集計、得点を端末ごとに同期するには、ルーム参加者を取り込んでください。"
-                        : usesActingSync
-                          ? "演者、感情選択、回答、結果表示を端末ごとに同期するには、ルーム参加者を取り込んでください。"
-                        : usesActionSync
-                          ? "手番、数字、カード、対戦結果を端末ごとに同期するには、ルーム参加者を取り込んでください。"
-                  : "参加者それぞれの端末で自分の投票をするには、ルーム参加者を取り込んでください。"}
-              </p>
-              <div className="action-row">
-                <button
-                  className="secondary-button"
-                  disabled={!isRoomHost}
-                  type="button"
-                  onClick={() =>
-                    setState({
-                      ...state,
-                      players: roomParticipantsToPlayers(roomSnapshot, false),
-                      step: "setup",
-                      deckPromptIds: [],
-                      deckIndex: 0,
-                      answerVisible: false,
-                      votes: {},
-                      currentPlayerIndex: 0,
-                      actionLog: [],
-                      safeCounts: {},
-                      missCounts: {},
-                      guesses: {},
-                      scoreCounts: {},
-                      resourceCounts: {},
-                    })
-                  }
-                >
-                  <Users size={18} />
-                  ホスト以外を使う
-                </button>
-                <button
-                  className="secondary-button"
-                  disabled={!isRoomHost}
-                  type="button"
-                  onClick={() =>
-                    setState({
-                      ...state,
-                      players: roomParticipantsToPlayers(roomSnapshot, true),
-                      step: "setup",
-                      deckPromptIds: [],
-                      deckIndex: 0,
-                      answerVisible: false,
-                      votes: {},
-                      currentPlayerIndex: 0,
-                      actionLog: [],
-                      safeCounts: {},
-                      missCounts: {},
-                      guesses: {},
-                      scoreCounts: {},
-                      resourceCounts: {},
-                    })
-                  }
-                >
-                  <Users size={18} />
-                  全員を使う
-                </button>
-              </div>
+              {usesRoomRosterForUrlCandidate ? (
+                <>
+                  <strong>ルーム参加者全員で遊びます</strong>
+                  <p>ホストも1人の参加者として投票できます。参加者の追加や退出は、ルーム画面で整理してから開始してください。</p>
+                  <div className="score-list wide">
+                    {roomParticipantPlayers.map((player) => (
+                      <span key={player.id}>{player.name}</span>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                <>
+                  <strong>ルーム参加者を{config.title}メンバーに使えます</strong>
+                  <p>
+                    {usesTurnSync
+                      ? "参加者それぞれの端末で自分の番を操作するには、ルーム参加者を取り込んでください。"
+                      : usesGuessSync
+                        ? "親、回答者、正解表示を端末ごとに同期するには、ルーム参加者を取り込んでください。"
+                        : usesBoardSync
+                          ? "手番、盤面、コマ、資源を端末ごとに同期するには、ルーム参加者を取り込んでください。"
+                        : usesAnswerSync
+                          ? "回答、集計、得点を端末ごとに同期するには、ルーム参加者を取り込んでください。"
+                          : usesActingSync
+                            ? "演者、感情選択、回答、結果表示を端末ごとに同期するには、ルーム参加者を取り込んでください。"
+                            : usesActionSync
+                              ? "手番、数字、カード、対戦結果を端末ごとに同期するには、ルーム参加者を取り込んでください。"
+                      : "参加者それぞれの端末で自分の投票をするには、ルーム参加者を取り込んでください。"}
+                  </p>
+                  <div className="action-row">
+                    <button
+                      className="secondary-button"
+                      disabled={!isRoomHost}
+                      type="button"
+                      onClick={() =>
+                        setState({
+                          ...state,
+                          players: roomParticipantsToPlayers(roomSnapshot, false),
+                          step: "setup",
+                          deckPromptIds: [],
+                          deckIndex: 0,
+                          answerVisible: false,
+                          votes: {},
+                          currentPlayerIndex: 0,
+                          actionLog: [],
+                          safeCounts: {},
+                          missCounts: {},
+                          guesses: {},
+                          scoreCounts: {},
+                          resourceCounts: {},
+                        })
+                      }
+                    >
+                      <Users size={18} />
+                      ホスト以外を使う
+                    </button>
+                    <button
+                      className="secondary-button"
+                      disabled={!isRoomHost}
+                      type="button"
+                      onClick={() =>
+                        setState({
+                          ...state,
+                          players: roomParticipantsToPlayers(roomSnapshot, true),
+                          step: "setup",
+                          deckPromptIds: [],
+                          deckIndex: 0,
+                          answerVisible: false,
+                          votes: {},
+                          currentPlayerIndex: 0,
+                          actionLog: [],
+                          safeCounts: {},
+                          missCounts: {},
+                          guesses: {},
+                          scoreCounts: {},
+                          resourceCounts: {},
+                        })
+                      }
+                    >
+                      <Users size={18} />
+                      全員を使う
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           )}
 
           {canControlUrlCandidate ? (
             <>
-              <PlayerSetup
-                players={state.players}
-                minPlayers={config.minPlayers}
-                maxPlayers={config.maxPlayers}
-                onChange={(players) =>
-                  setState({
-                    ...state,
-                    players,
-                    votes: {},
-                    currentPlayerIndex: 0,
-                    actionLog: [],
-                    safeCounts: {},
-                    missCounts: {},
-                    guesses: {},
-                    scoreCounts: {},
-                    resourceCounts: {},
-                  })
-                }
-              />
+              {usesRoomRosterForUrlCandidate ? (
+                <div className="howto-panel compact">
+                  <h3>今回の参加者</h3>
+                  <p className="soft-note">
+                    {roomParticipantPlayers.length}人が参加予定です。ゲーム開始時に、このルーム参加者一覧を自動で使います。
+                  </p>
+                </div>
+              ) : (
+                <PlayerSetup
+                  players={state.players}
+                  minPlayers={config.minPlayers}
+                  maxPlayers={config.maxPlayers}
+                  onChange={(players) =>
+                    setState({
+                      ...state,
+                      players,
+                      votes: {},
+                      currentPlayerIndex: 0,
+                      actionLog: [],
+                      safeCounts: {},
+                      missCounts: {},
+                      guesses: {},
+                      scoreCounts: {},
+                      resourceCounts: {},
+                    })
+                  }
+                />
+              )}
 
               <ToggleSwitch
                 label="Hな話題"
@@ -7679,10 +7709,12 @@ function TwoChoiceGame({
   const isTwoChoiceRoom = Boolean(roomSession && (!roomSnapshot || roomSnapshot.room.currentGame === "two-choice"));
   const activeTwoChoiceState = isTwoChoiceRoom ? (roomTwoChoiceState ?? initialTwoChoiceState) : storedState;
   const state = { ...initialTwoChoiceState, ...activeTwoChoiceState };
+  const roomParticipantPlayers = roomSnapshot ? roomParticipantsToPlayers(roomSnapshot, true) : [];
+  const setupPlayers = isTwoChoiceRoom && roomSnapshot ? roomParticipantPlayers : state.players;
   const isRoomHost = isTwoChoiceRoom && roomSession?.participantRole === "host";
   const canControlTwoChoice = !isTwoChoiceRoom || (isRoomHost && Boolean(roomSnapshot));
   const prompt = twoChoicePrompts.find((item) => item.id === state.promptId) ?? null;
-  const canStart = state.players.length >= 2 && state.players.every((player) => player.name.trim());
+  const canStart = setupPlayers.length >= 2 && setupPlayers.every((player) => player.name.trim());
   const activeTwoChoiceCategory = !state.includeAdultTopics && state.category === "adult" ? "all" : state.category;
   const availableTwoChoiceCategories = state.includeAdultTopics ? twoChoiceCategories : normalTwoChoiceCategories;
   const promptPool = useMemo(
@@ -7779,11 +7811,13 @@ function TwoChoiceGame({
   }, [prompt, state.players, state.votes]);
 
   function startTwoChoiceRound() {
+    const players = isTwoChoiceRoom && roomSnapshot ? roomParticipantsToPlayers(roomSnapshot, true) : state.players;
     const deckPromptIds = shuffle(promptPool)
       .slice(0, selectedQuestionCount)
       .map((item) => item.id);
     setState({
       ...state,
+      players,
       step: "vote",
       promptId: deckPromptIds[0] ?? null,
       votes: {},
@@ -7822,7 +7856,7 @@ function TwoChoiceGame({
             </h3>
             <p className="soft-note">
               {isRoomHost
-                ? "この端末が進行役です。参加者取り込み、結果表示、次のお題を同期します。"
+                ? "この端末が進行役です。ルーム参加者一覧、結果表示、次のお題を同期します。"
                 : "この端末では自分の投票だけ操作できます。全員の投票状況と結果は同期されます。"}
             </p>
           </div>
@@ -7845,59 +7879,33 @@ function TwoChoiceGame({
 
           {isTwoChoiceRoom && roomSnapshot && (
             <div className="notice-panel calm">
-              <strong>ルーム参加者を二択トークメンバーに使えます</strong>
-              <p>参加者それぞれの端末で自分の投票をするには、ルーム参加者を取り込んでください。</p>
-              <div className="action-row">
-                <button
-                  className="secondary-button"
-                  disabled={!isRoomHost}
-                  type="button"
-                  onClick={() =>
-                    setState({
-                      ...state,
-                      players: roomParticipantsToPlayers(roomSnapshot, false),
-                      step: "setup",
-                      promptId: null,
-                      votes: {},
-                      deckPromptIds: [],
-                      deckIndex: 0,
-                    })
-                  }
-                >
-                  <Users size={18} />
-                  ホスト以外を使う
-                </button>
-                <button
-                  className="secondary-button"
-                  disabled={!isRoomHost}
-                  type="button"
-                  onClick={() =>
-                    setState({
-                      ...state,
-                      players: roomParticipantsToPlayers(roomSnapshot, true),
-                      step: "setup",
-                      promptId: null,
-                      votes: {},
-                      deckPromptIds: [],
-                      deckIndex: 0,
-                    })
-                  }
-                >
-                  <Users size={18} />
-                  全員を使う
-                </button>
+              <strong>ルーム参加者全員で遊びます</strong>
+              <p>ホストも1人の参加者として投票できます。参加者の追加や退出は、ルーム画面で整理してから開始してください。</p>
+              <div className="score-list wide">
+                {roomParticipantPlayers.map((player) => (
+                  <span key={player.id}>{player.name}</span>
+                ))}
               </div>
             </div>
           )}
 
           {canControlTwoChoice ? (
             <>
-              <PlayerSetup
-                players={state.players}
-                minPlayers={2}
-                maxPlayers={20}
-                onChange={(players) => setState({ ...state, players })}
-              />
+              {isTwoChoiceRoom ? (
+                <div className="howto-panel compact">
+                  <h3>今回の参加者</h3>
+                  <p className="soft-note">
+                    {roomParticipantPlayers.length}人が参加予定です。ゲーム開始時に、このルーム参加者一覧を自動で使います。
+                  </p>
+                </div>
+              ) : (
+                <PlayerSetup
+                  players={state.players}
+                  minPlayers={2}
+                  maxPlayers={20}
+                  onChange={(players) => setState({ ...state, players })}
+                />
+              )}
               <SegmentedControl
                 label="カテゴリ"
                 options={availableTwoChoiceCategories}
@@ -9938,6 +9946,8 @@ function WordWolfGame({
   const isWordWolfRoom = Boolean(roomSession && (!roomSnapshot || roomSnapshot.room.currentGame === "word-wolf"));
   const activeWordWolfState = isWordWolfRoom ? (roomWordWolfState ?? initialWordWolfState) : storedState;
   const state = { ...initialWordWolfState, ...activeWordWolfState };
+  const roomParticipantPlayers = roomSnapshot ? roomParticipantsToWordWolfPlayers(roomSnapshot, true) : [];
+  const setupPlayers = isWordWolfRoom && roomSnapshot ? roomParticipantPlayers : state.players;
   const isRoomHost = isWordWolfRoom && roomSession?.participantRole === "host";
   const canControlWordWolf = !isWordWolfRoom || (isRoomHost && Boolean(roomSnapshot));
   const activeWordWolfCategory = !state.includeAdultTopics && state.category === "adult" ? "all" : state.category;
@@ -9952,7 +9962,7 @@ function WordWolfGame({
     [activeWordWolfCategory, state.includeAdultTopics],
   );
   const selectedWordWolfCategory = wordWolfCategories.find((category) => category.value === activeWordWolfCategory);
-  const canStart = state.players.length >= 4 && state.players.every((player) => player.name.trim());
+  const canStart = setupPlayers.length >= 4 && setupPlayers.every((player) => player.name.trim());
   const currentRevealPlayer = state.players[state.revealIndex] ?? null;
   const currentRevealAssignment = currentRevealPlayer
     ? state.assignments.find((assignment) => assignment.playerId === currentRevealPlayer.id)
@@ -10044,9 +10054,10 @@ function WordWolfGame({
   }, [ownAssignment?.word, state.step]);
 
   function startRound() {
+    const players = isWordWolfRoom && roomSnapshot ? roomParticipantsToWordWolfPlayers(roomSnapshot, true) : state.players;
     const topic = pickOne(topicPool);
-    const minorityPlayerId = pickOne(state.players).id;
-    const assignments = state.players.map((player) => ({
+    const minorityPlayerId = pickOne(players).id;
+    const assignments = players.map((player) => ({
       playerId: player.id,
       role: player.id === minorityPlayerId ? "minority" : "majority",
       word: player.id === minorityPlayerId ? topic.minorityWord : topic.majorityWord,
@@ -10054,6 +10065,7 @@ function WordWolfGame({
 
     setState({
       ...state,
+      players,
       step: "reveal",
       topicId: topic.id,
       assignments,
@@ -10118,59 +10130,33 @@ function WordWolfGame({
 
           {isWordWolfRoom && roomSnapshot && (
             <div className="notice-panel calm">
-              <strong>ルーム参加者をワードウルフメンバーに使えます</strong>
-              <p>
-                参加者それぞれの端末で自分のお題を確認するには、ルーム参加者を取り込んでください。ホストも遊ぶ場合は「全員」を使います。
-              </p>
-              <div className="action-row">
-                <button
-                  className="secondary-button"
-                  disabled={!isRoomHost}
-                  type="button"
-                  onClick={() =>
-                    setState({
-                      ...state,
-                      players: roomParticipantsToWordWolfPlayers(roomSnapshot, false),
-                      assignments: [],
-                      step: "setup",
-                      votes: {},
-                      voteIndex: 0,
-                    })
-                  }
-                >
-                  <Users size={18} />
-                  ホスト以外を使う
-                </button>
-                <button
-                  className="secondary-button"
-                  disabled={!isRoomHost}
-                  type="button"
-                  onClick={() =>
-                    setState({
-                      ...state,
-                      players: roomParticipantsToWordWolfPlayers(roomSnapshot, true),
-                      assignments: [],
-                      step: "setup",
-                      votes: {},
-                      voteIndex: 0,
-                    })
-                  }
-                >
-                  <Users size={18} />
-                  全員を使う
-                </button>
+              <strong>ルーム参加者全員で遊びます</strong>
+              <p>ホストも1人の参加者としてお題が配られます。参加者の追加や退出は、ルーム画面で整理してから開始してください。</p>
+              <div className="score-list wide">
+                {roomParticipantPlayers.map((player) => (
+                  <span key={player.id}>{player.name}</span>
+                ))}
               </div>
             </div>
           )}
 
           {canControlWordWolf ? (
             <>
-              <PlayerSetup
-                players={state.players}
-                minPlayers={4}
-                maxPlayers={12}
-                onChange={(players) => setState({ ...state, players })}
-              />
+              {isWordWolfRoom ? (
+                <div className="howto-panel compact">
+                  <h3>今回の参加者</h3>
+                  <p className="soft-note">
+                    {roomParticipantPlayers.length}人が参加予定です。ゲーム開始時に、このルーム参加者一覧を自動で使います。
+                  </p>
+                </div>
+              ) : (
+                <PlayerSetup
+                  players={state.players}
+                  minPlayers={4}
+                  maxPlayers={12}
+                  onChange={(players) => setState({ ...state, players })}
+                />
+              )}
               <SegmentedControl
                 label="お題"
                 options={availableWordWolfCategories}
@@ -10249,7 +10235,7 @@ function WordWolfGame({
           <p className="soft-note">
             {ownAssignment
               ? "本人だけが見てください。会話が始まるまで、お題そのものは口に出さないでください。"
-              : "この端末の参加者IDがプレイヤーに含まれていません。ホストがルーム参加者を取り込んでいるか確認してください。"}
+              : "この端末の参加者IDがゲーム参加者に含まれていません。ルーム画面の参加者一覧を確認してください。"}
           </p>
           <div className={`secret-word ${ownWordVisible ? "visible" : ""}`}>
             {ownAssignment ? (ownWordVisible ? ownAssignment.word : "お題を隠しています") : "未配布"}
