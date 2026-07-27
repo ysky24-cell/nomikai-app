@@ -29,7 +29,27 @@ import {
   readVersionedStorageResult,
   removeStoredValue,
   writeVersionedStorage,
+  type StorageReadStatus,
 } from "./storage";
+import {
+  createHazardIndex,
+  createWerewolfAssignments,
+  getWerewolfRoleDeck,
+  normalizeYamanoteAnswer,
+  resolveHazardDraw,
+  shuffle,
+  tallyVotes,
+} from "./gameLogic";
+import { formatGameHash, formatHomeHash, parseHashRoute, type AppRoute } from "./router";
+import {
+  clearPartySession,
+  readPartySession,
+  removePartySessionGame,
+  updatePartySessionGame,
+  updatePartySessionParticipants,
+  type PartyParticipant,
+  type PartySession,
+} from "./partySession";
 import {
   anonymousQuestionCategories,
   anonymousQuestionPrompts,
@@ -91,6 +111,7 @@ import {
   yamanoteThemes,
   type YamanoteCategory,
 } from "./data/yamanoteThemes";
+import { SharedRoomLobby } from "./SharedRoomLobby";
 
 type BuiltInGameKey =
   | "yamanote"
@@ -233,6 +254,14 @@ const homeFilterOptions: readonly SegmentedOption<HomeFilter>[] = [
   { value: "drawing", label: "描く" },
   { value: "board", label: "ボード風" },
   { value: "large", label: "大人数" },
+];
+
+type HomePeopleFilter = "all" | "small" | "medium" | "large";
+const homePeopleFilterOptions: readonly SegmentedOption<HomePeopleFilter>[] = [
+  { value: "all", label: "人数を選ばない" },
+  { value: "small", label: "2〜4人" },
+  { value: "medium", label: "5〜8人" },
+  { value: "large", label: "9人以上" },
 ];
 
 const roomEntryOptions: readonly SegmentedOption<RoomEntryMode>[] = [
@@ -550,15 +579,6 @@ function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function shuffle<T>(items: T[]) {
-  const copied = [...items];
-  for (let i = copied.length - 1; i > 0; i -= 1) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [copied[i], copied[j]] = [copied[j], copied[i]];
-  }
-  return copied;
-}
-
 function pickOne<T>(items: T[]) {
   return items[Math.floor(Math.random() * items.length)];
 }
@@ -650,14 +670,26 @@ function useSecondTick(active: boolean) {
 function useStoredState<T>(key: string, initialState: T) {
   const storageKey = `${STORAGE_PREFIX}${key}`;
   const storageWarningShown = useRef(false);
+  const initialReadStatus = useRef<StorageReadStatus>("empty");
   const persistenceBlocked = useRef(false);
   const [state, setState] = useState<T>(() => {
-    const result = readVersionedStorageResult(storageKey, { initialState });
+    const partyParticipants = readPartySession().participants;
+    const seededInitialState = isRecordPayload(initialState) && Array.isArray(initialState.players) && partyParticipants.length > 0
+      ? ({ ...initialState, players: partyParticipants } as T)
+      : initialState;
+    const result = readVersionedStorageResult(storageKey, { initialState: seededInitialState });
+    initialReadStatus.current = result.status;
     persistenceBlocked.current = result.status === "future-version";
+    if (result.status !== "future-version" && partyParticipants.length > 0 && isRecordPayload(result.value) && Array.isArray(result.value.players) && result.value.players.length === 0) {
+      return { ...result.value, players: partyParticipants } as T;
+    }
     return result.value;
   });
 
   useEffect(() => {
+    if (initialReadStatus.current === "invalid") {
+      window.dispatchEvent(new CustomEvent("nomikai-storage-issue", { detail: { message: "保存データが壊れていたため、このゲームを初期状態で開きました。" } }));
+    }
     if (persistenceBlocked.current) {
       if (!storageWarningShown.current) {
         storageWarningShown.current = true;
@@ -669,6 +701,15 @@ function useStoredState<T>(key: string, initialState: T) {
     if (!result.ok && !storageWarningShown.current) {
       storageWarningShown.current = true;
       console.warn(`進行状況を保存できませんでした: ${storageKey}`, result.error);
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent("nomikai-storage-issue", { detail: { message: "進行状況を保存できませんでした。ブラウザの保存領域を確認してください。" } }));
+      }, 0);
+    }
+    if (isRecordPayload(state) && Array.isArray(state.players)) {
+      const participants = state.players
+        .filter((player): player is Player => isRecordPayload(player) && typeof player.id === "string" && typeof player.name === "string")
+        .map((player) => ({ id: player.id, name: player.name }));
+      if (participants.length > 0) updatePartySessionParticipants(participants);
     }
   }, [state, storageKey]);
 
@@ -693,10 +734,12 @@ function isRoomSession(value: unknown): value is RoomSession {
 }
 
 function readRoomSession(): RoomSession | null {
-  return readVersionedStorage<RoomSession | null>(ROOM_SESSION_KEY, {
+  const result = readVersionedStorageResult<RoomSession | null>(ROOM_SESSION_KEY, {
     initialState: null,
     validate: (value): value is RoomSession | null => value === null || isRoomSession(value),
   });
+  if (result.status === "legacy") writeVersionedStorage(ROOM_SESSION_KEY, result.value);
+  return result.value;
 }
 
 function saveRoomSession(roomCode: string, participant: RoomParticipant | null) {
@@ -726,84 +769,151 @@ function isUrlCandidateGameKey(key: GameKey | null): key is UrlCandidateGameKey 
   return Boolean(key && key in urlCandidateGameByKey);
 }
 
+function StorageNotice({ message, onDismiss }: { message: string | null; onDismiss: () => void }) {
+  if (!message) return null;
+  return (
+    <div className="notice-panel error storage-notice" role="alert">
+      <strong>保存データのお知らせ</strong>
+      <span>{message}</span>
+      <button className="secondary-button" type="button" onClick={onDismiss}>閉じる</button>
+    </div>
+  );
+}
+
+function detectInitialStorageIssue() {
+  const keys = [...STORED_GAME_KEYS.map((key) => `${STORAGE_PREFIX}${key}`), ROOM_SESSION_KEY, "nomikai:party-session"];
+  for (const key of keys) {
+    try {
+      const raw = window.localStorage.getItem(key);
+      if (raw) JSON.parse(raw);
+    } catch {
+      return "保存データが壊れていたため、初期状態で開きました。必要なら現在のゲームをリセットしてください。";
+    }
+  }
+  return null;
+}
+
+function NotFoundScreen({ path, onHome }: { path: string; onHome: () => void }) {
+  return (
+    <main className="app-shell">
+      <section className="tool-surface empty-state" role="alert">
+        <h1>ページが見つかりません</h1>
+        <p>「{path}」に対応するゲームはありません。トップから選び直してください。</p>
+        <button className="primary-button" type="button" onClick={onHome}>トップへ戻る</button>
+      </section>
+    </main>
+  );
+}
+
 function App() {
-  const [activeGame, setActiveGame] = useState<GameKey | null>(null);
+  const [route, setRoute] = useState<AppRoute>(() => parseHashRoute(window.location.hash, (key) => activeGames.some((game) => game.key === key)));
   const [activeRoomSession, setActiveRoomSession] = useState<RoomSession | null>(null);
+  const [partySession, setPartySession] = useState<PartySession>(() => readPartySession());
+  const [storageIssue, setStorageIssue] = useState<string | null>(() => detectInitialStorageIssue());
+  const storageIssueRef = useRef<string | null>(storageIssue);
+  const activeGame = route.kind === "game" ? (route.gameKey as GameKey) : null;
+
+  useEffect(() => {
+    const handleHashChange = () => setRoute(parseHashRoute(window.location.hash, (key) => activeGames.some((game) => game.key === key)));
+    const handleStorageIssue = (event: Event) => {
+      const message = (event as CustomEvent<{ message?: string }>).detail?.message;
+      if (message && !storageIssueRef.current) {
+        storageIssueRef.current = message;
+        setStorageIssue(message);
+      }
+    };
+    const handlePartySessionChange = () => setPartySession(readPartySession());
+    window.addEventListener("hashchange", handleHashChange);
+    window.addEventListener("nomikai-storage-issue", handleStorageIssue);
+    window.addEventListener("nomikai-party-session", handlePartySessionChange);
+    return () => {
+      window.removeEventListener("hashchange", handleHashChange);
+      window.removeEventListener("nomikai-storage-issue", handleStorageIssue);
+      window.removeEventListener("nomikai-party-session", handlePartySessionChange);
+    };
+  }, []);
+
+  function navigateHash(hash: string) {
+    if (window.location.hash !== hash) window.location.hash = hash;
+    setRoute(parseHashRoute(hash, (key) => activeGames.some((game) => game.key === key)));
+  }
 
   function startGame(game: GameKey, roomSession: RoomSession | null = null) {
     setActiveRoomSession(roomSession);
-    setActiveGame(game);
+    updatePartySessionGame(game, partySession.participants);
+    setPartySession(readPartySession());
+    navigateHash(formatGameHash(game));
   }
 
   function goHome() {
-    setActiveGame(null);
+    navigateHash(formatHomeHash());
   }
 
   function resetAllGames() {
     clearStoredGameStates();
     clearRoomSession();
+    clearPartySession();
     setActiveRoomSession(null);
-    setActiveGame(null);
+    setPartySession(emptyPartySessionFallback());
+    goHome();
   }
 
-  if (activeGame === "yamanote") {
-    return <YamanoteGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
-  }
+  const notice = <StorageNotice message={storageIssue} onDismiss={() => { storageIssueRef.current = null; setStorageIssue(null); }} />;
+  const content = route.kind === "not-found" ? (
+    <NotFoundScreen path={route.path} onHome={goHome} />
+  ) : activeGame === "yamanote" ? (
+    <YamanoteGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />
+  ) : activeGame === "two-choice" ? (
+    <TwoChoiceGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />
+  ) : activeGame === "word-wolf" ? (
+    <WordWolfGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />
+  ) : activeGame === "ng-word" ? (
+    <NgWordGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />
+  ) : activeGame === "impression-ranking" ? (
+    <ImpressionRankingGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />
+  ) : activeGame === "party-pack" ? (
+    <PartyPackGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />
+  ) : activeGame === "johari-window" ? (
+    <JohariWindowGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />
+  ) : activeGame === "turtle-soup" ? (
+    <TurtleSoupGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />
+  ) : activeGame === "anonymous-box" ? (
+    <AnonymousQuestionBoxGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />
+  ) : activeGame === "werewolf-game" ? (
+    <WerewolfGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />
+  ) : isUrlCandidateGameKey(activeGame) ? (
+    <UrlCandidateGame config={urlCandidateGameByKey[activeGame]} onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />
+  ) : (
+    <HomeScreen
+      onStart={startGame}
+      onResetAll={resetAllGames}
+      partySession={partySession}
+    />
+  );
 
-  if (activeGame === "two-choice") {
-    return <TwoChoiceGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
-  }
-
-  if (activeGame === "word-wolf") {
-    return <WordWolfGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
-  }
-
-  if (activeGame === "ng-word") {
-    return <NgWordGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
-  }
-
-  if (activeGame === "impression-ranking") {
-    return <ImpressionRankingGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
-  }
-
-  if (activeGame === "party-pack") {
-    return <PartyPackGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
-  }
-
-  if (activeGame === "johari-window") {
-    return <JohariWindowGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
-  }
-
-  if (activeGame === "turtle-soup") {
-    return <TurtleSoupGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
-  }
-
-  if (activeGame === "anonymous-box") {
-    return <AnonymousQuestionBoxGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
-  }
-
-  if (activeGame === "werewolf-game") {
-    return <WerewolfGame onHome={goHome} onResetAll={resetAllGames} roomSessionOverride={activeRoomSession} />;
-  }
-
-  if (isUrlCandidateGameKey(activeGame)) {
-    return (
-      <UrlCandidateGame
-        config={urlCandidateGameByKey[activeGame]}
-        onHome={goHome}
-        onResetAll={resetAllGames}
-        roomSessionOverride={activeRoomSession}
-      />
-    );
-  }
-
-  return <HomeScreen onStart={startGame} onResetAll={resetAllGames} />;
+  return <>{notice}{content}</>;
 }
 
-function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey, roomSession?: RoomSession | null) => void; onResetAll: () => void }) {
+function emptyPartySessionFallback(): PartySession {
+  return { sessionId: "", participants: [], lastGameKey: null, recentGameKeys: [], updatedAt: "1970-01-01T00:00:00.000Z" };
+}
+
+function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: GameKey, roomSession?: RoomSession | null) => void; onResetAll: () => void; partySession: PartySession }) {
   const [filter, setFilter] = useState<HomeFilter>("all");
+  const [query, setQuery] = useState("");
+  const [peopleFilter, setPeopleFilter] = useState<HomePeopleFilter>("all");
   const [hasRoomContext, setHasRoomContext] = useState(false);
-  const visibleGames = filter === "all" ? activeGames : activeGames.filter((game) => game.groups.includes(filter));
+  const visibleGames = activeGames.filter((game) => {
+    const matchesCategory = filter === "all" || game.groups.includes(filter);
+    const haystack = `${game.title} ${game.description}`.toLocaleLowerCase();
+    const matchesQuery = !query.trim() || haystack.includes(query.trim().toLocaleLowerCase());
+    const minimumPeople = Number(game.people.match(/\d+/)?.[0] ?? 2);
+    const matchesPeople = peopleFilter === "all" ||
+      (peopleFilter === "small" && minimumPeople <= 4) ||
+      (peopleFilter === "medium" && minimumPeople >= 5 && minimumPeople <= 8) ||
+      (peopleFilter === "large" && minimumPeople >= 9);
+    return matchesCategory && matchesQuery && matchesPeople;
+  });
   const visibleReadyGames = visibleGames.filter((game) => game.status === "ready");
   const visibleBetaGames = visibleGames.filter((game) => game.status === "beta");
   const visibleFacilitatorGames = visibleGames.filter((game) => game.status === "facilitator");
@@ -829,18 +939,54 @@ function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey, roomSess
           {!hasRoomContext && (
             <button className="secondary-button reset-all-button" onClick={confirmResetAll}>
               <RotateCcw size={18} />
-              端末データを初期化
+              全データ削除
             </button>
           )}
         </div>
       </section>
 
+      {partySession.lastGameKey && findGameMeta(toGameKey(partySession.lastGameKey)) && (
+        <section className="tool-surface continuation-panel" aria-label="続きから">
+          <div>
+            <p className="eyebrow">前回の続き</p>
+            <h2>{findGameMeta(toGameKey(partySession.lastGameKey))?.title}</h2>
+            <p className="soft-note">
+              {partySession.participants.length > 0
+                ? `${partySession.participants.length}人の参加者を引き継げます。`
+                : "保存した進行を続きから開けます。"}
+            </p>
+          </div>
+          <button className="primary-button" type="button" onClick={() => onStart(toGameKey(partySession.lastGameKey) as GameKey)}>
+            <Play size={18} />
+            続きから
+          </button>
+        </section>
+      )}
+
+      {partySession.recentGameKeys.length > 0 && (
+        <section className="tool-surface recent-games" aria-label="最近遊んだゲーム">
+          <div className="section-heading"><Timer size={20} /><h2>最近遊んだゲーム</h2></div>
+          <div className="action-row">
+            {partySession.recentGameKeys.map((key) => {
+              const game = findGameMeta(toGameKey(key));
+              return game ? <button className="secondary-button" type="button" key={key} onClick={() => onStart(game.key)}>{game.title}</button> : null;
+            })}
+          </div>
+        </section>
+      )}
+
       <RoomLobby onStart={onStart} onPresenceChange={setHasRoomContext} />
+      <SharedRoomLobby apiUrl={API_URL} />
 
       {!hasRoomContext && (
         <>
           <section className="home-filter" aria-label="ゲーム絞り込み">
+            <label className="search-field">
+              <span>ゲームを検索</span>
+              <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="例: 会話、投票、運" aria-label="ゲームを検索" />
+            </label>
             <SegmentedControl label="表示するゲーム" options={homeFilterOptions} value={filter} onChange={setFilter} />
+            <SegmentedControl label="人数別おすすめ" options={homePeopleFilterOptions} value={peopleFilter} onChange={setPeopleFilter} />
             <p className="soft-note">
               {visibleGames.length}件を表示中。定番は、飲み会で使いやすい会話・反射・運試し系をまとめた入口です。
             </p>
@@ -897,6 +1043,9 @@ function HomeGameSection({
               </div>
               <div>
                 <span className={`game-status-badge status-${game.status}`}>{gameStatusCopy[game.status].label}</span>
+                <span className="game-mode-badge">
+                  {game.status === "ready" ? "1台共有" : game.status === "facilitator" ? "進行カード" : "QR対応予定"}
+                </span>
                 <h2>{game.title}</h2>
                 <p>{game.description}</p>
               </div>
@@ -2219,16 +2368,28 @@ type PlayerSetupProps = {
 
 function PlayerSetup({ players, minPlayers, maxPlayers, onChange }: PlayerSetupProps) {
   const [draftName, setDraftName] = useState("");
+  const [nameError, setNameError] = useState<string | null>(null);
   const remaining = Math.max(0, minPlayers - players.length);
 
   function addPlayer() {
     const name = draftName.trim();
     if (!name || players.length >= maxPlayers) return;
+    if (players.some((player) => player.name.trim().toLocaleLowerCase() === name.toLocaleLowerCase())) {
+      setNameError("同じ名前の参加者は追加できません。呼び名を少し変えてください。");
+      return;
+    }
     onChange([...players, { id: createId("player"), name }]);
     setDraftName("");
+    setNameError(null);
   }
 
   function updatePlayer(id: string, name: string) {
+    const normalized = name.trim().toLocaleLowerCase();
+    if (normalized && players.some((player) => player.id !== id && player.name.trim().toLocaleLowerCase() === normalized)) {
+      setNameError("同じ名前の参加者がいるため、その名前は使えません。");
+      return;
+    }
+    setNameError(null);
     onChange(players.map((player) => (player.id === id ? { ...player, name } : player)));
   }
 
@@ -2267,6 +2428,7 @@ function PlayerSetup({ players, minPlayers, maxPlayers, onChange }: PlayerSetupP
           <span className="sr-only">追加</span>
         </button>
       </form>
+      {nameError && <p className="room-message error" role="alert">{nameError}</p>}
 
       <div className="player-list">
         {players.map((player, index) => (
@@ -2312,7 +2474,7 @@ function SegmentedControl<T extends string>({
   return (
     <div className="control-block">
       <span className="control-label">{label}</span>
-      <div className="segmented">
+      <div className="segmented" role="group" aria-label={label}>
         {options.map((option) => (
           <button
             aria-pressed={option.value === value}
@@ -2383,9 +2545,19 @@ function GameFrame({
   onResetAll: () => void;
   children: React.ReactNode;
 }) {
+  function confirmResetCurrent() {
+    const game = activeGames.find((item) => item.title === title);
+    const confirmed = window.confirm(`「${title}」の進行だけをリセットしてトップへ戻りますか？`);
+    if (confirmed && game) {
+      removeStoredValue(`${STORAGE_PREFIX}${game.key}`);
+      removePartySessionGame(game.key);
+      onHome();
+    }
+  }
+
   function confirmResetAll() {
     const confirmed = window.confirm(
-      "この端末に保存した全ゲームの進行とルームの復帰情報を消して、トップへ戻りますか？",
+      "この端末に保存した全ゲーム、参加者、ルームの復帰情報をすべて削除してトップへ戻りますか？",
     );
     if (confirmed) onResetAll();
   }
@@ -2397,9 +2569,13 @@ function GameFrame({
           <Home size={18} />
           トップ
         </button>
-        <button className="secondary-button reset-all-button" onClick={confirmResetAll}>
+        <button className="secondary-button" onClick={confirmResetCurrent}>
           <RotateCcw size={18} />
-          初期化してトップへ
+          現在のゲームをリセット
+        </button>
+        <button className="secondary-button reset-all-button" onClick={confirmResetAll}>
+          <Trash2 size={18} />
+          全データ削除
         </button>
       </nav>
       <section className="game-title">
@@ -2491,10 +2667,6 @@ function createPlayerCountMap(players: Player[]) {
 
 function createPlayerResourceMap(players: Player[]) {
   return Object.fromEntries(players.map((player) => [player.id, 3]));
-}
-
-function createHazardIndex() {
-  return Math.floor(Math.random() * 8) + 1;
 }
 
 function formatChoiceLabel(option: string, index: number) {
@@ -4234,7 +4406,7 @@ function UrlCandidateInteractionPanel({
             onClick={() => {
               if (!currentPlayer) return;
               const nextDraw = state.drawnCount + 1;
-              const isHazard = nextDraw === state.hazardIndex;
+              const isHazard = resolveHazardDraw(nextDraw, state.hazardIndex) === "hazard";
               const nextIndex = (state.currentPlayerIndex + 1) % Math.max(1, state.players.length);
               const message = isHazard
                 ? `${currentPlayer.name}さんがはずれ。安全な一言お題で場を温めます。`
@@ -4563,33 +4735,11 @@ const initialWerewolfState: WerewolfState = {
   actionLog: [],
 };
 
-function getWerewolfRoleDeck(playerCount: number): WerewolfRole[] {
-  const roles: WerewolfRole[] =
-    playerCount <= 6
-      ? ["werewolf", "seer", "knight"]
-      : playerCount <= 8
-        ? ["werewolf", "werewolf", "seer", "knight"]
-        : playerCount <= 10
-          ? ["werewolf", "werewolf", "seer", "knight", "medium"]
-          : ["werewolf", "werewolf", "werewolf", "seer", "knight", "medium"];
-  const villagerCount = Math.max(0, playerCount - roles.length);
-  return [...roles, ...Array.from({ length: villagerCount }, () => "villager" as const)];
-}
-
 function countWerewolfRoles(roles: readonly WerewolfRole[]) {
   return werewolfRoleOrder.map((role) => ({
     role,
     count: roles.filter((item) => item === role).length,
   }));
-}
-
-function createWerewolfAssignments(players: Player[]) {
-  const roles = shuffle(getWerewolfRoleDeck(players.length));
-  return players.map((player, index) => ({
-    playerId: player.id,
-    role: roles[index],
-    alive: true,
-  })) satisfies WerewolfAssignment[];
 }
 
 function getWerewolfAssignment(assignments: readonly WerewolfAssignment[], playerId: string) {
@@ -4645,13 +4795,7 @@ function getNextWerewolfNightStep(
 }
 
 function tallyWerewolfVotes(votes: Record<string, string>, candidates: readonly Player[]) {
-  const rows = candidates.map((player) => ({
-    player,
-    count: Object.values(votes).filter((targetId) => targetId === player.id).length,
-  }));
-  const maxVotes = Math.max(0, ...rows.map((row) => row.count));
-  const topTargetIds = rows.filter((row) => row.count === maxVotes && maxVotes > 0).map((row) => row.player.id);
-  return { rows, maxVotes, topTargetIds };
+  return tallyVotes(votes, candidates);
 }
 
 type WerewolfRoomEnvelope = RoomProgressState & {
@@ -4749,6 +4893,9 @@ function WerewolfGame({
   const canStart = setupPlayers.length >= 6 && setupPlayers.every((player) => player.name.trim());
   const rolePreview = countWerewolfRoles(getWerewolfRoleDeck(Math.max(6, setupPlayers.length || 6)));
   const alivePlayers = getAliveWerewolfPlayers(state.players, state.assignments);
+  const voteTargets = state.tiedTargetIds.length > 1
+    ? alivePlayers.filter((player) => state.tiedTargetIds.includes(player.id))
+    : alivePlayers;
   const deadPlayers = state.players.filter((player) => !alivePlayers.some((alivePlayer) => alivePlayer.id === player.id));
   const currentRevealPlayer = state.players[state.revealIndex] ?? null;
   const currentRevealAssignment = currentRevealPlayer
@@ -4923,7 +5070,7 @@ function WerewolfGame({
       return;
     }
 
-    const tally = tallyWerewolfVotes(nextVotes, alivePlayers);
+    const tally = tallyWerewolfVotes(nextVotes, voteTargets);
     if (tally.topTargetIds.length !== 1) {
       setState({
         ...state,
@@ -5384,7 +5531,7 @@ function WerewolfGame({
             <p>追放したい人を1人選びます。自分には投票できません。</p>
           </div>
           <div className="candidate-grid">
-            {alivePlayers
+            {voteTargets
               .filter((player) => player.id !== currentVoter.id)
               .map((player) => (
                 <button key={player.id} disabled={!canVoteForCurrentVoter} onClick={() => finishVote(player.id)}>
@@ -5419,7 +5566,7 @@ function WerewolfGame({
               <button
                 className="primary-button"
                 disabled={!canControlWerewolf}
-                onClick={() => setState({ ...state, phase: "vote", votes: {}, voteIndex: 0, tiedTargetIds: [] })}
+                onClick={() => setState({ ...state, phase: "vote", votes: {}, voteIndex: 0 })}
               >
                 <Vote size={18} />
                 再投票
@@ -5510,6 +5657,7 @@ type YamanoteState = {
   currentPlayerIndex: number;
   answerLog: YamanoteAnswerLog[];
   missCounts: Record<string, number>;
+  turnEndsAt: string | null;
 };
 
 const yamanoteThemeCountOptions: SegmentedOption<string>[] = [
@@ -5540,6 +5688,7 @@ const initialYamanoteState: YamanoteState = {
   currentPlayerIndex: 0,
   answerLog: [],
   missCounts: {},
+  turnEndsAt: null,
 };
 
 type YamanoteRoomEnvelope = RoomProgressState & {
@@ -5620,14 +5769,32 @@ function YamanoteGame({
   const selectedThemeCount = Math.min(state.themeCount, themePool.length);
   const activeTheme = yamanoteThemes.find((theme) => theme.id === state.deckThemeIds[state.deckIndex]) ?? null;
   const currentPlayer = state.players[state.currentPlayerIndex % Math.max(1, state.players.length)] ?? null;
+  const yamanoteNow = useSecondTick(state.step === "play");
+  const turnRemainingSeconds = state.turnEndsAt ? Math.max(0, Math.ceil((Date.parse(state.turnEndsAt) - yamanoteNow) / 1000)) : state.secondsPerTurn;
   const canStart = setupPlayers.length >= 2 && setupPlayers.every((player) => player.name.trim());
   const progressLabel = state.deckThemeIds.length > 0 ? `${state.deckIndex + 1}/${state.deckThemeIds.length}` : "";
-  const normalizedAnswers = new Set(state.answerLog.map((item) => item.answer.trim().toLowerCase()));
-  const normalizedDraft = draftAnswer.trim().toLowerCase();
+  const normalizedAnswers = new Set(state.answerLog.map((item) => normalizeYamanoteAnswer(item.answer)));
+  const normalizedDraft = normalizeYamanoteAnswer(draftAnswer);
   const isDuplicateAnswer = Boolean(normalizedDraft && normalizedAnswers.has(normalizedDraft));
   const isRoomHost = isYamanoteRoom && roomSession?.participantRole === "host";
   const canControlYamanote = !isYamanoteRoom || (isRoomHost && Boolean(roomSnapshot));
   const canActForCurrentYamanotePlayer = !isYamanoteRoom || canControlYamanote || currentPlayer?.id === roomSession?.participantId;
+
+  useEffect(() => {
+    if (state.step !== "play" || !currentPlayer) return;
+    if (!state.turnEndsAt) {
+      setState({ ...state, turnEndsAt: new Date(Date.now() + state.secondsPerTurn * 1000).toISOString() });
+      return;
+    }
+    if (turnRemainingSeconds > 0) return;
+    setState({
+      ...state,
+      currentPlayerIndex: (state.currentPlayerIndex + 1) % Math.max(1, state.players.length),
+      missCounts: { ...state.missCounts, [currentPlayer.id]: (state.missCounts[currentPlayer.id] ?? 0) + 1 },
+      turnEndsAt: new Date(Date.now() + state.secondsPerTurn * 1000).toISOString(),
+    });
+    setDraftAnswer("");
+  }, [currentPlayer, state, turnRemainingSeconds]);
 
   function setState(nextStateOrUpdater: YamanoteState | ((current: YamanoteState) => YamanoteState)) {
     if (isYamanoteRoom && roomSession && !roomSnapshot) {
@@ -5714,6 +5881,7 @@ function YamanoteGame({
       currentPlayerIndex: 0,
       answerLog: [],
       missCounts: {},
+      turnEndsAt: new Date(Date.now() + state.secondsPerTurn * 1000).toISOString(),
     });
     setDraftAnswer("");
   }
@@ -5726,6 +5894,7 @@ function YamanoteGame({
       missCounts: extraMissForPlayerId
         ? { ...state.missCounts, [extraMissForPlayerId]: (state.missCounts[extraMissForPlayerId] ?? 0) + 1 }
         : state.missCounts,
+      turnEndsAt: new Date(Date.now() + state.secondsPerTurn * 1000).toISOString(),
     });
     setDraftAnswer("");
   }
@@ -5740,6 +5909,7 @@ function YamanoteGame({
         ...state.answerLog,
         { id: createId("answer"), playerId: currentPlayer.id, playerName: currentPlayer.name, answer },
       ],
+      turnEndsAt: new Date(Date.now() + state.secondsPerTurn * 1000).toISOString(),
     });
     setDraftAnswer("");
   }
@@ -5934,6 +6104,9 @@ function YamanoteGame({
             <p>
               {currentPlayer.name}さんの番です。{state.secondsPerTurn}秒以内を目安に、まだ出ていない答えを1つ言います。
             </p>
+            <div className={`timer-display ${turnRemainingSeconds <= 1 ? "warning" : ""}`} role="timer" aria-live="polite">
+              {turnRemainingSeconds > 0 ? `残り${turnRemainingSeconds}秒` : "時間切れ"}
+            </div>
           </div>
           <div className="chip-list">
             {activeTheme.examples.map((example) => (
@@ -7408,6 +7581,7 @@ function AnonymousQuestionBoxGame({
   const roomSocketRef = useRef<Socket | null>(null);
   const [storedState, setStoredState] = useStoredState<AnonymousQuestionState>("anonymous-box", initialAnonymousQuestionState);
   const [draftQuestion, setDraftQuestion] = useState("");
+  const [anonymousCoverVisible, setAnonymousCoverVisible] = useState(false);
   const roomAnonymousQuestionState = parseAnonymousQuestionStateFromRoom(roomSnapshot);
   const isAnonymousQuestionRoom = Boolean(roomSession && (!roomSnapshot || roomSnapshot.room.currentGame === "anonymous-box"));
   const activeAnonymousQuestionState = isAnonymousQuestionRoom ? (roomAnonymousQuestionState ?? initialAnonymousQuestionState) : storedState;
@@ -7512,6 +7686,7 @@ function AnonymousQuestionBoxGame({
       deckIndex: 0,
     });
     setDraftQuestion("");
+    setAnonymousCoverVisible(true);
   }
 
   function removeCustomQuestion(id: string) {
@@ -7641,6 +7816,13 @@ function AnonymousQuestionBoxGame({
           )}
 
           <div className="setup-block">
+            {anonymousCoverVisible && (
+              <div className="notice-panel calm" role="status">
+                <strong>投稿を受け付けました</strong>
+                <p>質問本文はこの画面に残しません。スマホを次の人へ渡してください。</p>
+                <button className="primary-button" type="button" onClick={() => setAnonymousCoverVisible(false)}>次の人へ渡す</button>
+              </div>
+            )}
             <div className="setup-heading">
               <div>
                 <h3>匿名で質問を追加</h3>
@@ -7859,6 +8041,8 @@ function TwoChoiceGame({
   const roomSession = roomSessionOverride ?? storedRoomSession;
   const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
   const [roomSyncError, setRoomSyncError] = useState("");
+  const [privateVotePlayerIndex, setPrivateVotePlayerIndex] = useState(0);
+  const [privateVoteCovered, setPrivateVoteCovered] = useState(false);
   const roomSocketRef = useRef<Socket | null>(null);
   const [storedState, setStoredState] = useStoredState<TwoChoiceState>("two-choice", initialTwoChoiceState);
   const roomTwoChoiceState = parseTwoChoiceStateFromRoom(roomSnapshot);
@@ -7980,10 +8164,17 @@ function TwoChoiceGame({
       deckPromptIds,
       deckIndex: 0,
     });
+    setPrivateVotePlayerIndex(0);
+    setPrivateVoteCovered(false);
   }
 
   function updateVote(playerId: string, choice: TwoChoiceChoice) {
     setState({ ...state, votes: { ...state.votes, [playerId]: choice } });
+  }
+
+  function submitPrivateVote(playerId: string, choice: TwoChoiceChoice) {
+    updateVote(playerId, choice);
+    setPrivateVoteCovered(true);
   }
 
   function moveToNextPrompt() {
@@ -7994,6 +8185,8 @@ function TwoChoiceGame({
       return;
     }
     setState({ ...state, step: "vote", promptId: nextPromptId, deckIndex: nextIndex, votes: {} });
+    setPrivateVotePlayerIndex(0);
+    setPrivateVoteCovered(false);
   }
 
   const votedCount = state.players.filter((player) => state.votes[player.id]).length;
@@ -8151,12 +8344,33 @@ function TwoChoiceGame({
             </ul>
           </div>
 
+          {!isTwoChoiceRoom && privateVoteCovered && (
+            <div className="notice-panel calm" role="status">
+              <strong>投票を受け付けました</strong>
+              <p>選択内容は隠しました。スマホを次の人へ渡してください。</p>
+              <button className="primary-button" type="button" onClick={() => { setPrivateVotePlayerIndex((index) => index + 1); setPrivateVoteCovered(false); }}>次の人へ渡す</button>
+            </div>
+          )}
           <div className="vote-list">
-            {state.players.map((player) => (
+            {!isTwoChoiceRoom ? (() => {
+              const player = state.players[privateVotePlayerIndex];
+              if (!player || privateVoteCovered) return null;
+              return (
+                <div className="vote-row" key={player.id}>
+                  <strong>{player.name || "名前なし"}さんの投票</strong>
+                  <div className="vote-buttons">
+                    <button onClick={() => submitPrivateVote(player.id, "A")}>{prompt.optionA}</button>
+                    <button onClick={() => submitPrivateVote(player.id, "B")}>{prompt.optionB}</button>
+                    <button onClick={() => submitPrivateVote(player.id, "skip")}>パス</button>
+                  </div>
+                </div>
+              );
+            })() : state.players.map((player) => (
               <div className="vote-row" key={player.id}>
                 <strong>{player.name || "名前なし"}</strong>
                 <div className="vote-buttons">
                   <button
+                    aria-pressed={state.votes[player.id] === "A"}
                     className={state.votes[player.id] === "A" ? "selected-choice" : ""}
                     disabled={!canVoteForPlayer(player.id)}
                     onClick={() => updateVote(player.id, "A")}
@@ -8164,6 +8378,7 @@ function TwoChoiceGame({
                     {prompt.optionA}
                   </button>
                   <button
+                    aria-pressed={state.votes[player.id] === "B"}
                     className={state.votes[player.id] === "B" ? "selected-choice" : ""}
                     disabled={!canVoteForPlayer(player.id)}
                     onClick={() => updateVote(player.id, "B")}
@@ -8171,6 +8386,7 @@ function TwoChoiceGame({
                     {prompt.optionB}
                   </button>
                   <button
+                    aria-pressed={state.votes[player.id] === "skip"}
                     className={state.votes[player.id] === "skip" ? "selected-choice muted" : ""}
                     disabled={!canVoteForPlayer(player.id)}
                     onClick={() => updateVote(player.id, "skip")}
@@ -8187,7 +8403,7 @@ function TwoChoiceGame({
               <ChevronRight size={18} />
               結果を見る
             </button>
-            <span className="inline-status">{votedCount}/{state.players.length} 投票済み</span>
+            <span className="inline-status" aria-live="polite">{votedCount}/{state.players.length} 投票済み</span>
           </div>
           {!canControlTwoChoice && <p className="soft-note">自分の投票だけ操作できます。結果表示はホスト端末で行います。</p>}
         </section>
@@ -8380,6 +8596,8 @@ function ImpressionRankingGame({
   const roomSession = roomSessionOverride ?? storedRoomSession;
   const [roomSnapshot, setRoomSnapshot] = useState<RoomSnapshot | null>(null);
   const [roomSyncError, setRoomSyncError] = useState("");
+  const [privateVotePlayerIndex, setPrivateVotePlayerIndex] = useState(0);
+  const [privateVoteCovered, setPrivateVoteCovered] = useState(false);
   const roomSocketRef = useRef<Socket | null>(null);
   const [storedState, setStoredState] = useStoredState<ImpressionState>("impression-ranking", initialImpressionState);
   const roomImpressionState = parseImpressionStateFromRoom(roomSnapshot);
@@ -8504,10 +8722,17 @@ function ImpressionRankingGame({
       deckPromptIds,
       deckIndex: 0,
     });
+    setPrivateVotePlayerIndex(0);
+    setPrivateVoteCovered(false);
   }
 
   function updateImpressionVote(playerId: string, targetId: ImpressionVoteChoice) {
     setState({ ...state, votes: { ...state.votes, [playerId]: targetId } });
+  }
+
+  function submitPrivateImpressionVote(playerId: string, targetId: ImpressionVoteChoice) {
+    updateImpressionVote(playerId, targetId);
+    setPrivateVoteCovered(true);
   }
 
   function moveToNextImpressionPrompt() {
@@ -8693,8 +8918,28 @@ function ImpressionRankingGame({
             </ul>
           </div>
 
+          {!isImpressionRoom && privateVoteCovered && (
+            <div className="notice-panel calm" role="status">
+              <strong>投票を受け付けました</strong>
+              <p>選択内容は隠しました。スマホを次の人へ渡してください。</p>
+              <button className="primary-button" type="button" onClick={() => { setPrivateVotePlayerIndex((index) => index + 1); setPrivateVoteCovered(false); }}>次の人へ渡す</button>
+            </div>
+          )}
           <div className="vote-list">
-            {state.players.map((voter) => {
+            {!isImpressionRoom ? (() => {
+              const voter = state.players[privateVotePlayerIndex];
+              if (!voter || privateVoteCovered) return null;
+              const candidates = state.allowSelfVote ? state.players : state.players.filter((player) => player.id !== voter.id);
+              return (
+                <div className="vote-row ranking-vote-row" key={voter.id}>
+                  <strong>{voter.name || "名前なし"}さんの投票</strong>
+                  <div className="ranking-vote-buttons">
+                    {candidates.map((candidate) => <button key={candidate.id} onClick={() => submitPrivateImpressionVote(voter.id, candidate.id)}>{candidate.name}</button>)}
+                    <button onClick={() => submitPrivateImpressionVote(voter.id, "skip")}>パス</button>
+                  </div>
+                </div>
+              );
+            })() : state.players.map((voter) => {
               const candidates = state.allowSelfVote ? state.players : state.players.filter((player) => player.id !== voter.id);
               return (
                 <div className="vote-row ranking-vote-row" key={voter.id}>
@@ -8702,6 +8947,7 @@ function ImpressionRankingGame({
                   <div className="ranking-vote-buttons">
                     {candidates.map((candidate) => (
                       <button
+                        aria-pressed={state.votes[voter.id] === candidate.id}
                         className={state.votes[voter.id] === candidate.id ? "selected-choice" : ""}
                         disabled={!canVoteForPlayer(voter.id)}
                         key={candidate.id}
@@ -8711,6 +8957,7 @@ function ImpressionRankingGame({
                       </button>
                     ))}
                     <button
+                      aria-pressed={state.votes[voter.id] === "skip"}
                       className={state.votes[voter.id] === "skip" ? "selected-choice muted" : ""}
                       disabled={!canVoteForPlayer(voter.id)}
                       onClick={() => updateImpressionVote(voter.id, "skip")}
@@ -8728,7 +8975,7 @@ function ImpressionRankingGame({
               <ChevronRight size={18} />
               結果を見る
             </button>
-            <span className="inline-status">{votedCount}/{state.players.length} 投票済み</span>
+            <span className="inline-status" aria-live="polite">{votedCount}/{state.players.length} 投票済み</span>
           </div>
           {!canControlImpression && <p className="soft-note">自分の投票だけ操作できます。結果表示はホスト端末で行います。</p>}
         </section>

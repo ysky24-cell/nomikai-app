@@ -1,0 +1,498 @@
+import { createHash, randomBytes } from "node:crypto";
+
+export type RoomStatus = "waiting" | "playing" | "closed";
+export type ParticipantRole = "host" | "player";
+
+export type RoomParticipant = {
+  id: string;
+  name: string;
+  role: ParticipantRole;
+  reconnectTokenHash: string;
+  connected: boolean;
+};
+
+export type TwoChoiceAnswer = "A" | "B" | "pass";
+export type AnonymousEntryStatus = "unshown" | "displayed" | "answered" | "skipped";
+type TwoChoiceGameState = {
+  kind: "two-choice";
+  prompt: string;
+  deadlineAt: number | null;
+  phase: "answering" | "revealed";
+  answers: Record<string, TwoChoiceAnswer>;
+};
+type AnonymousEntry = { id: string; text: string; authorId: string; status: AnonymousEntryStatus };
+type AnonymousGameState = {
+  kind: "anonymous-box";
+  prompt: string;
+  entries: AnonymousEntry[];
+};
+type WordWolfGameState = {
+  kind: "word-wolf";
+  phase: "discussion" | "voting" | "revealed";
+  majorityTopic: string;
+  minorityTopic: string;
+  minorityIds: string[];
+  votes: Record<string, string>;
+  winner?: "majority" | "minority" | "draw";
+  phaseDeadlineAt: number | null;
+};
+export type WerewolfRole = "werewolf" | "seer" | "guard" | "villager";
+type WerewolfGameState = {
+  kind: "werewolf";
+  phase: "night" | "day" | "voting" | "revote" | "finished";
+  roles: Record<string, WerewolfRole>;
+  aliveIds: string[];
+  nightActions: { killTargetId?: string; guardTargetId?: string; inspectTargetId?: string };
+  votes: Record<string, string>;
+  tiedTargetIds: string[];
+  winner?: "werewolf" | "villager";
+  seerResults: Record<string, { targetId: string; role: WerewolfRole }[]>;
+  phaseDeadlineAt: number | null;
+};
+export type RoomGameState = TwoChoiceGameState | AnonymousGameState | WordWolfGameState | WerewolfGameState;
+
+export type RoomRecord = {
+  id: string;
+  code: string;
+  status: RoomStatus;
+  version: number;
+  createdAt: number;
+  expiresAt: number;
+  hostTokenHash: string;
+  participants: RoomParticipant[];
+  game?: RoomGameState;
+};
+
+export type RoomCommandResult = RoomProjection & {
+  credentials?: { participantId: string; reconnectToken: string };
+};
+
+export type RoomProjection = {
+  code: string;
+  status: RoomStatus;
+  version: number;
+  participants: Array<Pick<RoomParticipant, "id" | "name" | "role" | "connected">>;
+  self: { id: string; role: ParticipantRole } | null;
+  game?: PublicRoomGame;
+};
+
+export type PublicRoomGame =
+  | { kind: "two-choice"; prompt: string; deadlineAt: number | null; phase: "answering" | "revealed"; answeredCount: number; participantCount: number; ownAnswer?: TwoChoiceAnswer; result?: { A: number; B: number; pass: number } }
+  | { kind: "anonymous-box"; prompt: string; entries: Array<{ id: string; text: string; status: AnonymousEntryStatus }>; ownEntry?: { id: string; text: string; status: AnonymousEntryStatus } }
+  | { kind: "word-wolf"; phase: "discussion" | "voting" | "revealed"; phaseDeadlineAt: number | null; participantCount: number; voteCount: number; ownTopic?: string; ownVote?: string; winner?: "majority" | "minority" | "draw"; voteResults?: Record<string, number> }
+  | { kind: "werewolf"; phase: "night" | "day" | "voting" | "revote" | "finished"; phaseDeadlineAt: number | null; aliveIds: string[]; ownRole?: WerewolfRole; teammates?: string[]; ownSeerResults?: { targetId: string; role: WerewolfRole }[]; ownVote?: string; tiedTargetIds?: string[]; winner?: "werewolf" | "villager" };
+
+export type RoomCommand = {
+  roomCode: string;
+  commandId: string;
+  expectedVersion: number;
+  kind: "join" | "reconnect" | "leave" | "kick" | "start" | "close" | "game_start" | "game_answer" | "game_reveal" | "anonymous_submit" | "anonymous_moderate" | "game_vote" | "game_phase" | "werewolf_action";
+  participantId?: string;
+  targetParticipantId?: string;
+  name?: string;
+  gameKind?: "two-choice" | "anonymous-box" | "word-wolf" | "werewolf";
+  prompt?: string;
+  deadlineAt?: number | null;
+  choice?: TwoChoiceAnswer;
+  text?: string;
+  targetEntryId?: string;
+  moderationStatus?: AnonymousEntryStatus;
+  minorityCount?: number;
+  majorityTopic?: string;
+  minorityTopic?: string;
+  voteTargetId?: string;
+  action?: "kill" | "guard" | "inspect";
+};
+
+export interface RoomRepository {
+  create(room: RoomRecord): Promise<void>;
+  get(code: string): Promise<RoomRecord | null>;
+  save(room: RoomRecord): Promise<void>;
+}
+
+export class MemoryRoomRepository implements RoomRepository {
+  private readonly rooms = new Map<string, RoomRecord>();
+  constructor(private readonly now = () => Date.now()) {}
+  async create(room: RoomRecord) { this.rooms.set(room.code, structuredClone(room)); }
+  async get(code: string) {
+    const room = this.rooms.get(code);
+    if (!room) return null;
+    if (room.expiresAt <= this.now()) { this.rooms.delete(code); return null; }
+    return structuredClone(room);
+  }
+  async save(room: RoomRecord) { this.rooms.set(room.code, structuredClone(room)); }
+}
+
+export class RoomDomainError extends Error {
+  constructor(public readonly code: string, message = code) { super(message); }
+}
+
+const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+const maxParticipants = 30;
+const ttlMs = 6 * 60 * 60 * 1000;
+
+function token(size = 24) {
+  const bytes = randomBytes(size);
+  return Array.from(bytes, (byte) => codeAlphabet[byte % codeAlphabet.length]).join("");
+}
+
+function hashToken(value: string) {
+  return createHash("sha256").update(value).digest("base64url");
+}
+
+function normalizeName(name: string) {
+  return name.normalize("NFKC").trim().toLocaleLowerCase();
+}
+
+function randomOrder<T>(items: readonly T[]) {
+  return [...items].sort(() => randomBytes(2).readUInt16BE(0) / 65536 - 0.5);
+}
+
+function werewolfWinner(game: WerewolfGameState): "werewolf" | "villager" | undefined {
+  const wolves = game.aliveIds.filter((id) => game.roles[id] === "werewolf").length;
+  const villagers = game.aliveIds.length - wolves;
+  if (wolves === 0) return "villager";
+  if (wolves >= villagers) return "werewolf";
+  return undefined;
+}
+
+function resolveWordWolf(game: WordWolfGameState) {
+  const counts: Record<string, number> = {};
+  Object.values(game.votes).forEach((target) => { counts[target] = (counts[target] ?? 0) + 1; });
+  const max = Math.max(0, ...Object.values(counts));
+  const targets = Object.entries(counts).filter(([, count]) => count === max).map(([id]) => id);
+  game.winner = targets.length !== 1 ? "draw" : game.minorityIds.includes(targets[0]) ? "minority" : "majority";
+  game.phase = "revealed";
+}
+
+function resolveWerewolfVotes(game: WerewolfGameState) {
+  const counts: Record<string, number> = {};
+  Object.values(game.votes).forEach((target) => { counts[target] = (counts[target] ?? 0) + 1; });
+  const max = Math.max(0, ...Object.values(counts));
+  const targets = Object.entries(counts).filter(([, count]) => count === max).map(([id]) => id);
+  if (targets.length > 1 && game.phase === "voting") {
+    game.tiedTargetIds = targets;
+    game.votes = {};
+    game.phase = "revote";
+    return;
+  }
+  if (targets.length === 1) game.aliveIds = game.aliveIds.filter((id) => id !== targets[0]);
+  game.tiedTargetIds = [];
+  game.votes = {};
+  const winner = werewolfWinner(game);
+  if (winner) { game.winner = winner; game.phase = "finished"; } else game.phase = "day";
+}
+
+function resolveWerewolfNight(game: WerewolfGameState) {
+  const kill = game.nightActions.killTargetId;
+  const guard = game.nightActions.guardTargetId;
+  if (game.nightActions.inspectTargetId) {
+    const seerId = Object.entries(game.roles).find(([, role]) => role === "seer")?.[0];
+    if (seerId) (game.seerResults[seerId] ??= []).push({ targetId: game.nightActions.inspectTargetId, role: game.roles[game.nightActions.inspectTargetId] });
+  }
+  if (kill && kill !== guard) game.aliveIds = game.aliveIds.filter((id) => id !== kill);
+  const winner = werewolfWinner(game);
+  if (winner) { game.winner = winner; game.phase = "finished"; } else game.phase = "day";
+  game.nightActions = {};
+}
+
+function advanceExpiredGame(room: RoomRecord, now: number) {
+  const game = room.game;
+  if (!game) return false;
+  if (game.kind === "word-wolf") {
+    if (game.phaseDeadlineAt === null || game.phaseDeadlineAt > now) return false;
+    if (game.phase === "discussion") { game.phase = "voting"; game.phaseDeadlineAt = now + 60_000; return true; }
+    if (game.phase === "voting") { resolveWordWolf(game); game.phaseDeadlineAt = null; return true; }
+  }
+  if (game.kind === "werewolf") {
+    if (game.phaseDeadlineAt === null || game.phaseDeadlineAt > now) return false;
+    if (game.phase === "night") { resolveWerewolfNight(game); game.phaseDeadlineAt = game.winner ? null : now + 60_000; return true; }
+    if (game.phase === "day") { game.phase = "voting"; game.phaseDeadlineAt = now + 60_000; return true; }
+    if (game.phase === "voting" || game.phase === "revote") { resolveWerewolfVotes(game); game.phaseDeadlineAt = game.winner ? null : now + 60_000; return true; }
+  }
+  return false;
+}
+
+export class RoomService {
+  private readonly commandResults = new Map<string, RoomCommandResult>();
+  private readonly commandAttempts = new Map<string, { count: number; resetAt: number }>();
+  private readonly roomLocks = new Map<string, Promise<void>>();
+  constructor(private readonly repository: RoomRepository, private readonly now = () => Date.now()) {}
+
+  async getProjection(code: string, participantId: string | null, tokenValue?: string) {
+    const normalizedCode = typeof code === "string" ? code.trim().toUpperCase() : "";
+    const room = await this.repository.get(normalizedCode);
+    if (room && participantId) {
+      const participant = room.participants.find((item) => item.id === participantId);
+      if (!participant) throw new RoomDomainError("participant_not_found");
+      const tokenHash = typeof tokenValue === "string" ? hashToken(tokenValue) : "";
+      if (tokenHash !== participant.reconnectTokenHash && (participant.role !== "host" || tokenHash !== room.hostTokenHash)) throw new RoomDomainError("token_invalid");
+    }
+    if (room && advanceExpiredGame(room, this.now())) {
+      room.version += 1;
+      await this.repository.save(room);
+    }
+    return room ? this.project(room, participantId) : null;
+  }
+
+  async createRoom(hostName: string) {
+    const name = typeof hostName === "string" ? hostName.trim() : "";
+    if (!name) throw new RoomDomainError("nickname_required");
+    const hostToken = token();
+    const reconnectToken = token();
+    const id = token(12);
+    const code = token(6);
+    const host: RoomParticipant = { id, name, role: "host", reconnectTokenHash: hashToken(reconnectToken), connected: true };
+    const room: RoomRecord = { id, code, status: "waiting", version: 0, createdAt: this.now(), expiresAt: this.now() + ttlMs, hostTokenHash: hashToken(hostToken), participants: [host] };
+    await this.repository.create(room);
+    return { room: this.project(room, id), hostToken, reconnectToken };
+  }
+
+  async execute(command: RoomCommand, tokenValue?: string): Promise<RoomCommandResult> {
+    const roomCode = command && typeof command === "object" && typeof command.roomCode === "string"
+      ? command.roomCode.trim().toUpperCase()
+      : "";
+    const previous = this.roomLocks.get(roomCode) ?? Promise.resolve();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const queued = previous.then(() => gate);
+    this.roomLocks.set(roomCode, queued);
+    await previous;
+    try {
+      return await this.executeUnlocked(command, tokenValue);
+    } finally {
+      release();
+      if (this.roomLocks.get(roomCode) === queued) this.roomLocks.delete(roomCode);
+    }
+  }
+
+  private async executeUnlocked(command: RoomCommand, tokenValue?: string): Promise<RoomCommandResult> {
+    if (!command || typeof command !== "object") throw new RoomDomainError("command_invalid");
+    const roomCode = typeof command.roomCode === "string" ? command.roomCode.trim().toUpperCase() : "";
+    if (!roomCode) throw new RoomDomainError("room_code_required");
+    if (typeof command.commandId !== "string" || !command.commandId.trim()) throw new RoomDomainError("command_id_required");
+    if (!Number.isInteger(command.expectedVersion) || command.expectedVersion < 0) throw new RoomDomainError("expected_version_invalid");
+    if (!("join reconnect leave kick start close game_start game_answer game_reveal anonymous_submit anonymous_moderate game_vote game_phase werewolf_action" as const).split(" ").includes(command.kind)) throw new RoomDomainError("command_kind_invalid");
+    command = { ...command, roomCode, commandId: command.commandId.trim() };
+    const suppliedToken = typeof tokenValue === "string" ? tokenValue : undefined;
+    const resultKey = `${command.roomCode}:${command.commandId}`;
+    const previous = this.commandResults.get(resultKey);
+    if (previous) return structuredClone(previous);
+    const room = await this.repository.get(command.roomCode) ?? null;
+    if (!room) throw new RoomDomainError("room_not_found");
+    if (room.expiresAt <= this.now()) throw new RoomDomainError("room_expired");
+    if (advanceExpiredGame(room, this.now())) {
+      room.version += 1;
+      await this.repository.save(room);
+    }
+    const rateKey = `${room.code}:${command.participantId ?? "anonymous"}`;
+    const now = this.now();
+    if (this.commandAttempts.size > 5_000) {
+      for (const [entryKey, entry] of this.commandAttempts) if (entry.resetAt <= now) this.commandAttempts.delete(entryKey);
+    }
+    const attempt = this.commandAttempts.get(rateKey);
+    if (!attempt || attempt.resetAt <= now) {
+      this.commandAttempts.set(rateKey, { count: 1, resetAt: now + 60_000 });
+    } else {
+      if (attempt.count >= 120) throw new RoomDomainError("rate_limited");
+      attempt.count += 1;
+    }
+    if (room.version !== command.expectedVersion) throw new RoomDomainError("version_conflict");
+    const actor = command.participantId ? room.participants.find((item) => item.id === command.participantId) : null;
+    if (command.kind !== "join" && !actor) throw new RoomDomainError("participant_not_found");
+    if (actor && command.kind !== "reconnect") {
+      const expectedHash = actor.role === "host" ? room.hostTokenHash : actor.reconnectTokenHash;
+      if (!suppliedToken || hashToken(suppliedToken) !== expectedHash) throw new RoomDomainError("token_invalid");
+    }
+    if (room.status === "closed" && ["game_start", "game_answer", "game_reveal", "anonymous_submit", "anonymous_moderate", "game_vote", "game_phase", "werewolf_action"].includes(command.kind)) {
+      throw new RoomDomainError("room_closed");
+    }
+    let issuedReconnectToken: string | undefined;
+    let createdParticipantId: string | undefined;
+    if (command.kind === "join") {
+      if (room.status !== "waiting") throw new RoomDomainError("room_not_joinable");
+      const name = typeof command.name === "string" ? command.name.trim() : "";
+      if (!name) throw new RoomDomainError("nickname_required");
+      if (room.participants.length >= maxParticipants) throw new RoomDomainError("room_full");
+      if (room.participants.some((item) => normalizeName(item.name) === normalizeName(name))) throw new RoomDomainError("nickname_taken");
+      issuedReconnectToken = token();
+      createdParticipantId = token(12);
+      room.participants.push({ id: createdParticipantId, name, role: "player", reconnectTokenHash: hashToken(issuedReconnectToken), connected: true });
+    } else if (command.kind === "leave") {
+      actor!.connected = false;
+    } else if (command.kind === "kick") {
+      if (actor!.role !== "host") throw new RoomDomainError("host_required");
+      const target = room.participants.find((item) => item.id === command.targetParticipantId);
+      if (!target) throw new RoomDomainError("participant_not_found");
+      if (target.role === "host") throw new RoomDomainError("host_required");
+      room.participants = room.participants.filter((item) => item.id !== command.targetParticipantId);
+    } else if (command.kind === "start") {
+      if (actor!.role !== "host") throw new RoomDomainError("host_required");
+      room.status = "playing";
+    } else if (command.kind === "close") {
+      if (actor!.role !== "host") throw new RoomDomainError("host_required");
+      room.status = "closed";
+    } else if (command.kind === "reconnect") {
+      if (!suppliedToken || !actor || actor.reconnectTokenHash !== hashToken(suppliedToken)) throw new RoomDomainError("reconnect_token_invalid");
+      actor.connected = true;
+    } else if (command.kind === "game_start") {
+      if (actor!.role !== "host") throw new RoomDomainError("host_required");
+      if (command.gameKind !== "two-choice" && command.gameKind !== "anonymous-box" && command.gameKind !== "word-wolf" && command.gameKind !== "werewolf") throw new RoomDomainError("game_kind_invalid");
+      const prompt = typeof command.prompt === "string" ? command.prompt.trim() : "";
+      if (!prompt) throw new RoomDomainError("prompt_required");
+      if (command.gameKind === "two-choice") {
+        room.game = { kind: "two-choice", prompt, deadlineAt: typeof command.deadlineAt === "number" ? command.deadlineAt : null, phase: "answering", answers: {} };
+      } else if (command.gameKind === "anonymous-box") {
+        room.game = { kind: "anonymous-box", prompt, entries: [] };
+      } else if (command.gameKind === "word-wolf") {
+        const ids = room.participants.map((item) => item.id);
+        const minorityCount = Math.max(1, Math.min(ids.length - 1, Math.floor(command.minorityCount ?? 1)));
+        room.game = { kind: "word-wolf", phase: "discussion", phaseDeadlineAt: typeof command.deadlineAt === "number" ? command.deadlineAt : this.now() + 60_000, majorityTopic: command.majorityTopic?.trim() || prompt, minorityTopic: command.minorityTopic?.trim() || "別のお題", minorityIds: randomOrder(ids).slice(0, minorityCount), votes: {} };
+      } else {
+        const ids = randomOrder(room.participants.map((item) => item.id));
+        const wolfCount = Math.max(1, Math.floor(ids.length / 4));
+        const roles: Record<string, WerewolfRole> = {};
+        ids.forEach((id, index) => { roles[id] = index < wolfCount ? "werewolf" : index === wolfCount ? "seer" : index === wolfCount + 1 ? "guard" : "villager"; });
+        room.game = { kind: "werewolf", phase: "night", phaseDeadlineAt: typeof command.deadlineAt === "number" ? command.deadlineAt : this.now() + 60_000, roles, aliveIds: ids, nightActions: {}, votes: {}, tiedTargetIds: [], seerResults: {} };
+      }
+      room.status = "playing";
+    } else if (command.kind === "game_answer") {
+      if (!room.game || room.game.kind !== "two-choice") throw new RoomDomainError("game_not_active");
+      if (room.game.phase === "revealed" || (room.game.deadlineAt !== null && room.game.deadlineAt <= this.now())) throw new RoomDomainError("answer_deadline_passed");
+      if (command.choice !== "A" && command.choice !== "B" && command.choice !== "pass") throw new RoomDomainError("choice_invalid");
+      room.game.answers[actor!.id] = command.choice;
+    } else if (command.kind === "game_reveal") {
+      if (actor!.role !== "host") throw new RoomDomainError("host_required");
+      if (!room.game) throw new RoomDomainError("game_not_active");
+      if (room.game.kind === "two-choice") {
+        const allAnswered = room.participants.every((item) => room.game?.kind === "two-choice" && room.game.answers[item.id]);
+        if (!allAnswered && (room.game.deadlineAt === null || room.game.deadlineAt > this.now())) throw new RoomDomainError("game_not_ready");
+        room.game.phase = "revealed";
+        room.game.deadlineAt = null;
+      } else if (room.game.kind === "word-wolf") {
+        if (room.game.phase !== "voting") throw new RoomDomainError("game_not_ready");
+        resolveWordWolf(room.game);
+        room.game.phaseDeadlineAt = null;
+      } else if (room.game.kind === "werewolf") {
+        if (room.game.phase !== "voting" && room.game.phase !== "revote") throw new RoomDomainError("game_not_ready");
+        resolveWerewolfVotes(room.game);
+        room.game.phaseDeadlineAt = room.game.winner ? null : this.now() + 60_000;
+      } else throw new RoomDomainError("game_not_active");
+    } else if (command.kind === "anonymous_submit") {
+      if (!room.game || room.game.kind !== "anonymous-box") throw new RoomDomainError("game_not_active");
+      const text = typeof command.text === "string" ? command.text.trim() : "";
+      if (!text) throw new RoomDomainError("text_required");
+      if (text.length > 500) throw new RoomDomainError("text_too_long");
+      if (room.game.entries.some((entry) => entry.authorId === actor!.id && entry.status === "unshown")) throw new RoomDomainError("submission_pending");
+      room.game.entries.push({ id: token(10), text, authorId: actor!.id, status: "unshown" });
+    } else if (command.kind === "anonymous_moderate") {
+      if (actor!.role !== "host") throw new RoomDomainError("host_required");
+      if (!room.game || room.game.kind !== "anonymous-box") throw new RoomDomainError("game_not_active");
+      if (command.moderationStatus !== "displayed" && command.moderationStatus !== "answered" && command.moderationStatus !== "skipped") throw new RoomDomainError("moderation_status_invalid");
+      const entry = room.game.entries.find((item) => item.id === command.targetEntryId);
+      if (!entry) throw new RoomDomainError("entry_not_found");
+      entry.status = command.moderationStatus;
+    } else if (command.kind === "game_vote") {
+      if (!room.game || (room.game.kind !== "word-wolf" && room.game.kind !== "werewolf")) throw new RoomDomainError("game_not_active");
+      if (room.game.kind === "word-wolf") {
+        if (room.game.phase !== "voting") throw new RoomDomainError("game_not_ready");
+        const target = command.voteTargetId;
+        if (!target || !room.participants.some((item) => item.id === target)) throw new RoomDomainError("vote_target_invalid");
+        room.game.votes[actor!.id] = target;
+      } else {
+        if ((room.game.phase !== "voting" && room.game.phase !== "revote") || !room.game.aliveIds.includes(actor!.id)) throw new RoomDomainError("game_not_ready");
+        const target = command.voteTargetId;
+        if (!target || !room.game.aliveIds.includes(target) || (room.game.phase === "revote" && !room.game.tiedTargetIds.includes(target))) throw new RoomDomainError("vote_target_invalid");
+        room.game.votes[actor!.id] = target;
+      }
+    } else if (command.kind === "game_phase") {
+      if (actor!.role !== "host" || !room.game) throw new RoomDomainError("host_required");
+      if (room.game.kind === "word-wolf") {
+        if (room.game.phase !== "discussion") throw new RoomDomainError("game_not_ready");
+        room.game.phase = "voting";
+        room.game.phaseDeadlineAt = this.now() + 60_000;
+      } else if (room.game.kind === "werewolf") {
+        if (room.game.phase === "night") {
+          resolveWerewolfNight(room.game);
+          room.game.phaseDeadlineAt = room.game.winner ? null : this.now() + 60_000;
+        } else if (room.game.phase === "day") { room.game.phase = "voting"; room.game.phaseDeadlineAt = this.now() + 60_000; }
+        else throw new RoomDomainError("game_not_ready");
+      } else throw new RoomDomainError("game_not_active");
+    } else if (command.kind === "werewolf_action") {
+      if (!room.game || room.game.kind !== "werewolf" || room.game.phase !== "night" || !room.game.aliveIds.includes(actor!.id)) throw new RoomDomainError("game_not_ready");
+      const target = command.targetParticipantId;
+      if (!target || !room.game.aliveIds.includes(target)) throw new RoomDomainError("action_target_invalid");
+      const role = room.game.roles[actor!.id];
+      if (command.action === "kill" && role === "werewolf") room.game.nightActions.killTargetId = target;
+      else if (command.action === "guard" && role === "guard") room.game.nightActions.guardTargetId = target;
+      else if (command.action === "inspect" && role === "seer") room.game.nightActions.inspectTargetId = target;
+      else throw new RoomDomainError("role_action_invalid");
+    }
+    room.version += 1;
+    await this.repository.save(room);
+    const result: RoomCommandResult = this.project(room, createdParticipantId ?? actor?.id ?? null, this.now());
+    if (issuedReconnectToken && createdParticipantId) result.credentials = { participantId: createdParticipantId, reconnectToken: issuedReconnectToken };
+    this.commandResults.set(resultKey, result);
+    return structuredClone(result);
+  }
+
+  project(room: RoomRecord, participantId: string | null, now = Date.now()): RoomProjection {
+    const projection: RoomProjection = {
+      code: room.code,
+      status: room.status,
+      version: room.version,
+      participants: room.participants.map(({ id, name, role, connected }) => ({ id, name, role, connected })),
+      self: participantId ? (() => { const item = room.participants.find((entry) => entry.id === participantId); return item ? { id: item.id, role: item.role } : null; })() : null,
+    };
+    if (room.game?.kind === "two-choice") {
+      const game = room.game;
+      const deadlinePassed = game.deadlineAt !== null && game.deadlineAt <= now;
+      const revealed = game.phase === "revealed" || deadlinePassed;
+      const answers = Object.values(game.answers);
+      projection.game = {
+        kind: "two-choice",
+        prompt: game.prompt,
+        deadlineAt: game.deadlineAt,
+        phase: revealed ? "revealed" : "answering",
+        answeredCount: answers.length,
+        participantCount: room.participants.length,
+        ...(participantId && game.answers[participantId] ? { ownAnswer: game.answers[participantId] } : {}),
+        ...(revealed ? { result: { A: answers.filter((item) => item === "A").length, B: answers.filter((item) => item === "B").length, pass: answers.filter((item) => item === "pass").length } } : {}),
+      };
+    } else if (room.game?.kind === "anonymous-box") {
+      const game = room.game;
+      const visibleEntries = game.entries
+        .filter((entry) => entry.status !== "unshown" || room.participants.find((item) => item.id === participantId)?.role === "host" || entry.authorId === participantId)
+        .map(({ id, text, status }) => ({ id, text, status }));
+      const ownEntry = participantId ? game.entries.find((entry) => entry.authorId === participantId && entry.status === "unshown") : undefined;
+      projection.game = { kind: "anonymous-box", prompt: game.prompt, entries: visibleEntries, ...(ownEntry ? { ownEntry: { id: ownEntry.id, text: ownEntry.text, status: ownEntry.status } } : {}) };
+    } else if (room.game?.kind === "word-wolf") {
+      const game = room.game;
+      projection.game = {
+        kind: "word-wolf",
+        phase: game.phase,
+        phaseDeadlineAt: game.phaseDeadlineAt,
+        participantCount: room.participants.length,
+        voteCount: Object.keys(game.votes).length,
+        ...(participantId && room.participants.some((item) => item.id === participantId) ? { ownTopic: game.minorityIds.includes(participantId) ? game.minorityTopic : game.majorityTopic, ...(game.votes[participantId] ? { ownVote: game.votes[participantId] } : {}) } : {}),
+        ...(game.phase === "revealed" ? { winner: game.winner, voteResults: Object.values(game.votes).reduce<Record<string, number>>((acc, target) => { acc[target] = (acc[target] ?? 0) + 1; return acc; }, {}) } : {}),
+      };
+    } else if (room.game?.kind === "werewolf") {
+      const game = room.game;
+      const role = participantId ? game.roles[participantId] : undefined;
+      projection.game = {
+        kind: "werewolf",
+        phase: game.phase,
+        phaseDeadlineAt: game.phaseDeadlineAt,
+        aliveIds: [...game.aliveIds],
+        ...(role ? { ownRole: role } : {}),
+        ...(role === "werewolf" && participantId ? { teammates: game.aliveIds.filter((id) => id !== participantId && game.roles[id] === "werewolf") } : {}),
+        ...(role === "seer" && participantId ? { ownSeerResults: game.seerResults[participantId] ?? [] } : {}),
+        ...(participantId && game.votes[participantId] ? { ownVote: game.votes[participantId] } : {}),
+        ...(game.phase === "revote" ? { tiedTargetIds: [...game.tiedTargetIds] } : {}),
+        ...(game.phase === "finished" ? { winner: game.winner } : {}),
+      };
+    }
+    return projection;
+  }
+}

@@ -21,3 +21,5 @@ Thumbs.db
 
 # Tooling
 coverage/
+playwright-report/
+test-results/

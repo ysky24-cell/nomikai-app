@@ -1,0 +1,61 @@
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.web
+    command: sh -c "npm run build && npm run preview -- --host 0.0.0.0 --port 5173"
+    environment:
+      VITE_API_URL: ${VITE_API_URL}
+    ports: ["5173:5173"]
+    depends_on:
+      api: { condition: service_healthy }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:5173/nomikai-app/ >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  api:
+    build: ./server
+    command: npm start
+    environment:
+      PORT: 3000
+      DATABASE_URL: ${DATABASE_URL}
+      REDIS_URL: ${REDIS_URL}
+      CLIENT_ORIGIN: ${CLIENT_ORIGIN}
+      V2_REPOSITORY: postgres
+      SOCKETIO_INSTANCES: ${SOCKETIO_INSTANCES:-1}
+    ports: ["3000:3000"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O- http://localhost:3000/health >/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: nomikai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-CHANGE_ME}
+      POSTGRES_DB: nomikai
+    volumes: [postgres_data:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nomikai -d nomikai"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+volumes:
+  postgres_data:
+  redis_data:

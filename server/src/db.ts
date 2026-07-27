@@ -659,6 +659,34 @@ async function migrateDatabase() {
         WHERE used_at IS NULL;
     END $$;
   `);
+
+  // v2 uses an append-only snapshot boundary so rooms survive API restarts.
+  // The snapshot contains private state in the database only; event payloads
+  // intentionally contain metadata and never anonymous text, topics or roles.
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS public.v2_rooms (
+      code text PRIMARY KEY,
+      id text NOT NULL,
+      status text NOT NULL,
+      version integer NOT NULL,
+      created_at timestamptz NOT NULL,
+      expires_at timestamptz NOT NULL,
+      host_token_hash text NOT NULL,
+      participants jsonb NOT NULL,
+      game jsonb
+    );
+    CREATE INDEX IF NOT EXISTS v2_rooms_expires_at_idx ON public.v2_rooms(expires_at);
+    CREATE TABLE IF NOT EXISTS public.v2_room_events (
+      id bigserial PRIMARY KEY,
+      room_code text NOT NULL REFERENCES public.v2_rooms(code) ON DELETE CASCADE,
+      event_type text NOT NULL,
+      correlation_id text,
+      created_at timestamptz NOT NULL DEFAULT now(),
+      payload jsonb NOT NULL DEFAULT '{}'::jsonb
+    );
+    CREATE INDEX IF NOT EXISTS v2_room_events_room_created_idx
+      ON public.v2_room_events(room_code, created_at, id);
+  `);
 }
 
 async function findRoomForUpdate(client: pg.PoolClient, code: string) {

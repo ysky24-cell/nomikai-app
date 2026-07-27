@@ -9,6 +9,16 @@
 
 [https://ysky24-cell.github.io/nomikai-app/](https://ysky24-cell.github.io/nomikai-app/)
 
+## v2共有ルーム運用
+
+v2 は PostgreSQL にルームのスナップショット（参加者・進行状態・有効期限）を保存します。API を再起動しても同じルームコードと復帰トークンで復帰できます。期限切れルームは API の定期ジョブで削除され、通常ログには匿名投稿本文・ゲームのお題・役職・トークンを出力しません。
+
+ローカル確認は `docker compose up --build` で Web/API/PostgreSQL/Redis を起動し、`http://localhost:5173/nomikai-app/` を開きます。本番向けは `.env.example` を複製して値を置き換え、`docker compose -f docker-compose.prod.yml up -d --build` を使ってください。既存の `docker-compose.yml` は Synology の開発・検証用として互換性を維持しています。
+
+静的版（1台で遊ぶ）の公開 URL は [GitHub Pages](https://ysky24-cell.github.io/nomikai-app/) です。複数スマホ参加の QR 共有は Web URL と API URL の両方を HTTPS で公開する必要があります。QR にはルームコードだけを含め、ホスト秘密トークンは含めません。API 停止中・異なるオリジン・ルーム期限切れの場合は再接続できません。
+
+Socket.IO の Redis アダプターは `SOCKETIO_INSTANCES` が 2 以上のときだけ有効になります。単一 API 構成では Redis の不要な Pub/Sub 接続を作りません。
+
 ## 遊び方
 
 1. 公開URLを開きます。
@@ -19,6 +29,21 @@
 6. 飽きたときや最初からやり直したいときは「初期化」でトップへ戻れます。
 
 ゲームごとに、進め方、判定方法、盛り上げ方、注意事項を画面内に表示します。
+
+## 開発時の品質チェック
+
+依存関係をロックファイルどおりに再現してから、次のチェックを実行できます。
+
+```bash
+npm ci
+npm run lint
+npm run typecheck
+npm test
+npm run build
+npm run e2e
+```
+
+GitHub Actionsでも、プッシュとプルリクエストごとに同じ静的チェックとブラウザの最小フローを実行します。Lintは新しく分離したロジック、テスト、設定を対象にし、既存の巨大な画面・サーバーコードは段階的に移行します。
 
 ## 搭載ゲーム
 
@@ -254,3 +279,6 @@ npm run room:lifecycle:check:all
 - [各ゲームの要件定義](docs/requirements.md)
 - [実装に向けた詳細仕様](docs/game-details.md)
 - [定番ゲーム候補の管理表](docs/url-game-candidates.md)
+# v2 room game timeout policy
+
+Word Wolf and Werewolf phases are server-clock driven. If the host disconnects, an expired discussion/night/voting phase advances on the next projection request or command; unresolved votes are closed with the defined tie/revote rule. Private topics, roles, answers, and anonymous author identities are never included in the public projection.

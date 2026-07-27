@@ -2,6 +2,7 @@ import http from "node:http";
 import cors from "cors";
 import express from "express";
 import { Server } from "socket.io";
+import { createAdapter } from "@socket.io/redis-adapter";
 import { config } from "./config.js";
 import {
   addParticipant,
@@ -21,9 +22,13 @@ import {
   updateRoomState,
 } from "./db.js";
 import { checkRedis, redis } from "./redis.js";
+import { MemoryRoomRepository, PostgresRoomRepository, RoomDomainError, RoomService, type RoomCommand } from "./domain/index.js";
+import { log, requestCorrelationId } from "./logger.js";
 
 const app = express();
 const server = http.createServer(app);
+const domainRepository = config.v2Repository === "memory" ? new MemoryRoomRepository() : new PostgresRoomRepository();
+const domainRoomService = new RoomService(domainRepository);
 const transferClaimWindowMs = 10 * 60 * 1000;
 const transferClaimMaxAttempts = 30;
 const transferClaimAttempts = new Map<string, { attempts: number; resetAt: number }>();
@@ -36,6 +41,103 @@ const io = new Server(server, {
 
 app.use(cors({ origin: config.clientOrigin }));
 app.use(express.json({ limit: "1mb" }));
+app.use((request, response, next) => {
+  const correlationId = requestCorrelationId(request);
+  response.setHeader("x-correlation-id", correlationId);
+  response.locals.correlationId = correlationId;
+  next();
+});
+
+// A single API instance does not need Redis fan-out. Enable the adapter only
+// when explicitly running multiple API replicas behind a load balancer.
+if (config.socketIoInstances > 1) {
+  const pubClient = redis.duplicate();
+  const subClient = redis.duplicate();
+  const ready = (client: typeof pubClient) => client.status === "ready" ? Promise.resolve() : new Promise<void>((resolve, reject) => {
+    client.once("ready", resolve);
+    client.once("error", reject);
+  });
+  void Promise.all([ready(pubClient), ready(subClient)]).then(() => {
+    io.adapter(createAdapter(pubClient, subClient));
+    log("info", "socketio_redis_adapter_enabled", { instances: config.socketIoInstances });
+  }).catch(() => log("error", "socketio_redis_adapter_failed"));
+}
+
+const v2RateWindows = new Map<string, { count: number; resetAt: number }>();
+function allowV2Rate(request: express.Request, scope: string, limit: number, roomCode?: string) {
+  const address = request.ip || request.socket.remoteAddress || "unknown";
+  const key = `${scope}:${roomCode ?? "all"}:${address}`;
+  const now = Date.now();
+  const current = v2RateWindows.get(key);
+  if (!current || current.resetAt <= now) {
+    v2RateWindows.set(key, { count: 1, resetAt: now + 60_000 });
+    if (v2RateWindows.size > 5_000) {
+      for (const [entryKey, entry] of v2RateWindows) if (entry.resetAt <= now) v2RateWindows.delete(entryKey);
+    }
+    return true;
+  }
+  current.count += 1;
+  return current.count <= limit;
+}
+const v2SocketRateWindows = new Map<string, { count: number; resetAt: number }>();
+function allowV2SocketRate(socket: { id: string; handshake: { address: string } }, roomCode: string, limit: number) {
+  const key = `socket:${roomCode}:${socket.handshake.address || socket.id}`;
+  const now = Date.now();
+  const current = v2SocketRateWindows.get(key);
+  if (!current || current.resetAt <= now) {
+    v2SocketRateWindows.set(key, { count: 1, resetAt: now + 60_000 });
+    if (v2SocketRateWindows.size > 5_000) {
+      for (const [entryKey, entry] of v2SocketRateWindows) if (entry.resetAt <= now) v2SocketRateWindows.delete(entryKey);
+    }
+    return true;
+  }
+  current.count += 1;
+  return current.count <= limit;
+}
+
+// Versioned domain API. The legacy `/rooms` endpoints remain intact while
+// this command/event boundary is adopted by new clients.
+app.post("/v2/rooms", async (request, response) => {
+  try {
+    if (!allowV2Rate(request, "create", 20)) { response.status(429).json({ error: "rate_limited" }); return; }
+    const hostName = readOptionalString(request.body?.hostName);
+    if (!hostName) throw new RoomDomainError("nickname_required");
+    response.status(201).json(await domainRoomService.createRoom(hostName));
+  } catch (error) {
+    const code = error instanceof RoomDomainError ? error.code : error instanceof Error && error.message === "version_conflict" ? "version_conflict" : "internal_error";
+    response.status(code === "internal_error" ? 500 : 400).json({ error: code, correlationId: response.locals.correlationId });
+  }
+});
+
+app.get("/v2/rooms/:code", async (request, response) => {
+  try {
+    const projection = await domainRoomService.getProjection(
+      request.params.code,
+      readOptionalString(request.query.participantId) ?? null,
+      readOptionalString(request.header("x-room-token")),
+    );
+    if (!projection) { response.status(404).json({ error: "room_not_found" }); return; }
+    response.json(projection);
+  } catch (error) {
+    const code = error instanceof RoomDomainError ? error.code : error instanceof Error && error.message === "version_conflict" ? "version_conflict" : "internal_error";
+    const status = code === "internal_error" ? 500 : code === "version_conflict" ? 409 : code === "participant_not_found" ? 404 : 403;
+    response.status(status).json({ error: code, correlationId: response.locals.correlationId });
+  }
+});
+
+app.post("/v2/rooms/:code/commands", async (request, response) => {
+  try {
+    const roomCode = request.params.code.trim().toUpperCase();
+    const scope = request.body?.kind === "join" || request.body?.kind === "reconnect" ? "join" : "command";
+    if (!allowV2Rate(request, scope, scope === "join" ? 30 : 120, roomCode)) { response.status(429).json({ error: "rate_limited" }); return; }
+    const command = { ...(request.body ?? {}), roomCode: request.params.code } as RoomCommand;
+    const result = await domainRoomService.execute(command, readOptionalString(request.header("x-room-token")) ?? undefined);
+    response.json(result);
+  } catch (error) {
+    const code = error instanceof RoomDomainError ? error.code : error instanceof Error && error.message === "version_conflict" ? "version_conflict" : "internal_error";
+    response.status(code === "internal_error" ? 500 : 409).json({ error: code, correlationId: response.locals.correlationId });
+  }
+});
 
 app.get("/health", async (_request, response) => {
   const checks = await Promise.allSettled([checkDatabase(), checkRedis()]);
@@ -451,6 +553,66 @@ app.post("/rooms/:code/close", async (request, response, next) => {
 });
 
 io.on("connection", (socket) => {
+  // Versioned command/event boundary. This is intentionally kept separate
+  // from the legacy room events while clients migrate to the domain API.
+  socket.on("v2:command", async (payload: { command?: unknown; token?: unknown }) => {
+    if (!payload || typeof payload.command !== "object" || payload.command === null) {
+      socket.emit("v2:error", { error: "command_required" });
+      return;
+    }
+    try {
+      const command = payload.command as RoomCommand;
+      const roomCode = readOptionalString(command.roomCode)?.toUpperCase();
+      if (!roomCode) {
+        socket.emit("v2:error", { error: "room_code_required" });
+        return;
+      }
+      if (!allowV2SocketRate(socket, roomCode, 120)) {
+        socket.emit("v2:error", { error: "rate_limited" });
+        return;
+      }
+      const result = await domainRoomService.execute(
+        { ...command, roomCode },
+        readOptionalString(payload.token),
+      );
+      socket.join(roomCode);
+      socket.data.v2RoomCode = roomCode;
+      socket.data.v2ParticipantId = result.self?.id ?? undefined;
+      socket.data.v2Token = readOptionalString(payload.token) ?? result.credentials?.reconnectToken;
+      // Broadcast only the public projection. Credentials are returned to the
+      // issuing socket and are never sent to another participant.
+      const publicProjection = await domainRoomService.getProjection(roomCode, null);
+      if (publicProjection) io.to(roomCode).emit("v2:projection", publicProjection);
+      socket.emit("v2:projection", result);
+    } catch (error) {
+      const code = error instanceof RoomDomainError ? error.code : "internal_error";
+      socket.emit("v2:error", { error: code });
+    }
+  });
+
+  socket.on("v2:subscribe", async (payload: { roomCode?: unknown; participantId?: unknown; token?: unknown }) => {
+    const roomCode = readOptionalString(payload?.roomCode)?.toUpperCase();
+    if (!roomCode) {
+      socket.emit("v2:error", { error: "room_code_required" });
+      return;
+    }
+    if (!allowV2SocketRate(socket, roomCode, 120)) {
+      socket.emit("v2:error", { error: "rate_limited" });
+      return;
+    }
+    const participantId = readOptionalString(payload?.participantId) ?? null;
+    const projection = await domainRoomService.getProjection(roomCode, participantId, readOptionalString(payload?.token));
+    if (!projection) {
+      socket.emit("v2:error", { error: "room_not_found" });
+      return;
+    }
+    socket.join(roomCode);
+    socket.data.v2RoomCode = roomCode;
+    socket.data.v2ParticipantId = participantId ?? undefined;
+    socket.data.v2Token = readOptionalString(payload?.token);
+    socket.emit("v2:projection", projection);
+  });
+
   socket.on("room:join", async (payload: { roomCode?: string; participantId?: string }) => {
     const roomCode = payload.roomCode?.trim().toUpperCase();
     if (!roomCode) {
@@ -553,6 +715,7 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", async () => {
+    await markV2ParticipantDisconnected(socket);
     const roomCode = socket.data.roomCode as string | undefined;
 
     await unregisterParticipantSocketConnection(socket.id);
@@ -563,8 +726,40 @@ io.on("connection", (socket) => {
   });
 });
 
-app.use((error: unknown, _request: express.Request, response: express.Response, _next: express.NextFunction) => {
+const cleanupTimer = setInterval(() => {
+  if (domainRepository instanceof PostgresRoomRepository) {
+    void domainRepository.cleanupExpired().then((count) => { if (count > 0) log("info", "v2_rooms_expired", { count }); })
+      .catch(() => log("warn", "v2_cleanup_failed"));
+  }
+}, config.v2CleanupIntervalMs);
+cleanupTimer.unref();
+
+async function markV2ParticipantDisconnected(socket: { data: Record<string, unknown> }) {
+  const roomCode = typeof socket.data.v2RoomCode === "string" ? socket.data.v2RoomCode : null;
+  const participantId = typeof socket.data.v2ParticipantId === "string" ? socket.data.v2ParticipantId : null;
+  const token = typeof socket.data.v2Token === "string" ? socket.data.v2Token : null;
+  if (!roomCode || !participantId || !token) return;
+  try {
+    const projection = await domainRoomService.getProjection(roomCode, participantId, token);
+    if (!projection?.self) return;
+    await domainRoomService.execute(
+      {
+        roomCode,
+        commandId: `disconnect-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+        expectedVersion: projection.version,
+        kind: "leave",
+        participantId,
+      },
+      token,
+    );
+  } catch {
+    // A simultaneous reconnect or kick already resolved the disconnect.
+  }
+}
+
+app.use((error: unknown, request: express.Request, response: express.Response, _next: express.NextFunction) => {
   const message = error instanceof Error ? error.message : "unknown_error";
+  log("error", "request_failed", { correlationId: response.locals.correlationId, method: request.method, path: request.path, error: message });
   if (message === "room_closed") {
     response.status(409).json({ error: message });
     return;
@@ -585,13 +780,14 @@ app.use((error: unknown, _request: express.Request, response: express.Response, 
 });
 
 server.listen(config.port, () => {
-  console.log(`Nomikai room server listening on ${config.port}`);
+  log("info", "server_started", { port: config.port, v2Repository: config.v2Repository, socketIoInstances: config.socketIoInstances });
 });
 
 process.on("SIGTERM", shutdown);
 process.on("SIGINT", shutdown);
 
 async function shutdown() {
+  clearInterval(cleanupTimer);
   await Promise.allSettled([redis.quit(), pool.end()]);
   server.close(() => {
     process.exit(0);

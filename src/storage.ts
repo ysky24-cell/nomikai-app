@@ -1,4 +1,5 @@
-export const STORAGE_SCHEMA_VERSION = 1;
+export const STORAGE_SCHEMA_VERSION = 2;
+export const PREVIOUS_STORAGE_SCHEMA_VERSION = 1;
 
 type StorageEnvelope<T> = {
   version: number;
@@ -290,6 +291,22 @@ export function readVersionedStorageResult<T>(
         parsed.version > STORAGE_SCHEMA_VERSION
       ) {
         return { value: initialState, status: "future-version" };
+      }
+      if (
+        isRecord(parsed) &&
+        parsed.version === PREVIOUS_STORAGE_SCHEMA_VERSION &&
+        Object.prototype.hasOwnProperty.call(parsed, "data")
+      ) {
+        const previousData = parsed.data;
+        const isPreviousValid = validate
+          ? validate(previousData)
+          : isCompatibleState(previousData, initialState, storageKey);
+        if (isPreviousValid) {
+          return {
+            value: mergeKnownStateKeys(previousData as T, initialState),
+            status: "legacy",
+          };
+        }
       }
       return { value: initialState, status: "invalid" };
     }
