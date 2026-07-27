@@ -14,6 +14,7 @@ import {
   Play,
   Plus,
   RotateCcw,
+  Share2,
   ShieldAlert,
   Sparkles,
   Timer,
@@ -23,6 +24,12 @@ import {
   Vote,
 } from "lucide-react";
 import { io, type Socket } from "socket.io-client";
+import {
+  readVersionedStorage,
+  readVersionedStorageResult,
+  removeStoredValue,
+  writeVersionedStorage,
+} from "./storage";
 import {
   anonymousQuestionCategories,
   anonymousQuestionPrompts,
@@ -99,6 +106,7 @@ type BuiltInGameKey =
 type GameKey = BuiltInGameKey | UrlCandidateGameKey;
 
 type HomeFilter = "all" | "url" | "talk" | "reaction" | "luck" | "drawing" | "board" | "large";
+type RoomEntryMode = "join" | "create" | "recover" | "watch";
 
 type Player = {
   id: string;
@@ -184,8 +192,11 @@ type GameCardImage = {
   alt: string;
 };
 
+type GameStatus = "ready" | "beta" | "facilitator";
+
 type GameMeta = {
   key: GameKey;
+  status: GameStatus;
   title: string;
   description: string;
   people: string;
@@ -222,6 +233,13 @@ const homeFilterOptions: readonly SegmentedOption<HomeFilter>[] = [
   { value: "drawing", label: "描く" },
   { value: "board", label: "ボード風" },
   { value: "large", label: "大人数" },
+];
+
+const roomEntryOptions: readonly SegmentedOption<RoomEntryMode>[] = [
+  { value: "join", label: "参加" },
+  { value: "create", label: "作成" },
+  { value: "recover", label: "別端末から復帰" },
+  { value: "watch", label: "観戦" },
 ];
 
 const urlCandidateIconMap: Record<UrlCandidateIconName, LucideIcon> = {
@@ -369,8 +387,14 @@ const gameCardImages: Partial<Record<GameKey, GameCardImage>> = {
   },
 };
 
+function getUrlCandidateGameStatus(game: UrlCandidateGameConfig): GameStatus {
+  if (game.key === "werewolf-game") return "ready";
+  return isRoomSyncableUrlCandidateKey(game.key) ? "beta" : "facilitator";
+}
+
 const urlCandidateGameMeta: GameMeta[] = urlCandidateGameConfigs.map((game) => ({
   key: game.key,
+  status: getUrlCandidateGameStatus(game),
   title: game.title,
   description: game.description,
   people: game.people,
@@ -384,6 +408,7 @@ const urlCandidateGameMeta: GameMeta[] = urlCandidateGameConfigs.map((game) => (
 const activeGames: GameMeta[] = [
   {
     key: "yamanote",
+    status: "ready",
     title: "山手線ゲーム",
     description: "お題に合う言葉をリズムよく順番に答える",
     people: "2人から",
@@ -395,6 +420,7 @@ const activeGames: GameMeta[] = [
   },
   {
     key: "two-choice",
+    status: "ready",
     title: "二択トーク",
     description: "A/Bで投票して、理由から会話を広げる",
     people: "2人から",
@@ -406,6 +432,7 @@ const activeGames: GameMeta[] = [
   },
   {
     key: "word-wolf",
+    status: "ready",
     title: "ワードウルフ",
     description: "似たお題を話しながら少数派を探す",
     people: "4人から",
@@ -417,6 +444,7 @@ const activeGames: GameMeta[] = [
   },
   {
     key: "ng-word",
+    status: "ready",
     title: "NGワードゲーム",
     description: "本人だけ知らない言葉を言わないように会話する",
     people: "3人から",
@@ -428,6 +456,7 @@ const activeGames: GameMeta[] = [
   },
   {
     key: "impression-ranking",
+    status: "beta",
     title: "第一印象ランキング",
     description: "お題に一番当てはまりそうな人へ投票する",
     people: "3人から",
@@ -439,6 +468,7 @@ const activeGames: GameMeta[] = [
   },
   {
     key: "party-pack",
+    status: "beta",
     title: "定番ゲームパック",
     description: "山手線、逆さ言葉、外来語禁止などをお題カードで回す",
     people: "2人から",
@@ -450,6 +480,7 @@ const activeGames: GameMeta[] = [
   },
   {
     key: "johari-window",
+    status: "beta",
     title: "ジョハリの窓",
     description: "自分と周りが選ぶ特徴ワードを4つの窓で見比べる",
     people: "3人から",
@@ -461,6 +492,7 @@ const activeGames: GameMeta[] = [
   },
   {
     key: "turtle-soup",
+    status: "ready",
     title: "ウミガメのスープ",
     description: "はい・いいえで質問して短い謎の真相を当てる",
     people: "2人から",
@@ -472,6 +504,7 @@ const activeGames: GameMeta[] = [
   },
   {
     key: "anonymous-box",
+    status: "beta",
     title: "匿名質問箱",
     description: "答えやすい質問をランダムに引いて会話を広げる",
     people: "2人から",
@@ -485,6 +518,30 @@ const activeGames: GameMeta[] = [
 ];
 
 const futureGames: string[] = [];
+
+const gameStatusCopy: Record<
+  GameStatus,
+  { label: string; heading: string; description: string; action: string }
+> = {
+  ready: {
+    label: "正式版",
+    heading: "おすすめ",
+    description: "設定から終了まで、画面だけで進めやすいゲームです。",
+    action: "遊ぶ",
+  },
+  beta: {
+    label: "ベータ",
+    heading: "試作ゲーム",
+    description: "固有の操作はありますが、終了条件や検証が整備途中です。",
+    action: "試してみる",
+  },
+  facilitator: {
+    label: "進行カード",
+    heading: "進行カード",
+    description: "ルールやお題を表示し、会話や実際の遊びを補助するツールです。",
+    action: "カードを開く",
+  },
+};
 
 function createId(prefix: string) {
   if ("crypto" in window && "randomUUID" in window.crypto) {
@@ -592,17 +649,27 @@ function useSecondTick(active: boolean) {
 
 function useStoredState<T>(key: string, initialState: T) {
   const storageKey = `${STORAGE_PREFIX}${key}`;
+  const storageWarningShown = useRef(false);
+  const persistenceBlocked = useRef(false);
   const [state, setState] = useState<T>(() => {
-    try {
-      const stored = window.localStorage.getItem(storageKey);
-      return stored ? (JSON.parse(stored) as T) : initialState;
-    } catch {
-      return initialState;
-    }
+    const result = readVersionedStorageResult(storageKey, { initialState });
+    persistenceBlocked.current = result.status === "future-version";
+    return result.value;
   });
 
   useEffect(() => {
-    window.localStorage.setItem(storageKey, JSON.stringify(state));
+    if (persistenceBlocked.current) {
+      if (!storageWarningShown.current) {
+        storageWarningShown.current = true;
+        console.warn(`新しい版の保存データを保護するため、この画面からの保存を停止しました: ${storageKey}`);
+      }
+      return;
+    }
+    const result = writeVersionedStorage(storageKey, state);
+    if (!result.ok && !storageWarningShown.current) {
+      storageWarningShown.current = true;
+      console.warn(`進行状況を保存できませんでした: ${storageKey}`, result.error);
+    }
   }, [state, storageKey]);
 
   return [state, setState] as const;
@@ -610,32 +677,26 @@ function useStoredState<T>(key: string, initialState: T) {
 
 function clearStoredGameStates() {
   STORED_GAME_KEYS.forEach((key) => {
-    window.localStorage.removeItem(`${STORAGE_PREFIX}${key}`);
+    removeStoredValue(`${STORAGE_PREFIX}${key}`);
   });
 }
 
+function isRoomSession(value: unknown): value is RoomSession {
+  if (!value || typeof value !== "object") return false;
+  const parsed = value as Partial<RoomSession>;
+  return (
+    typeof parsed.roomCode === "string" &&
+    typeof parsed.participantId === "string" &&
+    typeof parsed.participantName === "string" &&
+    (parsed.participantRole === "host" || parsed.participantRole === "player")
+  );
+}
+
 function readRoomSession(): RoomSession | null {
-  try {
-    const stored = window.localStorage.getItem(ROOM_SESSION_KEY);
-    if (!stored) return null;
-    const parsed = JSON.parse(stored) as Partial<RoomSession>;
-    if (
-      typeof parsed.roomCode === "string" &&
-      typeof parsed.participantId === "string" &&
-      typeof parsed.participantName === "string" &&
-      (parsed.participantRole === "host" || parsed.participantRole === "player")
-    ) {
-      return {
-        roomCode: parsed.roomCode,
-        participantId: parsed.participantId,
-        participantName: parsed.participantName,
-        participantRole: parsed.participantRole,
-      };
-    }
-  } catch {
-    return null;
-  }
-  return null;
+  return readVersionedStorage<RoomSession | null>(ROOM_SESSION_KEY, {
+    initialState: null,
+    validate: (value): value is RoomSession | null => value === null || isRoomSession(value),
+  });
 }
 
 function saveRoomSession(roomCode: string, participant: RoomParticipant | null) {
@@ -646,11 +707,19 @@ function saveRoomSession(roomCode: string, participant: RoomParticipant | null) 
     participantName: participant.name,
     participantRole: participant.role,
   };
-  window.localStorage.setItem(ROOM_SESSION_KEY, JSON.stringify(session));
+  writeVersionedStorage(ROOM_SESSION_KEY, session);
 }
 
 function clearRoomSession() {
-  window.localStorage.removeItem(ROOM_SESSION_KEY);
+  removeStoredValue(ROOM_SESSION_KEY);
+}
+
+function readRoomCodeFromUrl() {
+  try {
+    return normalizeInputRoomCode(new URL(window.location.href).searchParams.get("room") ?? "");
+  } catch {
+    return "";
+  }
 }
 
 function isUrlCandidateGameKey(key: GameKey | null): key is UrlCandidateGameKey {
@@ -733,7 +802,16 @@ function App() {
 
 function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey, roomSession?: RoomSession | null) => void; onResetAll: () => void }) {
   const [filter, setFilter] = useState<HomeFilter>("all");
+  const [hasRoomContext, setHasRoomContext] = useState(false);
   const visibleGames = filter === "all" ? activeGames : activeGames.filter((game) => game.groups.includes(filter));
+  const visibleReadyGames = visibleGames.filter((game) => game.status === "ready");
+  const visibleBetaGames = visibleGames.filter((game) => game.status === "beta");
+  const visibleFacilitatorGames = visibleGames.filter((game) => game.status === "facilitator");
+
+  function confirmResetAll() {
+    const confirmed = window.confirm("この端末に保存したゲーム進行とルームの復帰情報をすべて消しますか？");
+    if (confirmed) onResetAll();
+  }
 
   return (
     <main className="app-shell">
@@ -741,97 +819,159 @@ function HomeScreen({ onStart, onResetAll }: { onStart: (game: GameKey, roomSess
         <div>
           <p className="eyebrow">1台共有 / ルーム式</p>
           <h1>飲み会アプリ</h1>
-          <p className="lead">幹事のスマホを回す静的版と、Docker版のルーム参加を並べて育てるミニゲーム集。</p>
+          <p className="lead">1台を回して遊ぶ方法と、各自のスマホで同じルームに参加する方法を選べるミニゲーム集。</p>
         </div>
         <div className="top-actions">
           <div className="status-pill">
             <Check size={18} />
-            静的版完成
+            正式版 {activeGames.filter((game) => game.status === "ready").length}本
           </div>
-          <button className="secondary-button reset-all-button" onClick={onResetAll}>
-            <RotateCcw size={18} />
-            初期化
-          </button>
+          {!hasRoomContext && (
+            <button className="secondary-button reset-all-button" onClick={confirmResetAll}>
+              <RotateCcw size={18} />
+              端末データを初期化
+            </button>
+          )}
         </div>
       </section>
 
-      <RoomLobby onStart={onStart} />
+      <RoomLobby onStart={onStart} onPresenceChange={setHasRoomContext} />
 
-      <section className="home-filter" aria-label="ゲーム絞り込み">
-        <SegmentedControl label="表示するゲーム" options={homeFilterOptions} value={filter} onChange={setFilter} />
-        <p className="soft-note">
-          {visibleGames.length}件を表示中。定番は、飲み会で使いやすい会話・反射・運試し系をまとめた入口です。
-        </p>
-      </section>
+      {!hasRoomContext && (
+        <>
+          <section className="home-filter" aria-label="ゲーム絞り込み">
+            <SegmentedControl label="表示するゲーム" options={homeFilterOptions} value={filter} onChange={setFilter} />
+            <p className="soft-note">
+              {visibleGames.length}件を表示中。定番は、飲み会で使いやすい会話・反射・運試し系をまとめた入口です。
+            </p>
+          </section>
 
-      <section className="game-grid" aria-label="遊べるゲーム">
-        {visibleGames.map((game) => {
-          const Icon = game.icon;
-          return (
-            <article className={`game-card accent-${game.accent}${game.image ? " has-image" : ""}`} key={game.key}>
-              {game.image && (
-                <div className="game-card-media">
-                  <img src={game.image.src} alt={game.image.alt} loading="lazy" />
-                </div>
-              )}
-              <div className="game-card-main">
-                <div className="game-icon">
-                  <Icon size={28} />
-                </div>
-                <div>
-                  <h2>{game.title}</h2>
-                  <p>{game.description}</p>
-                </div>
+          <HomeGameSection games={visibleReadyGames} onStart={onStart} status="ready" />
+          <HomeGameSection games={visibleBetaGames} onStart={onStart} status="beta" />
+          <HomeGameSection games={visibleFacilitatorGames} onStart={onStart} status="facilitator" />
+
+          {futureGames.length > 0 && (
+            <section className="future-section" aria-label="追加予定ゲーム">
+              <div className="section-heading">
+                <ListChecks size={20} />
+                <h2>追加予定</h2>
               </div>
-              <div className="meta-row">
-                <span>
-                  <Users size={16} />
-                  {game.people}
-                </span>
-                <span>
-                  <Timer size={16} />
-                  {game.minutes}
-                </span>
+              <div className="future-list">
+                {futureGames.map((game) => (
+                  <span key={game}>{game}</span>
+                ))}
               </div>
-              <button className="primary-button" onClick={() => onStart(game.key)}>
-                <Play size={18} />
-                遊ぶ
-              </button>
-            </article>
-          );
-        })}
-      </section>
-
-      {futureGames.length > 0 && (
-        <section className="future-section" aria-label="追加予定ゲーム">
-          <div className="section-heading">
-            <ListChecks size={20} />
-            <h2>追加予定</h2>
-          </div>
-          <div className="future-list">
-            {futureGames.map((game) => (
-              <span key={game}>{game}</span>
-            ))}
-          </div>
-        </section>
+            </section>
+          )}
+        </>
       )}
     </main>
   );
 }
 
-function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSession | null) => void }) {
+function HomeGameSection({
+  games,
+  onStart,
+  status,
+}: {
+  games: GameMeta[];
+  onStart: (game: GameKey, roomSession?: RoomSession | null) => void;
+  status: GameStatus;
+}) {
+  if (games.length === 0) return null;
+  const copy = gameStatusCopy[status];
+  const cards = (
+    <div className="game-grid">
+      {games.map((game) => {
+        const Icon = game.icon;
+        return (
+          <article className={`game-card accent-${game.accent}${game.image ? " has-image" : ""}`} key={game.key}>
+            {game.image && (
+              <div className="game-card-media">
+                <img src={game.image.src} alt={game.image.alt} loading="lazy" />
+              </div>
+            )}
+            <div className="game-card-main">
+              <div className="game-icon">
+                <Icon size={28} />
+              </div>
+              <div>
+                <span className={`game-status-badge status-${game.status}`}>{gameStatusCopy[game.status].label}</span>
+                <h2>{game.title}</h2>
+                <p>{game.description}</p>
+              </div>
+            </div>
+            <div className="meta-row">
+              <span>
+                <Users size={16} />
+                {game.people}
+              </span>
+              <span>
+                <Timer size={16} />
+                {game.minutes}
+              </span>
+            </div>
+            <button className="primary-button" onClick={() => onStart(game.key)}>
+              <Play size={18} />
+              {gameStatusCopy[game.status].action}
+            </button>
+          </article>
+        );
+      })}
+    </div>
+  );
+
+  if (status === "ready") {
+    return (
+      <section className="game-status-section" aria-labelledby="ready-games-heading">
+        <div className="game-status-heading">
+          <div>
+            <p className="eyebrow">{copy.label}</p>
+            <h2 id="ready-games-heading">{copy.heading}</h2>
+            <p>{copy.description}</p>
+          </div>
+          <span>{games.length}本</span>
+        </div>
+        {cards}
+      </section>
+    );
+  }
+
+  return (
+    <details className={`game-status-section collapsible status-${status}`}>
+      <summary>
+        <span>
+          <strong>{copy.heading}</strong>
+          <small>{copy.description}</small>
+        </span>
+        <span>{games.length}本を表示</span>
+      </summary>
+      {cards}
+    </details>
+  );
+}
+
+function RoomLobby({
+  onStart,
+  onPresenceChange,
+}: {
+  onStart: (game: GameKey, roomSession?: RoomSession | null) => void;
+  onPresenceChange: (active: boolean) => void;
+}) {
+  const invitedRoomCode = readRoomCodeFromUrl();
   const [apiStatus, setApiStatus] = useState<"checking" | "ready" | "offline">("checking");
   const [socketStatus, setSocketStatus] = useState<"idle" | "connecting" | "connected" | "disconnected">("idle");
   const [savedSession, setSavedSession] = useState<RoomSession | null>(() => readRoomSession());
   const [resumeStatus, setResumeStatus] = useState<"idle" | "checking" | "failed">("idle");
+  const [entryMode, setEntryMode] = useState<RoomEntryMode>("join");
   const [lastRoomSyncAt, setLastRoomSyncAt] = useState<string | null>(null);
   const [hostName, setHostName] = useState("");
-  const [joinCode, setJoinCode] = useState("");
+  const [joinCode, setJoinCode] = useState(invitedRoomCode);
   const [joinName, setJoinName] = useState("");
-  const [transferRoomCode, setTransferRoomCode] = useState("");
+  const [transferRoomCode, setTransferRoomCode] = useState(invitedRoomCode);
   const [transferCode, setTransferCode] = useState("");
   const [issuedTransferCode, setIssuedTransferCode] = useState<IssuedTransferCode | null>(null);
-  const [observerCode, setObserverCode] = useState("");
+  const [observerCode, setObserverCode] = useState(invitedRoomCode);
   const [spectatorRoomCode, setSpectatorRoomCode] = useState<string | null>(null);
   const [selectedRoomGame, setSelectedRoomGame] = useState<GameKey>("werewolf-game");
   const [snapshot, setSnapshot] = useState<RoomSnapshot | null>(null);
@@ -904,6 +1044,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     let hadConnectionDrop = false;
 
     socket.on("connect", () => {
+      setApiStatus("ready");
       if (hadConnectionDrop) {
         setNotice("同期接続が復帰しました。");
         hadConnectionDrop = false;
@@ -919,6 +1060,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     socket.on("disconnect", () => {
       if (!closedByEffect) {
         hadConnectionDrop = true;
+        setApiStatus("offline");
         setSocketStatus("disconnected");
         setNotice("同期接続が切れました。自動再接続を待つか、更新で状態を取り直してください。");
       }
@@ -926,6 +1068,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
 
     socket.on("connect_error", () => {
       hadConnectionDrop = true;
+      setApiStatus("offline");
       setSocketStatus("disconnected");
       setError("同期サーバーへ接続できません。DockerのAPIが起動しているか確認してください。");
     });
@@ -971,6 +1114,8 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
 
   const isHost = participant?.role === "host";
   const isSpectating = Boolean(snapshot && !participant && spectatorRoomCode === snapshot.room.code);
+  const hasActiveRoom = Boolean(snapshot && (participant || isSpectating));
+  const syncReady = socketStatus === "connected";
   const roomClosed = snapshot?.room.status === "closed";
   const progress = snapshot ? parseRoomProgress(snapshot) : null;
   const currentGame = progress?.gameKey ? findGameMeta(progress.gameKey) : null;
@@ -984,13 +1129,18 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
   );
   const socketStatusLabel =
     socketStatus === "connected"
-      ? "接続中"
+      ? "最新"
       : socketStatus === "connecting"
         ? "接続中..."
         : socketStatus === "disconnected"
           ? "再接続中"
-          : "未接続";
+          : "未参加";
   const savedSessionRoleLabel = savedSession?.participantRole === "host" ? "ホスト" : "参加者";
+
+  useEffect(() => {
+    onPresenceChange(hasActiveRoom);
+    return () => onPresenceChange(false);
+  }, [hasActiveRoom, onPresenceChange]);
 
   useEffect(() => {
     if (issuedTransferCode && !issuedTransferCodeIsVisible) {
@@ -1363,8 +1513,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     }
   }
 
-  function leaveLocalRoom() {
-    const wasParticipant = Boolean(participant);
+  function pauseLocalRoom() {
     socketRef.current?.disconnect();
     socketRef.current = null;
     setSnapshot(null);
@@ -1372,11 +1521,14 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     setSpectatorRoomCode(null);
     setRoomEvents([]);
     setEventsError("");
-    if (wasParticipant) forgetRoomSession();
     setLastRoomSyncAt(null);
     setSocketStatus("idle");
     setIssuedTransferCode(null);
-    setNotice("");
+    setNotice(
+      participant
+        ? "この端末では一時退出しました。保存済みのルームからすぐ戻れます。"
+        : "観戦を終了しました。",
+    );
     setError("");
   }
 
@@ -1387,6 +1539,30 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
       setNotice("ルームコードをコピーしました。");
     } catch {
       setNotice(`ルームコード: ${snapshot.room.code}`);
+    }
+  }
+
+  async function shareRoomInvitation() {
+    if (!snapshot) return;
+    const inviteUrl = new URL(window.location.href);
+    inviteUrl.searchParams.set("room", snapshot.room.code);
+    const shareData = {
+      title: "飲み会ルームへの招待",
+      text: `ルームコード ${snapshot.room.code} で参加してください。`,
+      url: inviteUrl.toString(),
+    };
+
+    try {
+      if ("share" in navigator && typeof navigator.share === "function") {
+        await navigator.share(shareData);
+        setNotice("招待を共有しました。");
+      } else {
+        await navigator.clipboard.writeText(`${shareData.text}\n${shareData.url}`);
+        setNotice("招待リンクをコピーしました。");
+      }
+    } catch (caught) {
+      if (caught instanceof Error && caught.name === "AbortError") return;
+      setNotice(`招待リンク: ${shareData.url}`);
     }
   }
 
@@ -1508,95 +1684,26 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
     <section className="room-panel" aria-label="ルーム参加">
       <div className="room-panel-heading">
         <div>
-          <p className="eyebrow">Dockerルーム版</p>
-          <h2>ルームに集まってからゲーム開始</h2>
-          <p className="soft-note">まず参加者がルームに入り、ホストがゲームを選んで開始します。ルームの参加者一覧が、そのままゲーム参加メンバーになります。</p>
+          <p className="eyebrow">各自のスマホで参加</p>
+          <h2>ルームに参加してゲームを始める</h2>
+          <p className="soft-note">参加者がルームに入ったら、ホストがゲームを選んで開始します。参加者一覧が、そのままゲームのメンバーになります。</p>
         </div>
-        <div className={`room-status status-${apiStatus}`}>
-          <span>API: {apiStatus === "ready" ? "OK" : apiStatus === "checking" ? "確認中" : "停止中"}</span>
+        <div className={`room-status status-${apiStatus}`} role="status" aria-live="polite">
+          <span>通信: {apiStatus === "ready" ? "利用可能" : apiStatus === "checking" ? "確認中" : "利用不可"}</span>
           <span>同期: {socketStatusLabel}</span>
           {isSpectating && <span>表示: 観戦中</span>}
           {roomClosed && <span>状態: 終了済み</span>}
-          {snapshot && <span>参加: {connectedCount}/{snapshot.participants.length} 接続</span>}
+          {snapshot && syncReady ? (
+            <span>参加: {connectedCount}/{snapshot.participants.length} 接続</span>
+          ) : snapshot ? (
+            <span>参加状況: 更新待ち</span>
+          ) : null}
           {lastRoomSyncAt && <span>最終同期: {formatClockTime(lastRoomSyncAt)}</span>}
         </div>
       </div>
 
-      <div className="room-actions-grid">
-        <div className="room-form">
-          <h3>ホストとして作成</h3>
-          <div className="room-button-row">
-            <input value={hostName} onChange={(event) => setHostName(event.currentTarget.value)} placeholder="ホスト名" />
-            <button className="primary-button" type="button" disabled={isBusy || apiStatus !== "ready"} onClick={createRoomForHost}>
-              <Plus size={18} />
-              ルーム作成
-            </button>
-          </div>
-        </div>
-
-        <div className="room-form">
-          <h3>コードで参加</h3>
-          <p className="soft-note">観戦から参加へ切り替える時も、ここで名前を入れて参加します。</p>
-          <div className="room-button-row">
-            <input
-              value={joinCode}
-              onChange={(event) => setJoinCode(event.currentTarget.value.toUpperCase())}
-              placeholder="ルームコード"
-              inputMode="text"
-            />
-            <input value={joinName} onChange={(event) => setJoinName(event.currentTarget.value)} placeholder="名前" />
-            <button className="secondary-button" type="button" disabled={isBusy || apiStatus !== "ready"} onClick={joinRoom}>
-              <Users size={18} />
-              参加
-            </button>
-          </div>
-        </div>
-
-        <div className="room-form room-transfer-form">
-          <h3>引き継ぎコードで復帰</h3>
-          <p className="soft-note">別端末でも同じ参加者として戻れます。</p>
-          <div className="room-button-row">
-            <input
-              value={transferRoomCode}
-              onChange={(event) => setTransferRoomCode(event.currentTarget.value.toUpperCase())}
-              placeholder="ルームコード"
-              inputMode="text"
-            />
-            <input
-              value={transferCode}
-              onChange={(event) => setTransferCode(normalizeInputTransferCode(event.currentTarget.value))}
-              placeholder="引き継ぎコード"
-              inputMode="text"
-              autoComplete="one-time-code"
-              maxLength={8}
-            />
-            <button className="secondary-button" type="button" disabled={isBusy || apiStatus !== "ready"} onClick={claimTransferCode}>
-              <KeyRound size={18} />
-              復帰
-            </button>
-          </div>
-        </div>
-
-        <div className="room-form">
-          <h3>観戦で見る</h3>
-          <p className="soft-note">参加者に数えず、進行・履歴・接続状況だけを確認します。</p>
-          <div className="room-button-row">
-            <input
-              value={observerCode}
-              onChange={(event) => setObserverCode(event.currentTarget.value.toUpperCase())}
-              placeholder="ルームコード"
-              inputMode="text"
-            />
-            <button className="secondary-button" type="button" disabled={isBusy || apiStatus !== "ready"} onClick={watchRoomAsSpectator}>
-              <Eye size={18} />
-              観戦
-            </button>
-          </div>
-        </div>
-      </div>
-
-      {savedSession && !snapshot && (
-        <div className="room-form room-resume-card">
+      {!hasActiveRoom && savedSession && (
+        <div className="room-form room-resume-card" role="status">
           <div>
             <h3>前回のルームに戻る</h3>
             <p className="soft-note">
@@ -1620,6 +1727,126 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
         </div>
       )}
 
+      {!hasActiveRoom && (
+        <div className="room-entry">
+          <div>
+            <span className="control-label">ルームへの入り方</span>
+            <div className="room-entry-tabs" role="group" aria-label="ルームへの入り方">
+              {roomEntryOptions.map((option) => (
+                <button
+                  key={option.value}
+                  className={entryMode === option.value ? "selected" : ""}
+                  type="button"
+                  aria-pressed={entryMode === option.value}
+                  onClick={() => setEntryMode(option.value)}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {entryMode === "join" && (
+            <div className="room-form room-entry-panel">
+              <h3>コードで参加</h3>
+              <p className="soft-note">招待リンクから開いた場合は、ルームコードが自動で入ります。</p>
+              <div className="room-button-row">
+                <input
+                  aria-label="参加するルームコード"
+                  value={joinCode}
+                  onChange={(event) => setJoinCode(event.currentTarget.value.toUpperCase())}
+                  placeholder="ルームコード"
+                  inputMode="text"
+                  autoCapitalize="characters"
+                />
+                <input
+                  aria-label="参加者名"
+                  value={joinName}
+                  onChange={(event) => setJoinName(event.currentTarget.value)}
+                  placeholder="名前"
+                  autoComplete="nickname"
+                />
+                <button className="primary-button" type="button" disabled={isBusy || apiStatus !== "ready"} onClick={joinRoom}>
+                  <Users size={18} />
+                  参加
+                </button>
+              </div>
+            </div>
+          )}
+
+          {entryMode === "create" && (
+            <div className="room-form room-entry-panel">
+              <h3>ホストとして作成</h3>
+              <p className="soft-note">作成後に、参加用リンクとルームコードを共有できます。</p>
+              <div className="room-button-row">
+                <input
+                  aria-label="ホスト名"
+                  value={hostName}
+                  onChange={(event) => setHostName(event.currentTarget.value)}
+                  placeholder="ホスト名"
+                  autoComplete="nickname"
+                />
+                <button className="primary-button" type="button" disabled={isBusy || apiStatus !== "ready"} onClick={createRoomForHost}>
+                  <Plus size={18} />
+                  ルーム作成
+                </button>
+              </div>
+            </div>
+          )}
+
+          {entryMode === "recover" && (
+            <div className="room-form room-entry-panel">
+              <h3>引き継ぎコードで復帰</h3>
+              <p className="soft-note">別の端末やブラウザで、同じ参加者として戻るための入口です。</p>
+              <div className="room-button-row">
+                <input
+                  aria-label="復帰するルームコード"
+                  value={transferRoomCode}
+                  onChange={(event) => setTransferRoomCode(event.currentTarget.value.toUpperCase())}
+                  placeholder="ルームコード"
+                  inputMode="text"
+                  autoCapitalize="characters"
+                />
+                <input
+                  aria-label="8桁の引き継ぎコード"
+                  value={transferCode}
+                  onChange={(event) => setTransferCode(normalizeInputTransferCode(event.currentTarget.value))}
+                  placeholder="8桁の引き継ぎコード"
+                  inputMode="numeric"
+                  autoComplete="one-time-code"
+                  maxLength={8}
+                />
+                <button className="primary-button" type="button" disabled={isBusy || apiStatus !== "ready"} onClick={claimTransferCode}>
+                  <KeyRound size={18} />
+                  同じ参加者として復帰
+                </button>
+              </div>
+            </div>
+          )}
+
+          {entryMode === "watch" && (
+            <div className="room-form room-entry-panel">
+              <h3>観戦で見る</h3>
+              <p className="soft-note">参加者に数えず、進行・履歴・接続状況だけを確認します。</p>
+              <div className="room-button-row">
+                <input
+                  aria-label="観戦するルームコード"
+                  value={observerCode}
+                  onChange={(event) => setObserverCode(event.currentTarget.value.toUpperCase())}
+                  placeholder="ルームコード"
+                  inputMode="text"
+                  autoCapitalize="characters"
+                />
+                <button className="secondary-button" type="button" disabled={isBusy || apiStatus !== "ready"} onClick={watchRoomAsSpectator}>
+                  <Eye size={18} />
+                  観戦
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {snapshot && (participant || isSpectating) && (
         <>
           {socketStatus === "disconnected" && (
@@ -1636,7 +1863,7 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
           <div className="room-current">
             <div>
               <p className="eyebrow">ルームコード</p>
-              <button className="room-code" type="button" onClick={copyRoomCode}>
+              <button className="room-code" type="button" aria-label={`ルームコード ${snapshot.room.code} をコピー`} onClick={copyRoomCode}>
                 {snapshot.room.code}
               </button>
             </div>
@@ -1651,21 +1878,29 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
               </p>
             </div>
             <div className="room-current-actions">
+              <button className="primary-button" type="button" onClick={shareRoomInvitation}>
+                <Share2 size={18} />
+                招待を共有
+              </button>
               <button className="secondary-button" type="button" disabled={isBusy} onClick={refreshRoom}>
                 <RotateCcw size={18} />
                 更新
               </button>
               {isHost && (
-                <button className="danger-button" type="button" disabled={isBusy || roomClosed} onClick={closeRoomForEveryone}>
+                <button className="danger-button" type="button" disabled={isBusy || roomClosed || !syncReady} onClick={closeRoomForEveryone}>
                   <ShieldAlert size={18} />
                   ルーム終了
                 </button>
               )}
-              <button className="secondary-button" type="button" onClick={leaveLocalRoom}>
-                {isSpectating ? "観戦を終了" : "この端末だけ退出"}
+              <button className="secondary-button" type="button" onClick={pauseLocalRoom}>
+                {isSpectating ? "観戦を終了" : "一時退出"}
               </button>
             </div>
           </div>
+
+          {participant && !roomClosed && (
+            <p className="soft-note room-return-note">一時退出しても、この端末には復帰情報が残るため、同じ参加者として戻れます。</p>
+          )}
 
           {participant ? (
             <div className="room-game-panel">
@@ -1683,11 +1918,11 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
                 <select
                   value={selectedRoomGame}
                   onChange={(event) => setSelectedRoomGame(event.currentTarget.value as GameKey)}
-                  disabled={!isHost || isBusy || roomClosed}
+                  disabled={!isHost || isBusy || roomClosed || !syncReady}
                 >
                   {activeGames.map((game) => (
                     <option value={game.key} key={game.key}>
-                      {game.title}
+                      {game.title}（{gameStatusCopy[game.status].label}）
                     </option>
                   ))}
                 </select>
@@ -1701,19 +1936,19 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
                 </div>
               )}
               <div className="room-game-controls">
-                <button className="primary-button" type="button" disabled={!isHost || isBusy || roomClosed} onClick={startRoomGame}>
+                <button className="primary-button" type="button" disabled={!isHost || isBusy || roomClosed || !syncReady} onClick={startRoomGame}>
                   <Play size={18} />
                   ルームで開始
                 </button>
-                <button className="secondary-button" type="button" disabled={!isHost || isBusy || roomClosed || !currentGame} onClick={advanceRoomGame}>
+                <button className="secondary-button" type="button" disabled={!isHost || isBusy || roomClosed || !currentGame || !syncReady} onClick={advanceRoomGame}>
                   <ChevronRight size={18} />
                   次へ
                 </button>
-                <button className="secondary-button" type="button" disabled={!isHost || isBusy || roomClosed || !currentGame} onClick={completeRoomGame}>
+                <button className="secondary-button" type="button" disabled={!isHost || isBusy || roomClosed || !currentGame || !syncReady} onClick={completeRoomGame}>
                   <Trophy size={18} />
                   完了
                 </button>
-                <button className="secondary-button" type="button" disabled={!isHost || isBusy || roomClosed} onClick={resetRoomGame}>
+                <button className="secondary-button" type="button" disabled={!isHost || isBusy || roomClosed || !syncReady} onClick={resetRoomGame}>
                   <RotateCcw size={18} />
                   待機に戻す
                 </button>
@@ -1764,18 +1999,18 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
                     </div>
                     {isHost && !roomClosed && (
                       <div className="participant-actions">
-                        <button className="secondary-button" type="button" disabled={isBusy} onClick={() => issueTransferCode(item)}>
+                        <button className="secondary-button" type="button" disabled={isBusy || !syncReady} onClick={() => issueTransferCode(item)}>
                           <KeyRound size={16} />
                           発行
                         </button>
                         {item.role !== "host" && (
-                          <button className="secondary-button" type="button" disabled={isBusy} onClick={() => transferHost(item)}>
+                          <button className="secondary-button" type="button" disabled={isBusy || !syncReady} onClick={() => transferHost(item)}>
                             <Users size={16} />
                             ホストにする
                           </button>
                         )}
                         {!isSelf && (
-                          <button className="ghost-icon-button" type="button" disabled={isBusy} aria-label={`${item.name}さんを退出`} onClick={() => removeParticipant(item)}>
+                          <button className="ghost-icon-button" type="button" disabled={isBusy || !syncReady} aria-label={`${item.name}さんを退出`} onClick={() => removeParticipant(item)}>
                             <Trash2 size={18} />
                           </button>
                         )}
@@ -1846,8 +2081,8 @@ function RoomLobby({ onStart }: { onStart: (game: GameKey, roomSession?: RoomSes
         </>
       )}
 
-      {notice && <p className="room-message">{notice}</p>}
-      {error && <p className="room-message error">{error}</p>}
+      {notice && <p className="room-message" role="status" aria-live="polite">{notice}</p>}
+      {error && <p className="room-message error" role="alert">{error}</p>}
     </section>
   );
 }
@@ -2021,6 +2256,7 @@ function PlayerSetup({ players, minPlayers, maxPlayers, onChange }: PlayerSetupP
         }}
       >
         <input
+          aria-label="追加する参加者の名前"
           value={draftName}
           onChange={(event) => setDraftName(event.target.value)}
           placeholder="名前を入力"
@@ -2037,13 +2273,18 @@ function PlayerSetup({ players, minPlayers, maxPlayers, onChange }: PlayerSetupP
           <div className="player-row" key={player.id}>
             <span className="player-number">{index + 1}</span>
             <input
+              aria-label={`参加者${index + 1}の名前`}
               value={player.name}
               onChange={(event) => updatePlayer(player.id, event.target.value)}
               maxLength={16}
             />
-            <button className="ghost-icon-button" onClick={() => removePlayer(player.id)} type="button">
+            <button
+              aria-label={`${player.name.trim() || `参加者${index + 1}`}さんを削除`}
+              className="ghost-icon-button"
+              onClick={() => removePlayer(player.id)}
+              type="button"
+            >
               <Trash2 size={18} />
-              <span className="sr-only">削除</span>
             </button>
           </div>
         ))}
@@ -2074,6 +2315,7 @@ function SegmentedControl<T extends string>({
       <div className="segmented">
         {options.map((option) => (
           <button
+            aria-pressed={option.value === value}
             key={option.value}
             className={option.value === value ? "selected" : ""}
             onClick={() => onChange(option.value)}
@@ -2104,7 +2346,23 @@ function ToggleSwitch({
         <strong>{label}</strong>
         <span>{description}</span>
       </span>
-      <input type="checkbox" checked={checked} onChange={(event) => onChange(event.target.checked)} />
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(event) => {
+          const nextChecked = event.target.checked;
+          if (
+            label === "大人向け（18+）" &&
+            nextChecked &&
+            !window.confirm(
+              "参加者全員が18歳以上で、大人向けのお題を含めることに同意していますか？",
+            )
+          ) {
+            return;
+          }
+          onChange(nextChecked);
+        }}
+      />
       <span className="toggle-track" aria-hidden="true">
         <span className="toggle-thumb" />
       </span>
@@ -2125,6 +2383,13 @@ function GameFrame({
   onResetAll: () => void;
   children: React.ReactNode;
 }) {
+  function confirmResetAll() {
+    const confirmed = window.confirm(
+      "この端末に保存した全ゲームの進行とルームの復帰情報を消して、トップへ戻りますか？",
+    );
+    if (confirmed) onResetAll();
+  }
+
   return (
     <main className="app-shell">
       <nav className="game-nav" aria-label="ゲーム操作">
@@ -2132,7 +2397,7 @@ function GameFrame({
           <Home size={18} />
           トップ
         </button>
-        <button className="secondary-button reset-all-button" onClick={onResetAll}>
+        <button className="secondary-button reset-all-button" onClick={confirmResetAll}>
           <RotateCcw size={18} />
           初期化してトップへ
         </button>
@@ -2168,6 +2433,8 @@ type UrlCandidateState = {
   territory: Record<string, string>;
   drawnCount: number;
   hazardIndex: number;
+  lastDrawResult: "safe" | "hazard" | null;
+  lastDrawPlayerName: string | null;
   completedPairs: number;
   actionLog: string[];
   votes: Record<string, string>;
@@ -2202,6 +2469,8 @@ const initialUrlCandidateState: UrlCandidateState = {
   territory: {},
   drawnCount: 0,
   hazardIndex: 4,
+  lastDrawResult: null,
+  lastDrawPlayerName: null,
   completedPairs: 0,
   actionLog: [],
   votes: {},
@@ -2447,9 +2716,15 @@ function UrlCandidateGame({
   const usesAnswerSync = isAnswerSyncableUrlCandidateKey(config.key);
   const usesActingSync = isActingSyncableUrlCandidateKey(config.key);
   const usesActionSync = isActionSyncableUrlCandidateKey(config.key);
+  const usesPromptSettings = !usesBoardSync && !usesActionSync;
   const promptPool = useMemo(
-    () => config.prompts.filter((prompt) => state.includeAdultTopics || prompt.rating === "normal"),
-    [config.prompts, state.includeAdultTopics],
+    () =>
+      config.prompts.filter(
+        (prompt) =>
+          (usesPromptSettings && state.includeAdultTopics) ||
+          prompt.rating === "normal",
+      ),
+    [config.prompts, state.includeAdultTopics, usesPromptSettings],
   );
   const selectedQuestionCount = Math.min(state.questionCount, promptPool.length);
   const prompt = config.prompts.find((item) => item.id === state.deckPromptIds[state.deckIndex]) ?? null;
@@ -2564,6 +2839,8 @@ function UrlCandidateGame({
       territory: {},
       drawnCount: 0,
       hazardIndex: createHazardIndex(),
+      lastDrawResult: null,
+      lastDrawPlayerName: null,
       completedPairs: 0,
       actionLog: [],
       votes: {},
@@ -2589,6 +2866,8 @@ function UrlCandidateGame({
       numberValue: 0,
       drawnCount: 0,
       hazardIndex: createHazardIndex(),
+      lastDrawResult: null,
+      lastDrawPlayerName: null,
       actionLog: [],
       votes: {},
       guesses: {},
@@ -2703,65 +2982,86 @@ function UrlCandidateGame({
                 />
               )}
 
-              <ToggleSwitch
-                label="Hな話題"
-                description={
-                  state.includeAdultTopics
-                    ? "ON: 夜の話題・恋バナ寄りのお題も混ぜます。答えにくければスキップできます。"
-                    : "OFF: 通常のお題だけで遊びます。"
-                }
-                checked={state.includeAdultTopics}
-                onChange={(includeAdultTopics) =>
-                  setState({
-                    ...state,
-                    includeAdultTopics,
-                    deckPromptIds: [],
-                    deckIndex: 0,
-                    answerVisible: false,
-                    votes: {},
-                    currentPlayerIndex: 0,
-                    actionLog: [],
-                    safeCounts: {},
-                    missCounts: {},
-                    guesses: {},
-                    scoreCounts: {},
-                    resourceCounts: {},
-                  })
-                }
-              />
+              {usesPromptSettings ? (
+                <>
+                  <ToggleSwitch
+                    label="大人向け（18+）"
+                    description={
+                      state.includeAdultTopics
+                        ? "ON: 参加者全員の同意を得て、大人向けのお題も混ぜます。"
+                        : "OFF: 通常のお題だけで遊びます。"
+                    }
+                    checked={state.includeAdultTopics}
+                    onChange={(includeAdultTopics) => {
+                      setState({
+                        ...state,
+                        includeAdultTopics,
+                        deckPromptIds: [],
+                        deckIndex: 0,
+                        answerVisible: false,
+                        votes: {},
+                        currentPlayerIndex: 0,
+                        actionLog: [],
+                        safeCounts: {},
+                        missCounts: {},
+                        guesses: {},
+                        scoreCounts: {},
+                        resourceCounts: {},
+                      });
+                    }}
+                  />
 
-              <SegmentedControl
-                label="今回の設問数"
-                options={urlCandidateQuestionCountOptions}
-                value={String(state.questionCount)}
-                onChange={(questionCount) =>
-                  setState({
-                    ...state,
-                    questionCount: Number(questionCount) as UrlCandidateQuestionCount,
-                    deckPromptIds: [],
-                    deckIndex: 0,
-                    answerVisible: false,
-                    votes: {},
-                    currentPlayerIndex: 0,
-                    actionLog: [],
-                    safeCounts: {},
-                    missCounts: {},
-                    guesses: {},
-                    scoreCounts: {},
-                    resourceCounts: {},
-                  })
-                }
-              />
+                  <SegmentedControl
+                    label="今回の設問数"
+                    options={urlCandidateQuestionCountOptions}
+                    value={String(state.questionCount)}
+                    onChange={(questionCount) =>
+                      setState({
+                        ...state,
+                        questionCount: Number(questionCount) as UrlCandidateQuestionCount,
+                        deckPromptIds: [],
+                        deckIndex: 0,
+                        answerVisible: false,
+                        votes: {},
+                        currentPlayerIndex: 0,
+                        actionLog: [],
+                        safeCounts: {},
+                        missCounts: {},
+                        guesses: {},
+                        scoreCounts: {},
+                        resourceCounts: {},
+                      })
+                    }
+                  />
 
-              <p className="soft-note">
-                通常{normalCount}問、大人向け{adultCount}問を搭載。現在は{promptPool.length}問から
-                {selectedQuestionCount}問をランダムに使います。
-              </p>
+                  <p className="soft-note">
+                    通常{normalCount}問、大人向け{adultCount}問を搭載。現在は{promptPool.length}問から
+                    {selectedQuestionCount}問をランダムに使います。
+                  </p>
 
-              {state.includeAdultTopics && (
-                <div className="notice-panel">
-                  <strong>Hな話題がONです</strong>
-                  <p>露骨すぎる話、個人情報、相手が嫌がる深掘りは避けます。答えにくい場合は迷わずスキップしてください。</p>
+                  {state.includeAdultTopics && (
+                    <div className="notice-panel">
+                      <strong>大人向け（18+）がONです</strong>
+                      <p>答えにくい場合は迷わずスキップし、個人情報や相手が嫌がる深掘りは避けてください。</p>
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="notice-panel calm">
+                  <strong>ゲーム固有の進行で遊びます</strong>
+                  <p>
+                    {config.kind === "hazard" || config.kind === "draw"
+                      ? "8枚の山から1枚ずつ引き、はずれが出たら混ぜ直します。大人向け設定は使用しません。"
+                      : config.kind === "tournament"
+                        ? "表示された組み合わせを順に対戦し、全員の対戦結果を記録したら終了します。"
+                        : config.kind === "territory"
+                          ? "25マスの盤面を順に取得し、埋まった時点で最も多い人を確認します。"
+                          : config.key === "resource-negotiation-game"
+                            ? "各自3資源から始め、交換交渉の成立数や残数を見ながら進めます。"
+                            : config.kind === "sugoroku"
+                              ? `標準${selectedQuestionCount}ラウンドでコマを進め、最後に位置を確認します。`
+                              : `標準${selectedQuestionCount}ラウンドでゲーム固有の操作を進めます。`}
+                  </p>
                 </div>
               )}
             </>
@@ -3025,7 +3325,7 @@ function UrlCandidateGame({
               ))}
             </div>
           )}
-          <p className="talk-cue">違う設問数やHな話題ON/OFFに変えると、同じゲームでも雰囲気を変えて遊べます。</p>
+          <p className="talk-cue">設定や進め方を変えると、同じゲームでも雰囲気を変えて遊べます。</p>
           <div className="action-row centered">
             <button className="primary-button" disabled={!canControlUrlCandidate} onClick={startUrlCandidateGame}>
               <RotateCcw size={18} />
@@ -3896,8 +4196,7 @@ function UrlCandidateInteractionPanel({
   }
 
   if (config.kind === "hazard" || config.kind === "draw") {
-    const nextDraw = state.drawnCount + 1;
-    const isHazard = nextDraw === state.hazardIndex;
+    const drawEnded = state.lastDrawResult === "hazard";
     return (
       <div className="url-interaction-panel">
         <div className="howto-panel compact">
@@ -3916,15 +4215,26 @@ function UrlCandidateInteractionPanel({
         )}
         <div className="draw-status">
           <strong>{state.drawnCount}/8枚</strong>
-          <span>1枚だけはずれがあります</span>
+          <span>{drawEnded ? "はずれが出ました。混ぜ直すと再開できます" : "1枚だけはずれがあります"}</span>
         </div>
+        {state.lastDrawResult && (
+          <div
+            className={`draw-result ${state.lastDrawResult === "hazard" ? "is-hazard" : "is-safe"}`}
+            aria-live="polite"
+          >
+            <strong>{state.lastDrawResult === "hazard" ? "はずれ" : "セーフ"}</strong>
+            <span>{state.lastDrawPlayerName}さんの結果</span>
+          </div>
+        )}
         <div className="action-row centered">
           <button
-            className={isHazard ? "danger-button" : "primary-button"}
-            disabled={!currentPlayer || !canActForCurrentPlayer || state.drawnCount >= 8}
+            className="primary-button"
+            disabled={!currentPlayer || !canActForCurrentPlayer || state.drawnCount >= 8 || drawEnded}
             type="button"
             onClick={() => {
               if (!currentPlayer) return;
+              const nextDraw = state.drawnCount + 1;
+              const isHazard = nextDraw === state.hazardIndex;
               const nextIndex = (state.currentPlayerIndex + 1) % Math.max(1, state.players.length);
               const message = isHazard
                 ? `${currentPlayer.name}さんがはずれ。安全な一言お題で場を温めます。`
@@ -3932,6 +4242,8 @@ function UrlCandidateInteractionPanel({
               pushLog(message, {
                 drawnCount: nextDraw,
                 currentPlayerIndex: nextIndex,
+                lastDrawResult: isHazard ? "hazard" : "safe",
+                lastDrawPlayerName: currentPlayer.name,
                 safeCounts: isHazard ? state.safeCounts : { ...state.safeCounts, [currentPlayer.id]: (state.safeCounts[currentPlayer.id] ?? 0) + 1 },
                 missCounts: isHazard ? { ...state.missCounts, [currentPlayer.id]: (state.missCounts[currentPlayer.id] ?? 0) + 1 } : state.missCounts,
               });
@@ -3944,7 +4256,14 @@ function UrlCandidateInteractionPanel({
             className="secondary-button"
             disabled={!canControl && isRoomMode}
             type="button"
-            onClick={() => pushLog("カードを混ぜ直しました。", { drawnCount: 0, hazardIndex: createHazardIndex() })}
+            onClick={() =>
+              pushLog("カードを混ぜ直しました。", {
+                drawnCount: 0,
+                hazardIndex: createHazardIndex(),
+                lastDrawResult: null,
+                lastDrawPlayerName: null,
+              })
+            }
           >
             <RotateCcw size={18} />
             混ぜ直す
@@ -4773,7 +5092,7 @@ function WerewolfGame({
           </div>
 
           <div className="notice-panel calm">
-            <strong>Hなお題はありません</strong>
+            <strong>大人向け（18+）のお題はありません</strong>
             <p>人狼は推理と会話のゲームとして進行します。飲酒の強要、暴露、個人攻撃になる言い方は司会が止めます。</p>
           </div>
 
@@ -5520,7 +5839,7 @@ function YamanoteGame({
                 />
               )}
               <ToggleSwitch
-                label="Hな話題"
+                label="大人向け（18+）"
                 description={
                   state.includeAdultTopics
                     ? "ON: 夜の話題・恋バナ寄りのお題も混ぜます。答えにくければスキップできます。"
@@ -5583,7 +5902,7 @@ function YamanoteGame({
 
           {state.includeAdultTopics && (
             <div className="notice-panel">
-              <strong>Hな話題がONです</strong>
+              <strong>大人向け（18+）がONです</strong>
               <p>露骨すぎる話や答えにくい話は避け、場に合わなければすぐスキップしてください。</p>
             </div>
           )}
@@ -6872,6 +7191,7 @@ function TurtleSoupGame({
               }}
             >
               <input
+                aria-label="匿名で追加する質問"
                 value={draftQuestion}
                 onChange={(event) => setDraftQuestion(event.target.value)}
                 disabled={!canFacilitateTurtleSoup}
@@ -7348,10 +7668,10 @@ function AnonymousQuestionBoxGame({
             </form>
             {state.customQuestions.length > 0 && canControlAnonymousQuestion && (
               <div className="custom-question-list">
-                {state.customQuestions.map((question) => (
+                {state.customQuestions.map((question, index) => (
                   <div className="custom-question-row" key={question.id}>
-                    <span>{question.text}</span>
-                    <button className="ghost-icon-button" onClick={() => removeCustomQuestion(question.id)} type="button">
+                    <span>投稿済みの質問 {index + 1}（開始後に開封）</span>
+                    <button className="ghost-icon-button" aria-label={`投稿済みの質問${index + 1}を削除`} onClick={() => removeCustomQuestion(question.id)} type="button">
                       <Trash2 size={18} />
                       <span className="sr-only">削除</span>
                     </button>
@@ -7706,7 +8026,7 @@ function TwoChoiceGame({
             <h3>進め方</h3>
             <ol className="rule-list">
               <li>参加者を2人以上登録します。</li>
-              <li>カテゴリ、Hな話題のON/OFF、今回使う設問数を選びます。</li>
+              <li>カテゴリ、大人向け（18+）のON/OFF、今回使う設問数を選びます。</li>
               <li>お題が出たら、全員がAかBを選びます。答えにくい人はパスできます。</li>
               <li>結果が出たら、少数派または気になった回答の人から理由を聞きます。</li>
               <li>正解はありません。違いを楽しみながら、軽く会話を広げるゲームです。</li>
@@ -7749,11 +8069,11 @@ function TwoChoiceGame({
                 onChange={(category) => setState({ ...state, category, deckPromptIds: [], deckIndex: 0, promptId: null })}
               />
               <ToggleSwitch
-                label="Hな話題"
+                label="大人向け（18+）"
                 description={
                   state.includeAdultTopics
                     ? "ON: 全部に大人向けも混ぜます。カテゴリで大人向けだけも選べます。"
-                    : "OFF: 軽いH寄りの恋バナや距離感の話題は出ません。"
+                    : "OFF: 恋愛や距離感の強い話題は出ません。"
                 }
                 checked={state.includeAdultTopics}
                 onChange={(includeAdultTopics) =>
@@ -7783,12 +8103,12 @@ function TwoChoiceGame({
               />
               <p className="soft-note">
                 この条件では{promptPool.length}問から、今回は{selectedQuestionCount}問をランダムに使います。
-                Hな話題は{state.includeAdultTopics ? "ON" : "OFF"}です。
+                大人向け（18+）は{state.includeAdultTopics ? "ON" : "OFF"}です。
               </p>
               {state.includeAdultTopics && (
                 <div className="notice-panel">
-                  <strong>Hな話題がONです</strong>
-                  <p>軽いH寄りの恋バナや距離感の話題を含みます。苦手な人がいる場ではOFFにしてください。</p>
+                  <strong>大人向け（18+）がONです</strong>
+                  <p>恋愛や距離感の話題を含みます。苦手な人がいる場ではOFFにしてください。</p>
                 </div>
               )}
             </>
@@ -8236,7 +8556,7 @@ function ImpressionRankingGame({
             <h3>進め方</h3>
             <ol className="rule-list">
               <li>参加者を3人以上登録します。</li>
-              <li>カテゴリ、Hな話題のON/OFF、今回使う設問数、自分への投票の有無を選びます。</li>
+              <li>カテゴリ、大人向け（18+）のON/OFF、今回使う設問数、自分への投票の有無を選びます。</li>
               <li>お題が出たら、全員が「一番当てはまりそうな人」を1人選びます。迷う人はパスできます。</li>
               <li>結果が出たら、1位の人に短く明るい理由を聞きます。同票なら全員を1位として扱います。</li>
               <li>選ばれた人が嬉しくなる言い方を優先します。からかいすぎや暴露は避けて遊びます。</li>
@@ -8279,7 +8599,7 @@ function ImpressionRankingGame({
                 onChange={(category) => setState({ ...state, category, deckPromptIds: [], deckIndex: 0, promptId: null, votes: {} })}
               />
               <ToggleSwitch
-                label="Hな話題"
+                label="大人向け（18+）"
                 description={
                   state.includeAdultTopics
                     ? "ON: 夜の話題・恋バナ寄りの第一印象お題も混ぜます。"
@@ -8324,7 +8644,7 @@ function ImpressionRankingGame({
               </p>
               {state.includeAdultTopics && (
                 <div className="notice-panel">
-                  <strong>Hな話題がONです</strong>
+                  <strong>大人向け（18+）がONです</strong>
                   <p>恋バナ寄りの印象お題を含みます。相手が答えにくそうなら、パスや次のお題へ切り替えてください。</p>
                 </div>
               )}
@@ -9898,7 +10218,7 @@ function WordWolfGame({
             <h3>進め方</h3>
             <ol className="rule-list">
               <li>参加者を4人以上登録します。</li>
-              <li>お題カテゴリとHな話題のON/OFFを選びます。</li>
+              <li>お題カテゴリと大人向け（18+）のON/OFFを選びます。</li>
               <li>アプリが多数派のお題と、1人だけ違う少数派のお題を配ります。</li>
               <li>スマホを順番に回し、自分のお題だけを確認します。</li>
               <li>会話タイムでは、お題そのものを言わずに特徴や経験を話します。</li>
@@ -9942,7 +10262,7 @@ function WordWolfGame({
                 onChange={(category) => setState({ ...state, category })}
               />
               <ToggleSwitch
-                label="Hな話題"
+                label="大人向け（18+）"
                 description={
                   state.includeAdultTopics
                     ? "ON: 全部に大人向けも混ぜます。カテゴリで大人向けだけも選べます。"
@@ -9963,11 +10283,11 @@ function WordWolfGame({
               />
               <p className="soft-note">
                 {selectedWordWolfCategory?.label ?? "選択中"}: {topicPool.length}ペアからランダムに1つ配ります。
-                Hな話題は{state.includeAdultTopics ? "ON" : "OFF"}です。
+                大人向け（18+）は{state.includeAdultTopics ? "ON" : "OFF"}です。
               </p>
               {state.includeAdultTopics && (
                 <div className="notice-panel">
-                  <strong>Hな話題がONです</strong>
+                  <strong>大人向け（18+）がONです</strong>
                   <p>軽い恋バナや距離感の話題を含みます。苦手な人がいる場ではOFFにしてください。</p>
                 </div>
               )}

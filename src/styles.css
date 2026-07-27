@@ -146,6 +146,68 @@ h3 {
   margin-bottom: 8px;
 }
 
+.game-status-section {
+  display: grid;
+  gap: 14px;
+  margin-top: 22px;
+}
+
+.game-status-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.game-status-heading p:not(.eyebrow) {
+  margin: 6px 0 0;
+  color: var(--muted);
+  line-height: 1.55;
+}
+
+.game-status-heading > span,
+.game-status-section > summary > span:last-child {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-weight: 800;
+}
+
+.game-status-section.collapsible {
+  display: block;
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+}
+
+.game-status-section > summary {
+  display: flex;
+  min-height: 52px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.game-status-section > summary > span:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.game-status-section > summary strong {
+  font-size: 1.12rem;
+}
+
+.game-status-section > summary small {
+  color: var(--muted);
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+
+.game-status-section[open] > summary {
+  margin-bottom: 14px;
+}
+
 .game-card {
   display: flex;
   min-height: 280px;
@@ -203,6 +265,38 @@ h3 {
   margin: 8px 0 0;
   color: var(--muted);
   line-height: 1.65;
+}
+
+.game-status-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  margin-bottom: 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 8px;
+  background: var(--soft);
+  color: var(--muted);
+  font-size: 0.76rem;
+  font-weight: 900;
+}
+
+.game-status-badge.status-ready {
+  border-color: #b9d9ca;
+  background: var(--teal-soft);
+  color: var(--teal);
+}
+
+.game-status-badge.status-beta {
+  border-color: #e7cf93;
+  background: #fffaf0;
+  color: #765114;
+}
+
+.game-status-badge.status-facilitator {
+  border-color: #c8cfee;
+  background: var(--indigo-soft);
+  color: var(--indigo);
 }
 
 .game-icon {
@@ -408,6 +502,39 @@ select:focus {
   gap: 12px;
 }
 
+.room-entry {
+  display: grid;
+  gap: 12px;
+}
+
+.room-entry-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 7px;
+}
+
+.room-entry-tabs button {
+  min-height: 48px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  color: var(--text);
+  padding: 8px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.room-entry-tabs button.selected {
+  border-color: var(--teal);
+  background: var(--teal-soft);
+  color: var(--teal);
+}
+
+.room-entry-panel {
+  border-color: #b9d9ca;
+}
+
 .room-form,
 .room-current,
 .room-game-panel {
@@ -463,6 +590,11 @@ select:focus {
   flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.room-return-note {
+  margin: -6px 0 0;
+  padding: 0 2px;
 }
 
 .room-code {
@@ -1127,6 +1259,38 @@ select:focus {
   line-height: 1.5;
 }
 
+.draw-result {
+  display: grid;
+  justify-items: center;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+  text-align: center;
+}
+
+.draw-result strong {
+  font-size: 1.35rem;
+}
+
+.draw-result span {
+  color: var(--muted);
+  font-weight: 800;
+}
+
+.draw-result.is-safe {
+  border-color: #b9d9ca;
+  background: var(--teal-soft);
+  color: var(--teal);
+}
+
+.draw-result.is-hazard {
+  border-color: #f2c6bd;
+  background: #fff7f3;
+  color: var(--danger);
+}
+
 .matchup-panel strong {
   color: var(--coral);
   font-size: 1.2rem;
@@ -1775,6 +1939,10 @@ select:focus {
 
   .room-actions-grid {
     grid-template-columns: 1fr;
+  }
+
+  .room-entry-tabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .room-button-row {
