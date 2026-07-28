@@ -1018,19 +1018,23 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
             type="button"
             className={syncMode === "all-games" ? "selected" : ""}
             aria-pressed={syncMode === "all-games"}
+            aria-label="全ゲーム同期（33ゲーム）"
             disabled={hasRoomContext}
             onClick={() => { setHasRoomContext(false); setSyncMode("all-games"); }}
           >
-            全ゲーム同期（33ゲーム）
+            <span className="sync-mode-name">全ゲーム同期</span>
+            <span className="sync-mode-meta">33ゲーム対応</span>
           </button>
           <button
             type="button"
             className={syncMode === "v2" ? "selected" : ""}
             aria-pressed={syncMode === "v2"}
+            aria-label="新同期ルーム（4ゲーム・試験版）"
             disabled={hasRoomContext}
             onClick={() => { setHasRoomContext(false); setSyncMode("v2"); }}
           >
-            新同期ルーム（4ゲーム・試験版）
+            <span className="sync-mode-name">新同期ルーム</span>
+            <span className="sync-mode-meta">4ゲーム・試験版</span>
           </button>
         </div>
         {syncStartHint && <p className="room-message" role="status">{syncStartHint}</p>}
