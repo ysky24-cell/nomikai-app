@@ -2137,7 +2137,7 @@ function validateUrlCandidateJudgeChange(currentState: Record<string, unknown>, 
 
 function validateMajorityHostTransition(currentStateValue: unknown, nextStateValue: unknown, gameKey: string) {
   const change = readUrlCandidateStateChange(currentStateValue, nextStateValue, gameKey);
-  if ("error" in change) return change.error;
+  if ("error" in change) return null;
   if (change.currentInnerState.step !== "play") return null;
   if (change.nextInnerState.step !== "result" && change.nextInnerState.step !== "complete") return null;
 
