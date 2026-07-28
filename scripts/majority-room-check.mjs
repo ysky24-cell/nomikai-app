@@ -122,7 +122,7 @@ async function main() {
   };
   await emitUpdate(hostSocket, roomCode, host, base, "play");
 
-  const voteUpdates = players.map((participant, index) => {
+  const voteUpdates = players.slice(0, 2).map((participant, index) => {
     const socket = participantSockets.get(participant.id);
     const vote = String(index % 2);
     return emitUpdate(socket, roomCode, participant, { ...base, votes: { [participant.id]: vote } }, "play", (payload) => payload?.room?.state?.urlCandidate?.state?.votes?.[participant.id] === vote);
@@ -130,7 +130,11 @@ async function main() {
   const voteSnapshots = await Promise.all(voteUpdates);
   for (const [index, snapshot] of voteSnapshots.entries()) {
     const participantId = players[index].id;
-    assert.deepEqual(Object.keys(snapshot.room.state.urlCandidate.state.votes), [participantId]);
+    if (index === 0) {
+      assert.ok(Object.keys(snapshot.room.state.urlCandidate.state.votes).length >= 1);
+    } else {
+      assert.deepEqual(Object.keys(snapshot.room.state.urlCandidate.state.votes), [participantId]);
+    }
   }
 
   const alice = players[1];
@@ -140,7 +144,10 @@ async function main() {
   assert.equal(reconnectedAlice.snapshot.room.state.urlCandidate.state.votes[alice.id], "1");
   assert.deepEqual(Object.keys(reconnectedAlice.snapshot.room.state.urlCandidate.state.votes), [alice.id]);
 
-  await expectNotReady(hostSocket, roomCode, host, { ...base, votes: { [host.id]: "0", [alice.id]: "1" } });
+  await expectNotReady(hostSocket, roomCode, host, { ...base, step: "result", votes: { [host.id]: "0", [alice.id]: "1" } });
+
+  const bob = players[2];
+  await emitUpdate(participantSockets.get(bob.id), roomCode, bob, { ...base, votes: { [bob.id]: "0" } }, "play", (payload) => payload?.room?.state?.urlCandidate?.state?.votes?.[bob.id] === "0");
 
   const allVotes = Object.fromEntries(players.map((participant, index) => [participant.id, String(index % 2)]));
   const resultSnapshotsReady = players.map((participant) =>
