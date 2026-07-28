@@ -2973,7 +2973,6 @@ function mergeAnonymousQuestionSubmission(currentStateValue: unknown, nextStateV
   const nextQuestions = readRecordArray(nextBranch.customQuestions);
   const currentIds = new Set(currentQuestions.map((question) => readString(question.id)).filter(isString));
   const appended = nextQuestions
-    .slice(currentQuestions.length)
     .filter((question) => {
       const id = readString(question.id);
       const text = readString(question.text);
