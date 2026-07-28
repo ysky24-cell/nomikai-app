@@ -421,7 +421,7 @@ const gameCardImages: Partial<Record<GameKey, GameCardImage>> = {
 };
 
 function getUrlCandidateGameStatus(game: UrlCandidateGameConfig): GameStatus {
-  if (game.key === "werewolf-game") return "ready";
+  if (game.key === "werewolf-game" || game.key === "majority-game") return "ready";
   return isRoomSyncableUrlCandidateKey(game.key) ? "beta" : "facilitator";
 }
 
@@ -2715,7 +2715,7 @@ function EmptyState({ text }: { text: string }) {
   return <p className="empty-state">{text}</p>;
 }
 
-type UrlCandidateStep = "setup" | "play" | "complete";
+type UrlCandidateStep = "setup" | "play" | "result" | "complete";
 type UrlCandidateQuestionCount = 5 | 10 | 20 | 30 | 50 | 100 | 300;
 
 type UrlCandidateState = {
@@ -2875,13 +2875,15 @@ function getUrlCandidateProgressStep(state: UrlCandidateState) {
   const stepOrder: Record<UrlCandidateStep, number> = {
     setup: 1,
     play: 2,
-    complete: 3,
+    result: 3,
+    complete: 4,
   };
   return stepOrder[state.step] ?? 1;
 }
 
 function describeUrlCandidateProgress(config: UrlCandidateGameConfig, state: UrlCandidateState) {
   if (state.step === "setup") return `${config.title}の設定中です`;
+  if (state.step === "result") return `${config.title}: 結果を確認中`;
   if (state.step === "play") {
     const progress = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "準備中";
     if (isVoteSyncableUrlCandidateKey(config.key)) {
@@ -3029,6 +3031,14 @@ function UrlCandidateGame({
   const canPeekUrlAnswer = !isUrlCandidateRoom || canControlUrlCandidate || (usesGuessSync && roomSession?.participantId === currentPlayer?.id);
   const canRevealUrlAnswer = !isUrlCandidateRoom || canControlUrlCandidate || (usesGuessSync && canActForCurrentUrlPlayer);
   const canStart = setupPlayers.length >= config.minPlayers && setupPlayers.every((player) => player.name.trim());
+  const allVoteSyncPlayersVoted =
+    state.players.length > 0 &&
+    state.players.every(
+      (player) => Object.prototype.hasOwnProperty.call(state.votes, player.id) && Boolean(state.votes[player.id]),
+    );
+  const canAdvanceUrlPrompt =
+    canControlUrlCandidate &&
+    (!isVoteSyncableUrlCandidateKey(config.key) || state.step !== "play" || allVoteSyncPlayersVoted);
   const progressLabel = state.deckPromptIds.length > 0 ? `${state.deckIndex + 1}/${state.deckPromptIds.length}` : "";
   const normalCount = config.prompts.filter((item) => item.rating === "normal").length;
   const adultCount = config.prompts.filter((item) => item.rating === "adult").length;
@@ -3148,6 +3158,11 @@ function UrlCandidateGame({
   }
 
   function moveToNextUrlPrompt() {
+    if (isVoteSyncableUrlCandidateKey(config.key) && state.step === "play") {
+      if (!allVoteSyncPlayersVoted) return;
+      setState({ ...state, step: "result", answerVisible: false });
+      return;
+    }
     const nextIndex = state.deckIndex + 1;
     const shouldRotatePromptOwner = usesGuessSync || usesActingSync || config.key === "truth-lie-game";
     if (nextIndex >= state.deckPromptIds.length) {
@@ -3407,7 +3422,8 @@ function UrlCandidateGame({
         </section>
       )}
 
-      {state.step === "play" && prompt && (
+      {((state.step === "play" && prompt) ||
+        (state.step === "result" && prompt && isVoteSyncableUrlCandidateKey(config.key))) && (
         <section className="tool-surface">
           <div className="prompt-panel">
             <p className="eyebrow">
@@ -3512,10 +3528,13 @@ function UrlCandidateGame({
           </div>
 
           <div className="action-row">
-            <button className="primary-button" disabled={!canControlUrlCandidate} onClick={moveToNextUrlPrompt}>
+            <button className="primary-button" disabled={!canAdvanceUrlPrompt} onClick={moveToNextUrlPrompt}>
               {state.deckIndex + 1 >= state.deckPromptIds.length ? <Check size={18} /> : <ChevronRight size={18} />}
               {state.deckIndex + 1 >= state.deckPromptIds.length ? "完了" : "次のお題"}
             </button>
+            {isVoteSyncableUrlCandidateKey(config.key) && state.step === "play" && !allVoteSyncPlayersVoted && canControlUrlCandidate && (
+              <span className="inline-status">全員の投票待ち</span>
+            )}
             <button
               className="secondary-button"
               disabled={!canControlUrlCandidate}
@@ -3741,7 +3760,7 @@ function UrlCandidateInteractionPanel({
                 {voteOptions.map((option, index) => (
                   <button
                     className={state.votes[player.id] === String(index) ? "selected-choice" : ""}
-                    disabled={!canVoteForPlayer(player.id)}
+                    disabled={state.step !== "play" || !canVoteForPlayer(player.id)}
                     key={option}
                     type="button"
                     onClick={() => setState({ ...state, votes: { ...state.votes, [player.id]: String(index) } })}
@@ -3751,7 +3770,7 @@ function UrlCandidateInteractionPanel({
                 ))}
                 <button
                   className={state.votes[player.id] === "skip" ? "selected-choice muted" : ""}
-                  disabled={!canVoteForPlayer(player.id)}
+                  disabled={state.step !== "play" || !canVoteForPlayer(player.id)}
                   type="button"
                   onClick={() => setState({ ...state, votes: { ...state.votes, [player.id]: "skip" } })}
                 >

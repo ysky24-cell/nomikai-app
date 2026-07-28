@@ -1176,6 +1176,10 @@ function validateStateUpdateAuthorization(
         if (!allVoted) return "game_not_ready";
       }
     }
+    if (activeGame === "majority-game" || activeGame === "large-majority-game") {
+      const transitionError = validateMajorityHostTransition(snapshot.room.state, nextStateValue, activeGame);
+      if (transitionError) return transitionError;
+    }
     if (activeGame === "party-pack") {
       const currentPartyPack = asRecord(asRecord(snapshot.room.state)?.partyPack);
       const nextPartyPack = asRecord(asRecord(nextStateValue)?.partyPack);
@@ -2129,6 +2133,21 @@ function validateUrlCandidateJudgeChange(currentState: Record<string, unknown>, 
   const judgedPlayerId = changedVoteKeys[0];
   if (nextVotes[judgedPlayerId] !== "correct") return false;
   return validateScoreIncrement(currentState.scoreCounts, nextState.scoreCounts, judgedPlayerId);
+}
+
+function validateMajorityHostTransition(currentStateValue: unknown, nextStateValue: unknown, gameKey: string) {
+  const change = readUrlCandidateStateChange(currentStateValue, nextStateValue, gameKey);
+  if ("error" in change) return change.error;
+  if (change.currentInnerState.step !== "play") return null;
+  if (change.nextInnerState.step !== "result" && change.nextInnerState.step !== "complete") return null;
+
+  const players = Array.isArray(change.currentInnerState.players) ? change.currentInnerState.players : [];
+  const votes = asRecord(change.currentInnerState.votes) ?? {};
+  const allVoted = players.length > 0 && players.every((player) => {
+    const id = asRecord(player)?.id;
+    return typeof id === "string" && Object.prototype.hasOwnProperty.call(votes, id) && Boolean(votes[id]);
+  });
+  return allVoted ? null : "game_not_ready";
 }
 
 function validateUrlCandidateOwnerAnswerChange(currentState: Record<string, unknown>, nextState: Record<string, unknown>, answerKey: string) {
