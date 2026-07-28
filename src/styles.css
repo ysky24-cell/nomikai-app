@@ -606,7 +606,7 @@ select:focus {
 
 .room-current {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(160px, 220px) minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
 }

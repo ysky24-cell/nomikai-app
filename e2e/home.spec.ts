@@ -88,7 +88,7 @@ test("legacy同期ルームはトークンなしのQR招待を表示し、読み
   await page.getByLabel("ホスト名").fill("Host");
   await page.getByRole("button", { name: "ルーム作成" }).click();
   const qr = page.locator("[data-invite-url]");
-  await expect(qr).toHaveCount(1);
+  await expect(qr).toBeVisible();
   await expect(qr).toHaveAttribute("data-invite-url", /sync=legacy.*room=LEGACY1/);
   await expect(qr).not.toHaveAttribute("data-invite-url", /should-not-leak|private-id/);
 
