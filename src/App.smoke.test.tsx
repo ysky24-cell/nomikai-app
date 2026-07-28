@@ -23,7 +23,7 @@ describe("ホームからゲーム開始", () => {
     window.location.hash = "#/";
   });
 
-  it("正式版ゲームが表示され、二択トークを開始できる", async () => {
+  it("正式版ゲームが表示され、開始時は同期ルームへ誘導される", async () => {
     render(<App />);
     expect(screen.getByRole("heading", { name: "飲み会アプリ" })).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "おすすめ" })).toBeInTheDocument();
@@ -31,7 +31,8 @@ describe("ホームからゲーム開始", () => {
     const twoChoiceCard = screen.getByRole("heading", { name: "二択トーク" }).closest("article");
     expect(twoChoiceCard).not.toBeNull();
     fireEvent.click(within(twoChoiceCard as HTMLElement).getByRole("button", { name: /^遊ぶ$/ }));
-    expect(await screen.findByRole("heading", { name: "二択トーク" })).toBeInTheDocument();
+    expect(await screen.findByText("まず同期ルームに参加してください", { exact: false })).toBeInTheDocument();
+    expect(window.location.hash).toBe("#/");
   });
 
   it("PartySessionの参加者を直接開いたゲームへ引き継ぐ", async () => {

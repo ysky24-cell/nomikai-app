@@ -1,21 +1,26 @@
 import { expect, test } from "@playwright/test";
 
-test("ホームから正式版ゲームの設定へ進める", async ({ page }) => {
+test("ホームのゲーム開始は同期ルームへ誘導する", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "飲み会アプリ" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "おすすめ" })).toBeVisible();
   const twoChoiceCard = page.locator("article.game-card").filter({ hasText: "二択トーク" });
   await twoChoiceCard.getByRole("button", { name: "遊ぶ", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "二択トーク" })).toBeVisible();
+  await expect(page.getByRole("status").filter({ hasText: "まず同期ルームに参加してください" })).toBeVisible();
+  await expect(page.locator("#sync-room-lobby")).toBeVisible();
+  await expect(page).not.toHaveURL(/#\/games\/two-choice/);
+});
+
+test("新同期ルームでもゲームカードは同期ルームへ誘導する", async ({ page }) => {
+  await page.goto("/?sync=v2");
+  const twoChoiceCard = page.locator("article.game-card").filter({ hasText: "二択トーク" });
+  await twoChoiceCard.getByRole("button", { name: "遊ぶ", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "二択トーク" })).toBeVisible();
+  await expect(page.locator("#shared-room-lobby")).toBeVisible();
+  await expect(page).not.toHaveURL(/#\/games\/two-choice/);
 });
 
 test("ゲームURLを直接開いて更新・戻るができる", async ({ page }) => {
-  await page.goto("/");
-  const card = page.locator("article.game-card").filter({ hasText: "二択トーク" });
-  await card.getByRole("button", { name: "遊ぶ", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "二択トーク" })).toBeVisible();
-  await page.goBack();
-  await expect(page.getByRole("heading", { name: "飲み会アプリ" })).toBeVisible();
   await page.goto("#/games/two-choice");
   await expect(page.getByRole("heading", { name: "二択トーク" })).toBeVisible();
   await page.reload();
@@ -31,17 +36,54 @@ test("未知のゲームURLは404画面になる", async ({ page }) => {
 
 test("参加者を次のゲームへ引き継ぎ、現在のゲームだけをリセットできる", async ({ page }) => {
   await page.goto("/");
-  const card = page.locator("article.game-card").filter({ hasText: "二択トーク" });
-  await card.getByRole("button", { name: "遊ぶ", exact: true }).click();
+  await page.evaluate(() => {
+    const now = new Date().toISOString();
+    localStorage.setItem("nomikai:party-session", JSON.stringify({
+      version: 2,
+      savedAt: now,
+      data: {
+        sessionId: "party-e2e",
+        participants: [{ id: "p1", name: "あき" }, { id: "p2", name: "ゆう" }],
+        lastGameKey: "two-choice",
+        recentGameKeys: ["two-choice"],
+        updatedAt: now,
+      },
+    }));
+  });
+  await page.reload();
+  await expect(page.getByRole("button", { name: "続きから" })).toBeVisible();
+  await page.getByRole("button", { name: "続きから" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "二択トーク" })).toBeVisible();
+  await expect(page).not.toHaveURL(/#\/games\/two-choice/);
+
+  await page.goto("#/games/two-choice");
   const nameInput = page.getByLabel("追加する参加者の名前");
   await nameInput.fill("あき");
   await nameInput.press("Enter");
   await nameInput.fill("ゆう");
   await nameInput.press("Enter");
+  await page.evaluate(() => {
+    const now = new Date().toISOString();
+    window.localStorage.setItem("nomikai:party-session", JSON.stringify({
+      version: 2,
+      savedAt: now,
+      data: {
+        sessionId: "party-e2e",
+        participants: [{ id: "aki", name: "あき" }, { id: "yuu", name: "ゆう" }],
+        lastGameKey: "two-choice",
+        recentGameKeys: ["two-choice"],
+        updatedAt: now,
+      },
+    }));
+    window.dispatchEvent(new Event("nomikai-party-session"));
+  });
   await page.getByRole("button", { name: "トップ" }).click();
   await expect(page.getByRole("heading", { name: "続きから" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "続きから" })).toBeVisible();
   await page.getByRole("button", { name: "続きから" }).click();
+  await expect(page.getByRole("status").filter({ hasText: "まず同期ルームに参加してください" })).toBeVisible();
+  await expect(page).toHaveURL(/#\/$/);
+  await page.goto("#/games/two-choice");
   await expect(page.getByRole("heading", { name: "二択トーク" })).toBeVisible();
   page.once("dialog", (dialog) => dialog.accept());
   await page.getByRole("button", { name: "現在のゲームをリセット" }).click();

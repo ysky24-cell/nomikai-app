@@ -908,6 +908,7 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
   const [query, setQuery] = useState("");
   const [peopleFilter, setPeopleFilter] = useState<HomePeopleFilter>("all");
   const [hasRoomContext, setHasRoomContext] = useState(false);
+  const [syncStartHint, setSyncStartHint] = useState("");
   const [syncMode, setSyncMode] = useState<"all-games" | "v2">(() => {
     try {
       const params = new URL(window.location.href).searchParams;
@@ -935,6 +936,20 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
   const visibleBetaGames = visibleGames.filter((game) => game.status === "beta");
   const visibleFacilitatorGames = visibleGames.filter((game) => game.status === "facilitator");
 
+  function requestSyncGameStart(game: GameKey) {
+    const gameTitle = findGameMeta(game)?.title ?? "選んだゲーム";
+    setSyncStartHint(
+      hasRoomContext
+        ? `「${gameTitle}」を始めるときは、参加中の同期ルームでホストがゲームを開始してください。`
+        : `「${gameTitle}」は、まず同期ルームに参加してください。参加後はホストがルーム内で開始します。`,
+    );
+    const lobbyId = syncMode === "v2" ? "shared-room-lobby" : "sync-room-lobby";
+    const lobby = document.getElementById(lobbyId);
+    if (lobby && typeof lobby.scrollIntoView === "function") {
+      lobby.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+  }
+
   function confirmResetAll() {
     const confirmed = window.confirm("この端末に保存したゲーム進行とルームの復帰情報をすべて消しますか？");
     if (confirmed) onResetAll();
@@ -944,9 +959,9 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
     <main className="app-shell">
       <section className="top-bar" aria-label="アプリ概要">
         <div>
-          <p className="eyebrow">1台共有 / ルーム式</p>
+          <p className="eyebrow">同期ルーム / 1台共有対応</p>
           <h1>飲み会アプリ</h1>
-          <p className="lead">1台を回して遊ぶ方法と、各自のスマホで同じルームに参加する方法を選べるミニゲーム集。</p>
+          <p className="lead">まず同期ルームを作成してゲームを開始します。1台で回すことも、各自のスマホから同じルームに参加することもできます。</p>
         </div>
         <div className="top-actions">
           <div className="status-pill">
@@ -973,7 +988,7 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
                 : "保存した進行を続きから開けます。"}
             </p>
           </div>
-          <button className="primary-button" type="button" onClick={() => onStart(toGameKey(partySession.lastGameKey) as GameKey)}>
+          <button className="primary-button" type="button" onClick={() => requestSyncGameStart(toGameKey(partySession.lastGameKey) as GameKey)}>
             <Play size={18} />
             続きから
           </button>
@@ -986,7 +1001,7 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
           <div className="action-row">
             {partySession.recentGameKeys.map((key) => {
               const game = findGameMeta(toGameKey(key));
-              return game ? <button className="secondary-button" type="button" key={key} onClick={() => onStart(game.key)}>{game.title}</button> : null;
+              return game ? <button className="secondary-button" type="button" key={key} onClick={() => requestSyncGameStart(game.key)}>{game.title}</button> : null;
             })}
           </div>
         </section>
@@ -996,7 +1011,7 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
         <div>
           <p className="eyebrow">スマホ同期</p>
           <h2>同期ルームを選ぶ</h2>
-          <p className="soft-note">迷ったら「全ゲーム同期」を選んでください。新同期ルームは現在4ゲーム対応の試験版です。</p>
+          <p className="soft-note">ゲーム開始は同期ルームが入口です。1台で回す場合も、ここで作成したルームから進行します。</p>
         </div>
         <div className="sync-mode-tabs" role="group" aria-label="同期ルームの種類">
           <button
@@ -1018,13 +1033,16 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
             新同期ルーム（4ゲーム・試験版）
           </button>
         </div>
+        {syncStartHint && <p className="room-message" role="status">{syncStartHint}</p>}
       </section>
 
-      {syncMode === "all-games" ? (
-        <RoomLobby onStart={onStart} onPresenceChange={setHasRoomContext} />
-      ) : (
-        <SharedRoomLobby apiUrl={API_URL} onPresenceChange={setHasRoomContext} />
-      )}
+      <div id="sync-room-target">
+        {syncMode === "all-games" ? (
+          <RoomLobby onStart={onStart} onPresenceChange={setHasRoomContext} />
+        ) : (
+          <SharedRoomLobby apiUrl={API_URL} onPresenceChange={setHasRoomContext} />
+        )}
+      </div>
 
       {!hasRoomContext && (
         <>
@@ -1040,9 +1058,9 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
             </p>
           </section>
 
-          <HomeGameSection games={visibleReadyGames} onStart={onStart} status="ready" />
-          <HomeGameSection games={visibleBetaGames} onStart={onStart} status="beta" />
-          <HomeGameSection games={visibleFacilitatorGames} onStart={onStart} status="facilitator" />
+          <HomeGameSection games={visibleReadyGames} onStart={requestSyncGameStart} status="ready" />
+          <HomeGameSection games={visibleBetaGames} onStart={requestSyncGameStart} status="beta" />
+          <HomeGameSection games={visibleFacilitatorGames} onStart={requestSyncGameStart} status="facilitator" />
 
           {futureGames.length > 0 && (
             <section className="future-section" aria-label="追加予定ゲーム">
@@ -1092,7 +1110,7 @@ function HomeGameSection({
               <div>
                 <span className={`game-status-badge status-${game.status}`}>{gameStatusCopy[game.status].label}</span>
                 <span className="game-mode-badge">
-                  {game.status === "ready" ? "1台共有" : game.status === "facilitator" ? "進行カード" : "QR対応予定"}
+                  {game.status === "ready" ? "同期版（1台共有可）" : game.status === "facilitator" ? "進行カード" : "QR対応予定"}
                 </span>
                 <h2>{game.title}</h2>
                 <p>{game.description}</p>
@@ -1897,7 +1915,7 @@ function RoomLobby({
   }
 
   return (
-    <section className="room-panel" aria-label="ルーム参加">
+    <section id="sync-room-lobby" className="room-panel" aria-label="ルーム参加">
       <div className="room-panel-heading">
         <div>
           <p className="eyebrow">各自のスマホで参加</p>

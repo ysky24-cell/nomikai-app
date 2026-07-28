@@ -271,7 +271,7 @@ export function SharedRoomLobby({ apiUrl, onPresenceChange }: { apiUrl: string; 
   }
 
   return (
-    <section className="shared-room-lobby" aria-label="みんなのスマホで遊ぶ">
+    <section id="shared-room-lobby" className="shared-room-lobby" aria-label="みんなのスマホで遊ぶ">
       <div className="shared-room-heading">
         <div><p className="eyebrow">複数端末モード</p><h2>みんなのスマホで遊ぶ</h2><p>代表者がルームを作り、参加者は自分のスマホから参加できます。</p></div>
         <Users size={28} aria-hidden="true" />
