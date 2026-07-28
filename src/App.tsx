@@ -537,7 +537,7 @@ const activeGames: GameMeta[] = [
   },
   {
     key: "anonymous-box",
-    status: "beta",
+    status: "ready",
     title: "匿名質問箱",
     description: "答えやすい質問をランダムに引いて会話を広げる",
     people: "2人から",

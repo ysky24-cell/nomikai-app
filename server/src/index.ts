@@ -760,7 +760,7 @@ io.on("connection", (socket) => {
     }
     stateToPersist = normalizeSyncedTimerState(currentGame, currentSnapshot.room.state, stateToPersist);
 
-    const canMergeConflict = currentGame === "johari-window" || [
+    const canMergeConflict = currentGame === "johari-window" || currentGame === "anonymous-box" || [
       "two-choice", "impression-ranking", "majority-game", "large-majority-game", "truth-lie-game",
       "typing-speed-game", "value-meter-game", "acting-phrase-game", "song-association-quiz", "drawing-quiz", "memory-logo-drawing",
       "weird-karuta-game", "emo-hint-game", "person-hint-quiz", "humming-intro-quiz",
@@ -786,7 +786,9 @@ io.on("connection", (socket) => {
         if (!latest) break;
         candidateState = currentGame === "johari-window"
           ? mergeJohariParticipantState(latest.room.state, candidateState, requester.id)
-          : mergeParticipantMapDelta(latest.room.state, candidateState, currentGame, requester.id);
+          : currentGame === "anonymous-box"
+            ? mergeAnonymousQuestionSubmission(latest.room.state, candidateState)
+            : mergeParticipantMapDelta(latest.room.state, candidateState, currentGame, requester.id);
         const retryError = validateStateUpdateAuthorization(latest, requester, currentGame, candidateState);
         if (retryError) {
           socket.emit("room:error", { error: retryError });
@@ -2787,6 +2789,9 @@ function sanitizeRoomSnapshotForParticipant(snapshot: RoomSnapshot, requester: R
   if (currentGame === "johari-window") {
     maskJohariState(state, requester?.id ?? null);
   }
+  if (currentGame === "anonymous-box") {
+    maskAnonymousQuestionState(state);
+  }
   maskParticipantMapState(state, currentGame, requester?.id ?? null);
 
   return nextSnapshot;
@@ -2862,6 +2867,21 @@ function maskJohariState(state: Record<string, unknown>, participantId: string |
   };
   johari.peerSelections = maskNested(johari.peerSelections);
   johari.peerSubmitted = maskNested(johari.peerSubmitted);
+}
+
+function maskAnonymousQuestionState(state: Record<string, unknown>) {
+  const anonymousQuestion = asRecord(state.anonymousQuestion);
+  if (!anonymousQuestion) return;
+  const questions = readRecordArray(anonymousQuestion.customQuestions);
+  const deckQuestionIds = Array.isArray(anonymousQuestion.deckQuestionIds) ? anonymousQuestion.deckQuestionIds : [];
+  const deckIndex = readNonnegativeInteger(anonymousQuestion.deckIndex) ?? 0;
+  const currentQuestionId = anonymousQuestion.step === "question" ? deckQuestionIds[deckIndex] : null;
+  anonymousQuestion.customQuestions = questions.map((question) => {
+    const id = readString(question.id);
+    return id && currentQuestionId === `custom:${id}`
+      ? { ...question }
+      : { ...question, text: "" };
+  });
 }
 
 function maskParticipantMapState(state: Record<string, unknown>, gameKey: string | null, participantId: string | null) {
@@ -2940,6 +2960,36 @@ function mergeJohariParticipantState(currentStateValue: unknown, nextStateValue:
   }
 
   return { ...currentState, ...nextState, johari: mergedJohari };
+}
+
+function mergeAnonymousQuestionSubmission(currentStateValue: unknown, nextStateValue: unknown) {
+  const currentState = cloneJson(currentStateValue ?? {}) as Record<string, unknown>;
+  const nextState = asRecord(nextStateValue);
+  const currentBranch = asRecord(currentState.anonymousQuestion);
+  const nextBranch = nextState ? asRecord(nextState.anonymousQuestion) : null;
+  if (!currentBranch || !nextBranch || currentBranch.step !== "setup" || nextBranch.step !== "setup") return nextStateValue;
+
+  const currentQuestions = readRecordArray(currentBranch.customQuestions);
+  const nextQuestions = readRecordArray(nextBranch.customQuestions);
+  const currentIds = new Set(currentQuestions.map((question) => readString(question.id)).filter(isString));
+  const appended = nextQuestions
+    .slice(currentQuestions.length)
+    .filter((question) => {
+      const id = readString(question.id);
+      const text = readString(question.text);
+      return id !== null && text !== null && text.trim().length > 0 && !currentIds.has(id);
+    })
+    .map((question) => cloneJson(question));
+
+  return {
+    ...currentState,
+    ...nextState,
+    anonymousQuestion: {
+      ...currentBranch,
+      ...nextBranch,
+      customQuestions: [...currentQuestions, ...appended],
+    },
+  };
 }
 
 function mergeParticipantMapDelta(currentStateValue: unknown, nextStateValue: unknown, gameKey: string | null, requesterId: string) {
@@ -3022,8 +3072,21 @@ function restoreProtectedSecretFields(
   if (currentGame === "ng-word") {
     restoreNgWordAssignmentWords(currentState, nextState);
   }
+  if (currentGame === "anonymous-box") {
+    restoreAnonymousQuestionFields(currentState, nextState);
+  }
 
   return nextState;
+}
+
+function restoreAnonymousQuestionFields(currentState: Record<string, unknown>, nextState: Record<string, unknown>) {
+  const currentBranch = asRecord(currentState.anonymousQuestion);
+  const nextBranch = asRecord(nextState.anonymousQuestion);
+  if (!currentBranch || !nextBranch) return;
+  const currentQuestions = readRecordArray(currentBranch.customQuestions);
+  const nextQuestions = readRecordArray(nextBranch.customQuestions);
+  if (nextQuestions.length < currentQuestions.length) return;
+  nextBranch.customQuestions = nextQuestions.map((question, index) => index < currentQuestions.length ? cloneJson(currentQuestions[index]) : question);
 }
 
 function restoreRecordFields(
