@@ -19,7 +19,9 @@ async function main() {
 
   let roomCode;
   let host;
+  let hostToken;
   let player;
+  let playerToken;
 
   await step("create room", async () => {
     const result = await request("POST", "/rooms", {
@@ -27,13 +29,16 @@ async function main() {
     });
     roomCode = result.data?.room?.code;
     host = result.data?.host;
+    hostToken = result.data?.participantToken;
     assert.ok(roomCode, "room code is required");
     assert.ok(host?.id, "host participant id is required");
+    assert.ok(hostToken, "host participant token is required");
   });
 
   await step("reject unsupported game start", async () => {
     const result = await expectHttpFailure("POST", `/rooms/${roomCode}/game/start`, {
       body: { participantId: host.id, gameKey: "unsupported-test-game", gameTitle: "Unsupported Test Game" },
+      token: hostToken,
     });
     assert.equal(result.response.status, 400);
     assert.equal(result.data?.error, "unsupported_game");
@@ -44,7 +49,17 @@ async function main() {
       body: { name: "Lifecycle Player" },
     });
     player = result.data?.participant;
+    playerToken = result.data?.participantToken;
     assert.ok(player?.id, "player participant id is required");
+    assert.ok(playerToken, "player participant token is required");
+  });
+
+  await step("reject host mutation without participant token", async () => {
+    const result = await expectHttpFailure("POST", `/rooms/${roomCode}/game/start`, {
+      body: { participantId: host.id, gameKey, gameTitle },
+    });
+    assert.equal(result.response.status, 401);
+    assert.equal(result.data?.error, "participant_auth_required");
   });
 
   let claimedTransferCode;
@@ -54,6 +69,7 @@ async function main() {
   await step("reject transfer code issue by non-host", async () => {
     const result = await expectHttpFailure("POST", `/rooms/${roomCode}/participants/${player.id}/transfer-code`, {
       body: { participantId: player.id },
+      token: playerToken,
     });
     assert.equal(result.response.status, 403);
     assert.equal(result.data?.error, "host_required");
@@ -62,6 +78,7 @@ async function main() {
   await step("issue and claim participant transfer code", async () => {
     const issueResult = await request("POST", `/rooms/${roomCode}/participants/${player.id}/transfer-code`, {
       body: { participantId: host.id },
+      token: hostToken,
     });
     claimedTransferCode = issueResult.data?.transferCode;
     assert.equal(issueResult.data?.participant?.id, player.id, "transfer code must target the requested participant");
@@ -74,6 +91,8 @@ async function main() {
     assert.equal(claimResult.data?.participant?.id, player.id, "claimed participant id must match original player");
     assert.equal(claimResult.data?.participant?.role, player.role, "claimed participant role must match original player");
     assert.equal(claimResult.data?.room?.code, roomCode, "claim response must include the room code");
+    playerToken = claimResult.data?.participantToken;
+    assert.ok(playerToken, "claimed participant token is required");
   });
 
   await step("reject reused participant transfer code", async () => {
@@ -87,12 +106,14 @@ async function main() {
   await step("reject superseded participant transfer code", async () => {
     const firstIssueResult = await request("POST", `/rooms/${roomCode}/participants/${player.id}/transfer-code`, {
       body: { participantId: host.id },
+      token: hostToken,
     });
     supersededTransferCode = firstIssueResult.data?.transferCode;
     assert.match(supersededTransferCode ?? "", /^[A-Z2-9]{8}$/);
 
     const secondIssueResult = await request("POST", `/rooms/${roomCode}/participants/${player.id}/transfer-code`, {
       body: { participantId: host.id },
+      token: hostToken,
     });
     blockedTransferCode = secondIssueResult.data?.transferCode;
     assert.match(blockedTransferCode ?? "", /^[A-Z2-9]{8}$/);
@@ -120,7 +141,7 @@ async function main() {
 
   const hostSocket = await step("connect host socket", async () => {
     const socket = await connectSocket("host");
-    socket.emit("room:join", { roomCode, participantId: host.id });
+    socket.emit("room:join", { roomCode, participantId: host.id, token: hostToken });
     const snapshot = await waitForEvent(
       socket,
       "room:updated",
@@ -133,7 +154,7 @@ async function main() {
 
   const hostMirrorSocket = await step("keep host connected while one of multiple sockets remains", async () => {
     const socket = await connectSocket("host-mirror");
-    socket.emit("room:join", { roomCode, participantId: host.id });
+    socket.emit("room:join", { roomCode, participantId: host.id, token: hostToken });
     await waitForEvent(
       socket,
       "room:updated",
@@ -143,7 +164,7 @@ async function main() {
 
     hostSocket.disconnect();
     await delay(300);
-    const result = await request("GET", `/rooms/${roomCode}?participantId=${encodeURIComponent(host.id)}`);
+    const result = await request("GET", `/rooms/${roomCode}?participantId=${encodeURIComponent(host.id)}`, { token: hostToken });
     const snapshot = requireSnapshot(result.data, "host mirror room snapshot");
     assert.ok(
       snapshot.participants.some((item) => item.id === host.id && item.connected),
@@ -155,6 +176,7 @@ async function main() {
   await step("start game", async () => {
     const result = await request("POST", `/rooms/${roomCode}/game/start`, {
       body: { participantId: host.id, gameKey, gameTitle },
+      token: hostToken,
     });
     const snapshot = requireSnapshot(result.data, "game start response");
     assert.equal(snapshot.room.status, "playing");
@@ -164,6 +186,7 @@ async function main() {
   await step("advance game", async () => {
     const result = await request("POST", `/rooms/${roomCode}/game/advance`, {
       body: { participantId: host.id },
+      token: hostToken,
     });
     const snapshot = requireSnapshot(result.data, "game advance response");
     assert.equal(snapshot.room.status, "playing");
@@ -173,6 +196,7 @@ async function main() {
   await step("complete game", async () => {
     const result = await request("POST", `/rooms/${roomCode}/game/complete`, {
       body: { participantId: host.id },
+      token: hostToken,
     });
     const snapshot = requireSnapshot(result.data, "game complete response");
     assert.equal(snapshot.room.status, "complete");
@@ -182,6 +206,7 @@ async function main() {
   await step("reset game", async () => {
     const result = await request("POST", `/rooms/${roomCode}/game/reset`, {
       body: { participantId: host.id },
+      token: hostToken,
     });
     const snapshot = requireSnapshot(result.data, "game reset response");
     assert.equal(snapshot.room.status, "waiting");
@@ -202,6 +227,7 @@ async function main() {
 
     const result = await request("POST", `/rooms/${roomCode}/close`, {
       body: { participantId: host.id },
+      token: hostToken,
     });
     closeSnapshot = requireSnapshot(result.data, "room close response");
     assert.equal(closeSnapshot.room.status, "closed");
@@ -214,6 +240,7 @@ async function main() {
     const result = await request(
       "GET",
       `/rooms/${roomCode}/events?participantId=${encodeURIComponent(host.id)}`,
+      { token: hostToken },
     );
     const events = extractEvents(result.data);
     const eventTypes = events.map((event) => event.eventType ?? event.event_type ?? event.type);
@@ -242,6 +269,7 @@ async function main() {
   await step("reject game start after room close", async () => {
     const result = await expectHttpFailure("POST", `/rooms/${roomCode}/game/start`, {
       body: { participantId: host.id, gameKey, gameTitle },
+      token: hostToken,
     });
     assert.equal(result.response.status, 409);
   });
@@ -249,6 +277,7 @@ async function main() {
   await step("reject game advance after room close", async () => {
     const result = await expectHttpFailure("POST", `/rooms/${roomCode}/game/advance`, {
       body: { participantId: host.id },
+      token: hostToken,
     });
     assert.equal(result.response.status, 409);
   });
@@ -263,6 +292,7 @@ async function main() {
   await step("reject host transfer after room close", async () => {
     const result = await expectHttpFailure("POST", `/rooms/${roomCode}/host/transfer`, {
       body: { participantId: host.id, targetParticipantId: player.id },
+      token: hostToken,
     });
     assert.equal(result.response.status, 409);
   });
@@ -270,6 +300,7 @@ async function main() {
   await step("reject participant removal after room close", async () => {
     const result = await expectHttpFailure("DELETE", `/rooms/${roomCode}/participants/${player.id}`, {
       body: { participantId: host.id },
+      token: hostToken,
     });
     assert.equal(result.response.status, 409);
   });
@@ -277,6 +308,7 @@ async function main() {
   await step("reject transfer code issue after room close", async () => {
     const result = await expectHttpFailure("POST", `/rooms/${roomCode}/participants/${player.id}/transfer-code`, {
       body: { participantId: host.id },
+      token: hostToken,
     });
     assert.equal(result.response.status, 409);
     assert.equal(result.data?.error, "room_closed");
@@ -344,6 +376,7 @@ async function request(method, path, options = {}) {
     init.headers["content-type"] = "application/json";
     init.body = JSON.stringify(options.body);
   }
+  if (options.token) init.headers["x-room-token"] = options.token;
 
   const response = await safeFetch(url, init);
   const text = await response.text();
@@ -367,6 +400,7 @@ async function expectHttpFailure(method, path, options = {}) {
     init.headers["content-type"] = "application/json";
     init.body = JSON.stringify(options.body);
   }
+  if (options.token) init.headers["x-room-token"] = options.token;
 
   const response = await safeFetch(url, init);
   const text = await response.text();
