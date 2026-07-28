@@ -12,6 +12,7 @@
     "e2e": "playwright test",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
+    "room:impression:check": "node scripts/impression-v2-check.mjs",
     "room:lifecycle:check": "node scripts/room-lifecycle-check.mjs",
     "room:lifecycle:check:all": "node scripts/room-lifecycle-check-all.mjs"
   },
