@@ -254,6 +254,9 @@ export function SharedRoomLobby({ apiUrl, onPresenceChange }: { apiUrl: string; 
   const inviteUrl = useMemo(() => {
     if (!projection) return "";
     const url = new URL(window.location.href);
+    for (const key of ["token", "participantToken", "hostToken", "reconnectToken", "participantId", "transferCode"]) {
+      url.searchParams.delete(key);
+    }
     url.searchParams.set("sync", "v2");
     url.searchParams.delete("room");
     url.searchParams.set("room", projection.code);

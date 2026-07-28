@@ -24,6 +24,7 @@ import {
   Vote,
 } from "lucide-react";
 import { io, type Socket } from "socket.io-client";
+import { QRCodeSVG } from "qrcode.react";
 import {
   readVersionedStorage,
   readVersionedStorageResult,
@@ -1179,6 +1180,15 @@ function RoomLobby({
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const socketRef = useRef<Socket | null>(null);
+  const inviteUrl = useMemo(() => {
+    const url = new URL(window.location.href);
+    for (const key of ["token", "participantToken", "hostToken", "participantId", "transferCode"]) {
+      url.searchParams.delete(key);
+    }
+    url.searchParams.set("sync", "legacy");
+    url.searchParams.set("room", snapshot?.room.code ?? invitedRoomCode);
+    return url.toString();
+  }, [invitedRoomCode, snapshot?.room.code]);
 
   function rememberRoomSession(roomCode: string, nextParticipant: RoomParticipant | null, participantToken?: string) {
     if (!nextParticipant) {
@@ -1751,12 +1761,10 @@ function RoomLobby({
 
   async function shareRoomInvitation() {
     if (!snapshot) return;
-    const inviteUrl = new URL(window.location.href);
-    inviteUrl.searchParams.set("room", snapshot.room.code);
     const shareData = {
       title: "飲み会ルームへの招待",
       text: `ルームコード ${snapshot.room.code} で参加してください。`,
-      url: inviteUrl.toString(),
+      url: inviteUrl,
     };
 
     try {
@@ -2075,6 +2083,12 @@ function RoomLobby({
                 {snapshot.room.code}
               </button>
             </div>
+            {participant && !roomClosed && (
+              <div className="shared-room-qr legacy-room-qr" data-invite-url={inviteUrl}>
+                <QRCodeSVG value={inviteUrl} size={160} level="M" includeMargin aria-label="参加用QRコード" />
+                <small>このQRを読み取ると参加画面が開きます。ホスト権限は含みません。</small>
+              </div>
+            )}
             <div>
               <p className="eyebrow">現在のゲーム</p>
               <h3>{roomClosed ? "終了済み" : currentGame ? currentGame.title : "待機中"}</h3>
