@@ -133,6 +133,68 @@ test("keeps two-choice answers private until every participant answers", async (
   assert.deepEqual(revealed.game && revealed.game.kind === "two-choice" ? revealed.game.result : null, { A: 1, B: 1, pass: 0 });
 });
 
+test("impression ranking supports concurrent private votes, reconnect, and host-only reveal", async () => {
+  const service = new RoomService(new MemoryRoomRepository());
+  const host = await service.createRoom("Host");
+  const sessions: Array<{ id: string; token: string; host?: boolean }> = [{ id: host.room.self!.id, token: host.hostToken, host: true }];
+  for (const name of ["Alice", "Bob"]) {
+    const current = await service.getProjection(host.room.code, null);
+    const joined = await service.execute(command(host.room.code, `join-${name}`, current!.version, "join", { name }));
+    sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
+  }
+  const started = await service.execute(command(host.room.code, "start-impression", 2, "game_start", { participantId: host.room.self!.id, gameKind: "impression-ranking", prompt: "一番頼れそうな人は？" }), host.hostToken);
+  assert.equal(started.game?.kind, "impression-ranking");
+  await assert.rejects(
+    service.execute(command(host.room.code, "early-reveal", 3, "game_reveal", { participantId: host.room.self!.id }), host.hostToken),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "game_not_ready",
+  );
+
+  const playerA = sessions[1];
+  const playerB = sessions[2];
+  const privateBeforeVote = await service.getProjection(host.room.code, playerA.id, playerA.token);
+  assert.equal(privateBeforeVote?.game?.kind, "impression-ranking");
+  assert.equal(privateBeforeVote.game.voteCount, 0);
+  assert.equal("result" in privateBeforeVote.game, false);
+  const simultaneous = await Promise.allSettled([
+    service.execute(command(host.room.code, "vote-a", 3, "game_vote", { participantId: playerA.id, voteTargetId: playerB.id }), playerA.token),
+    service.execute(command(host.room.code, "vote-b", 3, "game_vote", { participantId: playerB.id, voteTargetId: "skip" }), playerB.token),
+  ]);
+  assert.equal(simultaneous.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal(simultaneous.filter((result) => result.status === "rejected").length, 1);
+  assert.equal((simultaneous.find((result) => result.status === "rejected") as PromiseRejectedResult).reason.code, "version_conflict");
+  const playerAVote = await service.getProjection(host.room.code, playerA.id, playerA.token);
+  const playerBVote = await service.getProjection(host.room.code, playerB.id, playerB.token);
+  assert.equal(playerAVote?.game?.kind, "impression-ranking");
+  assert.equal(playerBVote?.game?.kind, "impression-ranking");
+  if (!playerAVote.game.ownVote) {
+    const current = await service.getProjection(host.room.code, null);
+    await service.execute(command(host.room.code, "vote-a-retry", current!.version, "game_vote", { participantId: playerA.id, voteTargetId: playerB.id }), playerA.token);
+  }
+  if (!playerBVote.game.ownVote) {
+    const current = await service.getProjection(host.room.code, null);
+    await service.execute(command(host.room.code, "vote-b-retry", current!.version, "game_vote", { participantId: playerB.id, voteTargetId: "skip" }), playerB.token);
+  }
+  assert.equal((await service.getProjection(host.room.code, null))?.game?.kind, "impression-ranking");
+  const publicBeforeReveal = await service.getProjection(host.room.code, null);
+  assert.equal(publicBeforeReveal?.game?.kind, "impression-ranking");
+  assert.equal("result" in publicBeforeReveal.game, false);
+  const left = await service.execute(command(host.room.code, "leave-b", (await service.getProjection(host.room.code, null))!.version, "leave", { participantId: playerB.id }), playerB.token);
+  assert.equal(left.participants.find((item) => item.id === playerB.id)?.connected, false);
+  const reconnected = await service.execute(command(host.room.code, "reconnect-b", left.version, "reconnect", { participantId: playerB.id }), playerB.token);
+  assert.equal(reconnected.participants.find((item) => item.id === playerB.id)?.connected, true);
+  assert.equal(reconnected.game?.kind, "impression-ranking");
+  assert.equal(reconnected.game.ownVote, "skip");
+  const voteHost = await service.execute(command(host.room.code, "vote-host", reconnected.version, "game_vote", { participantId: host.room.self!.id, voteTargetId: playerA.id }), host.hostToken);
+  assert.equal(voteHost.game?.kind, "impression-ranking");
+  const revealed = await service.execute(command(host.room.code, "reveal", voteHost.version, "game_reveal", { participantId: host.room.self!.id }), host.hostToken);
+  assert.equal(revealed.game?.kind, "impression-ranking");
+  assert.equal(revealed.game.phase, "revealed");
+  assert.deepEqual(revealed.game.result, { [playerA.id]: 1, [playerB.id]: 1, skip: 1 });
+  const playerProjection = await service.getProjection(host.room.code, playerB.id, playerB.token);
+  assert.equal(playerProjection?.game?.kind, "impression-ranking");
+  assert.deepEqual(playerProjection.game.result, { [playerA.id]: 1, [playerB.id]: 1, skip: 1 });
+});
+
 test("anonymous submissions never expose author identity and follow moderation states", async () => {
   const service = new RoomService(new MemoryRoomRepository());
   const host = await service.createRoom("Host");

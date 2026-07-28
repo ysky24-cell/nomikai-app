@@ -1165,6 +1165,20 @@ function validateStateUpdateAuthorization(
     return "unsupported_game";
   }
   if (requester.role === "host") {
+    if (activeGame === "impression-ranking") {
+      const currentImpression = asRecord(asRecord(snapshot.room.state)?.impression);
+      const nextImpression = asRecord(asRecord(nextStateValue)?.impression);
+      const nextProgress = readProgressState(nextStateValue, activeGame);
+      if (currentImpression?.step === "vote" && (nextImpression?.step === "result" || nextProgress.step >= 3)) {
+        const players = Array.isArray(currentImpression.players) ? currentImpression.players : [];
+        const votes = asRecord(nextImpression?.votes) ?? {};
+        const allVoted = players.length > 0 && players.every((player) => {
+          const id = asRecord(player)?.id;
+          return typeof id === "string" && Object.prototype.hasOwnProperty.call(votes, id) && votes[id] !== "" && votes[id] !== null && votes[id] !== undefined;
+        });
+        if (!allVoted) return "game_not_ready";
+      }
+    }
     return null;
   }
   if (!activeGame) {

@@ -488,7 +488,7 @@ const activeGames: GameMeta[] = [
   },
   {
     key: "impression-ranking",
-    status: "beta",
+    status: "ready",
     title: "第一印象ランキング",
     description: "お題に一番当てはまりそうな人へ投票する",
     people: "3人から",

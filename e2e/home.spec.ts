@@ -11,6 +11,17 @@ test("ホームのゲーム開始は同期ルームへ誘導する", async ({ pa
   await expect(page).not.toHaveURL(/#\/games\/two-choice/);
 });
 
+test("第一印象ランキングは正式版ゲームとして同期ルームから開始できる", async ({ page }) => {
+  await page.goto("/");
+  const readySection = page.locator("section[aria-labelledby='ready-games-heading']");
+  await expect(readySection.getByRole("heading", { name: "第一印象ランキング" })).toBeVisible();
+  const card = page.locator("article.game-card").filter({ hasText: "第一印象ランキング" });
+  await expect(card.getByText("正式版", { exact: true })).toHaveCount(1);
+  await card.getByRole("button", { name: "遊ぶ", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "第一印象ランキング" })).toBeVisible();
+  await expect(page).not.toHaveURL(/#\/games\/impression-ranking/);
+});
+
 test("新同期ルームでもゲームカードは同期ルームへ誘導する", async ({ page }) => {
   await page.goto("/?sync=v2");
   const twoChoiceCard = page.locator("article.game-card").filter({ hasText: "二択トーク" });
