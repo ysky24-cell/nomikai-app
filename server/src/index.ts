@@ -25,6 +25,7 @@ import {
 import { checkRedis, redis } from "./redis.js";
 import { MemoryRoomRepository, PostgresRoomRepository, RoomDomainError, RoomService, type RoomCommand } from "./domain/index.js";
 import { log, requestCorrelationId } from "./logger.js";
+import { canPartyPackParticipantReveal, readPartyPackPromptMode, validatePartyPackHostReveal } from "./party-pack-authorization.js";
 
 const app = express();
 const server = http.createServer(app);
@@ -1182,20 +1183,8 @@ function validateStateUpdateAuthorization(
     if (activeGame === "party-pack") {
       const currentPartyPack = asRecord(asRecord(snapshot.room.state)?.partyPack);
       const nextPartyPack = asRecord(asRecord(nextStateValue)?.partyPack);
-      if (currentPartyPack?.step === "prompt" && nextPartyPack?.step === "prompt" && currentPartyPack.answerVisible !== true && nextPartyPack.answerVisible === true) {
-        const mode = readPartyPackPromptMode(currentPartyPack.promptId);
-        const players = Array.isArray(currentPartyPack.players) ? currentPartyPack.players : [];
-        const playerIds = players.map((player) => asRecord(player)?.id).filter((id): id is string => typeof id === "string");
-        const currentPlayerId = getUrlCandidateCurrentPlayerId(currentPartyPack);
-        const voterIds = playerIds.filter((id) => id !== currentPlayerId);
-        const votes = asRecord(nextPartyPack.votes) ?? {};
-        const guesses = asRecord(nextPartyPack.guesses) ?? {};
-        const allHave = (ids: string[], map: Record<string, unknown>) => ids.length > 0 && ids.every((id) => Object.prototype.hasOwnProperty.call(map, id) && map[id] !== "" && map[id] !== null && typeof map[id] !== "undefined");
-        if (mode === "majority" && !allHave(playerIds, votes)) return "game_not_ready";
-        if (mode === "truth-lie" && (!readString(guesses.truthLieAnswer) || !allHave(voterIds, votes))) return "game_not_ready";
-        if (mode === "acting" && (!readString(guesses.actingEmotion) || !allHave(voterIds, votes))) return "game_not_ready";
-        if (mode === "value-meter" && (!allHave(playerIds, votes) || !allHave(playerIds, guesses))) return "game_not_ready";
-      }
+      const revealError = validatePartyPackHostReveal(currentPartyPack, nextPartyPack);
+      if (revealError) return revealError;
     }
     return null;
   }
@@ -2314,12 +2303,7 @@ function validatePartyPackParticipantChange(currentStateValue: unknown, nextStat
 
   const currentPlayerId = getUrlCandidateCurrentPlayerId(change.currentBranch);
   const changedKeys = getChangedKeys(change.currentBranch, change.nextBranch);
-  if (
-    requesterId === currentPlayerId &&
-    partyPackParticipantRevealModes.has(mode) &&
-    isOnlyChangedKeys(changedKeys, ["answerVisible"]) &&
-    typeof change.nextBranch.answerVisible === "boolean"
-  ) {
+  if (canPartyPackParticipantReveal(mode, requesterId, currentPlayerId, changedKeys, change.nextBranch.answerVisible)) {
     return null;
   }
 
@@ -2448,28 +2432,6 @@ function validateYamanoteAnswerAppend(currentValue: unknown, nextValue: unknown,
       .filter((answer): answer is string => typeof answer === "string"),
   );
   return !currentAnswers.has(answer.toLowerCase());
-}
-
-const partyPackPromptModes = new Set([
-  "yamanote",
-  "majority",
-  "truth-lie",
-  "reverse-word",
-  "loanword-ban",
-  "typing",
-  "memory-drawing",
-  "value-meter",
-  "acting",
-  "hint-quiz",
-]);
-
-const partyPackParticipantRevealModes = new Set(["truth-lie", "typing", "acting", "hint-quiz"]);
-
-function readPartyPackPromptMode(value: unknown) {
-  const promptId = readString(value);
-  if (!promptId) return null;
-  const mode = promptId.replace(/-\d+$/, "");
-  return partyPackPromptModes.has(mode) ? mode : null;
 }
 
 function validateTruthLieBranchChange(currentBranch: Record<string, unknown>, nextBranch: Record<string, unknown>, requesterId: string, answerKey: string) {

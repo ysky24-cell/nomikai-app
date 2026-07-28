@@ -76,6 +76,7 @@ import {
   type PartyPackPrompt,
   type PartyPackPromptMode,
 } from "./data/partyPackPrompts";
+import { isPartyPackValueMeterRowComplete } from "./partyPackRules";
 import {
   normalTwoChoiceCategories,
   normalTwoChoicePrompts,
@@ -4189,7 +4190,9 @@ function UrlCandidateInteractionPanel({
       clue: state.guesses[player.id] ?? "",
       value: state.votes[player.id] ?? "",
     }));
-    const answeredRows = rows.filter((row) => row.clue.trim() && row.value.trim());
+    const answeredRows = rows.filter((row) =>
+      isPartyPackValueMeterRowComplete(row.clue, row.value),
+    );
     const sortedRows = rows
       .filter((row) => row.value.trim() && Number.isFinite(Number(row.value)))
       .sort((a, b) => Number(a.value) - Number(b.value));
@@ -9951,11 +9954,12 @@ function PartyPackInteractionPanel({
     const answerKey = "truthLieAnswer";
     const answerChoice = state.guesses[answerKey] ?? "";
     const canJudge = canControl || canActForCurrentPlayer;
+    const canRevealResult = canControl || (!isRoomMode && canActForCurrentPlayer);
     const votedPlayers = voters.filter((player) => state.votes[player.id]);
     const correctPlayers = answerChoice ? voters.filter((player) => state.votes[player.id] === answerChoice) : [];
 
     function revealTruthLieResult() {
-      if (!canJudge || !answerChoice || state.answerVisible) return;
+      if (!canRevealResult || !answerChoice || state.answerVisible) return;
       const nextScoreCounts = { ...state.scoreCounts };
       correctPlayers.forEach((player) => {
         nextScoreCounts[player.id] = (nextScoreCounts[player.id] ?? 0) + 1;
@@ -10021,7 +10025,7 @@ function PartyPackInteractionPanel({
           <span className="inline-status">
             投票 {votedPlayers.length}/{voters.length}
           </span>
-          <button className="primary-button" disabled={!canJudge || !answerChoice || state.answerVisible || votedPlayers.length < voters.length} onClick={revealTruthLieResult}>
+          <button className="primary-button" disabled={!canRevealResult || !answerChoice || state.answerVisible || votedPlayers.length < voters.length} onClick={revealTruthLieResult}>
             <Check size={18} />
             結果を出す
           </button>
@@ -10095,7 +10099,9 @@ function PartyPackInteractionPanel({
       clue: state.guesses[player.id] ?? "",
       value: state.votes[player.id] ?? "",
     }));
-    const answeredRows = rows.filter((row) => row.clue.trim() || row.value.trim());
+    const answeredRows = rows.filter((row) =>
+      isPartyPackValueMeterRowComplete(row.clue, row.value),
+    );
     const sortedRows = rows
       .filter((row) => row.value.trim() && Number.isFinite(Number(row.value)))
       .sort((a, b) => Number(a.value) - Number(b.value));
@@ -10147,11 +10153,12 @@ function PartyPackInteractionPanel({
     const emotionKey = "actingEmotion";
     const selectedEmotion = state.guesses[emotionKey] ?? "";
     const canJudge = canControl || canActForCurrentPlayer;
+    const canRevealResult = canControl || (!isRoomMode && canActForCurrentPlayer);
     const votedPlayers = answerers.filter((player) => state.votes[player.id]);
     const correctPlayers = selectedEmotion ? answerers.filter((player) => state.votes[player.id] === selectedEmotion) : [];
 
     function revealActingResult() {
-      if (!canJudge || !selectedEmotion || state.answerVisible) return;
+      if (!canRevealResult || !selectedEmotion || state.answerVisible) return;
       const nextScoreCounts = { ...state.scoreCounts };
       correctPlayers.forEach((player) => {
         nextScoreCounts[player.id] = (nextScoreCounts[player.id] ?? 0) + 1;
@@ -10178,7 +10185,7 @@ function PartyPackInteractionPanel({
             </div>
           ))}
         </div>
-        <div className="action-row"><span className="inline-status">回答 {votedPlayers.length}/{answerers.length}</span><button className="primary-button" disabled={!canJudge || !selectedEmotion || state.answerVisible || votedPlayers.length < answerers.length} onClick={revealActingResult}><Check size={18} />結果を出す</button></div>
+        <div className="action-row"><span className="inline-status">回答 {votedPlayers.length}/{answerers.length}</span><button className="primary-button" disabled={!canRevealResult || !selectedEmotion || state.answerVisible || votedPlayers.length < answerers.length} onClick={revealActingResult}><Check size={18} />結果を出す</button></div>
         {state.answerVisible && <div className="split-result"><NameCluster title="正解" players={correctPlayers} /><NameCluster title="惜しい" players={answerers.filter((player) => state.votes[player.id] && state.votes[player.id] !== selectedEmotion)} /></div>}
         <div className="score-list wide">{state.players.map((player) => <span key={player.id}>{player.name}: 得点{state.scoreCounts[player.id] ?? 0}</span>)}</div>
         <UrlActionLog logs={state.actionLog} />
