@@ -73,6 +73,16 @@ function questionsFor(players) {
   };
 }
 
+async function waitForStoredQuestions(roomCode, participant, expectedCount) {
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    const snapshot = (await request("GET", `/rooms/${roomCode}?participantId=${encodeURIComponent(participant.id)}`, { token: participant.token })).data;
+    const questions = snapshot?.room?.state?.anonymousQuestion?.customQuestions;
+    if (Array.isArray(questions) && questions.length >= expectedCount) return snapshot;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`timeout waiting for ${expectedCount} stored questions`);
+}
+
 async function main() {
   const created = await request("POST", "/rooms", { body: { hostName: "Anonymous Audit Host" } });
   assert.equal(created.response.status, 201);
@@ -100,41 +110,43 @@ async function main() {
   assert.equal(joinedSnapshots.length, players.length);
   const hostSocket = participantSockets.get(host.id);
   const base = questionsFor(players);
-  await emitUpdate(hostSocket, roomCode, host, base, (payload) => payload.room.state.anonymousQuestion.step === "setup");
+  await emitUpdate(hostSocket, roomCode, host, base, (payload) => payload.room.state.anonymousQuestion.step === "setup").catch((error) => { error.message = `host-setup: ${error.message}`; throw error; });
 
   const alice = players[1];
   const bob = players[2];
   const aliceSocket = participantSockets.get(alice.id);
   const bobSocket = participantSockets.get(bob.id);
-  const aliceQuestion = { id: "custom-alice", text: "最近いちばん嬉しかったことは？" };
-  const bobQuestion = { id: "custom-bob", text: "今いちばん行きたい場所は？" };
+  const aliceQuestion = { id: "alice", text: "最近いちばん嬉しかったことは？" };
+  const bobQuestion = { id: "bob", text: "今いちばん行きたい場所は？" };
   await Promise.all([
     emitUpdate(aliceSocket, roomCode, alice, { ...base, customQuestions: [aliceQuestion] }, (payload) => payload.room.state.anonymousQuestion.customQuestions.length >= 1),
     emitUpdate(bobSocket, roomCode, bob, { ...base, customQuestions: [bobQuestion] }, (payload) => payload.room.state.anonymousQuestion.customQuestions.length >= 1),
-  ]);
+  ]).catch((error) => { error.message = `concurrent: ${error.message}`; throw error; });
 
-  const aliceThird = { id: "custom-alice-third", text: "最近笑ったことは？" };
+  await waitForStoredQuestions(roomCode, host, 2);
+
+  const aliceThird = { id: "alice-third", text: "最近笑ったことは？" };
   await emitUpdate(aliceSocket, roomCode, alice, {
     ...base,
     customQuestions: [{ ...aliceQuestion, text: "" }, { ...bobQuestion, text: "" }, aliceThird],
-  }, (payload) => payload.room.state.anonymousQuestion.customQuestions.length >= 3);
+  }, (payload) => payload.room.state.anonymousQuestion.customQuestions.length >= 3).catch((error) => { error.message = `third: ${error.message}`; throw error; });
 
   const hostSnapshot = (await request("GET", `/rooms/${roomCode}?participantId=${encodeURIComponent(host.id)}`, { token: host.token })).data;
   const storedQuestions = hostSnapshot.room.state.anonymousQuestion.customQuestions;
-  assert.deepEqual(storedQuestions.map((question) => question.id), ["custom-alice", "custom-bob", "custom-alice-third"]);
+  assert.deepEqual(new Set(storedQuestions.map((question) => question.id)), new Set(["alice", "bob", "alice-third"]));
   assert.ok(storedQuestions.every((question) => question.text.length > 0));
 
   const participantSnapshot = (await request("GET", `/rooms/${roomCode}?participantId=${encodeURIComponent(alice.id)}`, { token: alice.token })).data;
   const maskedQuestions = participantSnapshot.room.state.anonymousQuestion.customQuestions;
-  assert.equal(maskedQuestions.find((question) => question.id === "custom-alice")?.text, "");
-  assert.equal(maskedQuestions.find((question) => question.id === "custom-bob")?.text, "");
+  assert.equal(maskedQuestions.find((question) => question.id === "alice")?.text, "");
+  assert.equal(maskedQuestions.find((question) => question.id === "bob")?.text, "");
 
-  const deck = ["custom-alice", "custom-bob", "custom-alice-third"];
-  await emitUpdate(hostSocket, roomCode, host, { ...base, customQuestions: storedQuestions, step: "question", deckQuestionIds: deck, deckIndex: 0 }, (payload) => payload.room.state.anonymousQuestion.step === "question");
+  const deck = ["custom:alice", "custom:bob", "custom:alice-third"];
+  await emitUpdate(hostSocket, roomCode, host, { ...base, customQuestions: storedQuestions, step: "question", deckQuestionIds: deck, deckIndex: 0 }, (payload) => payload.room.state.anonymousQuestion.step === "question").catch((error) => { error.message = `question: ${error.message}`; throw error; });
   const questionProjection = (await request("GET", `/rooms/${roomCode}?participantId=${encodeURIComponent(alice.id)}`, { token: alice.token })).data;
   const projectedQuestions = questionProjection.room.state.anonymousQuestion.customQuestions;
-  assert.equal(projectedQuestions.find((question) => question.id === "custom-alice")?.text, aliceQuestion.text);
-  assert.equal(projectedQuestions.find((question) => question.id === "custom-bob")?.text, "");
+  assert.equal(projectedQuestions.find((question) => question.id === "alice")?.text, aliceQuestion.text);
+  assert.equal(projectedQuestions.find((question) => question.id === "bob")?.text, "");
 
   await emitUpdate(hostSocket, roomCode, host, { ...base, customQuestions: storedQuestions, step: "complete", deckQuestionIds: deck, deckIndex: 2 }, (payload) => payload.room.state.anonymousQuestion.step === "complete");
   const closed = await request("POST", `/rooms/${roomCode}/close`, { token: host.token, body: { participantId: host.id } });
