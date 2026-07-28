@@ -500,10 +500,10 @@ const activeGames: GameMeta[] = [
   },
   {
     key: "party-pack",
-    status: "beta",
+    status: "ready",
     title: "定番ゲームパック",
     description: "山手線、逆さ言葉、外来語禁止などをお題カードで回す",
-    people: "2人から",
+    people: "3人から",
     minutes: "3分から",
     accent: "indigo",
     icon: ListChecks,
@@ -938,15 +938,26 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
 
   function requestSyncGameStart(game: GameKey) {
     const gameTitle = findGameMeta(game)?.title ?? "選んだゲーム";
+    const needsLegacyRoom = syncMode === "v2" && game === "party-pack";
+    const targetMode = needsLegacyRoom ? "all-games" : syncMode;
+    if (needsLegacyRoom) {
+      setHasRoomContext(false);
+      setSyncMode("all-games");
+    }
     setSyncStartHint(
-      hasRoomContext
+      needsLegacyRoom
+        ? `「${gameTitle}」は全ゲーム同期ルームで利用できます。対応モードへ切り替えました。`
+        : hasRoomContext
         ? `「${gameTitle}」を始めるときは、参加中の同期ルームでホストがゲームを開始してください。`
         : `「${gameTitle}」は、まず同期ルームに参加してください。参加後はホストがルーム内で開始します。`,
     );
-    const lobbyId = syncMode === "v2" ? "shared-room-lobby" : "sync-room-lobby";
+    const lobbyId = targetMode === "v2" ? "shared-room-lobby" : "sync-room-lobby";
+    const scrollToLobby = () => document.getElementById(lobbyId)?.scrollIntoView({ behavior: "smooth", block: "start" });
     const lobby = document.getElementById(lobbyId);
     if (lobby && typeof lobby.scrollIntoView === "function") {
-      lobby.scrollIntoView({ behavior: "smooth", block: "start" });
+      scrollToLobby();
+    } else if (needsLegacyRoom) {
+      window.requestAnimationFrame(scrollToLobby);
     }
   }
 
@@ -1029,12 +1040,12 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
             type="button"
             className={syncMode === "v2" ? "selected" : ""}
             aria-pressed={syncMode === "v2"}
-            aria-label="新同期ルーム（4ゲーム・試験版）"
+            aria-label="新同期ルーム（5ゲーム・試験版）"
             disabled={hasRoomContext}
             onClick={() => { setHasRoomContext(false); setSyncMode("v2"); }}
           >
             <span className="sync-mode-name">新同期ルーム</span>
-            <span className="sync-mode-meta">4ゲーム・試験版</span>
+            <span className="sync-mode-meta">5ゲーム・試験版</span>
           </button>
         </div>
         {syncStartHint && <p className="room-message" role="status">{syncStartHint}</p>}
@@ -4178,7 +4189,7 @@ function UrlCandidateInteractionPanel({
       clue: state.guesses[player.id] ?? "",
       value: state.votes[player.id] ?? "",
     }));
-    const answeredRows = rows.filter((row) => row.clue.trim() || row.value.trim());
+    const answeredRows = rows.filter((row) => row.clue.trim() && row.value.trim());
     const sortedRows = rows
       .filter((row) => row.value.trim() && Number.isFinite(Number(row.value)))
       .sort((a, b) => Number(a.value) - Number(b.value));
@@ -9872,7 +9883,7 @@ function PartyPackInteractionPanel({
           <span className="inline-status">
             投票 {votedPlayers.length}/{state.players.length}
           </span>
-          <button className="primary-button" disabled={(!canControl && isRoomMode) || state.answerVisible || votedPlayers.length === 0} onClick={revealMajorityResult}>
+          <button className="primary-button" disabled={(!canControl && isRoomMode) || state.answerVisible || votedPlayers.length < state.players.length} onClick={revealMajorityResult}>
             <Check size={18} />
             結果を出す
           </button>
@@ -10010,7 +10021,7 @@ function PartyPackInteractionPanel({
           <span className="inline-status">
             投票 {votedPlayers.length}/{voters.length}
           </span>
-          <button className="primary-button" disabled={!canJudge || !answerChoice || state.answerVisible} onClick={revealTruthLieResult}>
+          <button className="primary-button" disabled={!canJudge || !answerChoice || state.answerVisible || votedPlayers.length < voters.length} onClick={revealTruthLieResult}>
             <Check size={18} />
             結果を出す
           </button>
@@ -10118,7 +10129,7 @@ function PartyPackInteractionPanel({
         </div>
         <div className="action-row">
           <span className="inline-status">入力 {answeredRows.length}/{state.players.length}</span>
-          <button className="primary-button" disabled={!canControl && isRoomMode} onClick={() => pushLog("価値観メーターの並び順を表示しました。", { answerVisible: true })}>
+          <button className="primary-button" disabled={(!canControl && isRoomMode) || answeredRows.length < state.players.length} onClick={() => pushLog("価値観メーターの並び順を表示しました。", { answerVisible: true })}>
             <Check size={18} />
             並び順を表示
           </button>
@@ -10167,7 +10178,7 @@ function PartyPackInteractionPanel({
             </div>
           ))}
         </div>
-        <div className="action-row"><span className="inline-status">回答 {votedPlayers.length}/{answerers.length}</span><button className="primary-button" disabled={!canJudge || !selectedEmotion || state.answerVisible} onClick={revealActingResult}><Check size={18} />結果を出す</button></div>
+        <div className="action-row"><span className="inline-status">回答 {votedPlayers.length}/{answerers.length}</span><button className="primary-button" disabled={!canJudge || !selectedEmotion || state.answerVisible || votedPlayers.length < answerers.length} onClick={revealActingResult}><Check size={18} />結果を出す</button></div>
         {state.answerVisible && <div className="split-result"><NameCluster title="正解" players={correctPlayers} /><NameCluster title="惜しい" players={answerers.filter((player) => state.votes[player.id] && state.votes[player.id] !== selectedEmotion)} /></div>}
         <div className="score-list wide">{state.players.map((player) => <span key={player.id}>{player.name}: 得点{state.scoreCounts[player.id] ?? 0}</span>)}</div>
         <UrlActionLog logs={state.actionLog} />
