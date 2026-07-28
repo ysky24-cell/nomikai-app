@@ -1751,12 +1751,14 @@ function RoomLobby({
     setError("");
     setNotice("");
     try {
-      const nextSnapshot = await requestJson<RoomSnapshot>(`/rooms/${encodeURIComponent(snapshot.room.code)}/close`, {
+      await requestJson<RoomSnapshot>(`/rooms/${encodeURIComponent(snapshot.room.code)}/close`, {
         method: "POST",
         body: { participantId: participant.id },
       });
-      applyRoomSnapshot(nextSnapshot, "ルームを終了しました。履歴だけ確認できます。");
-      void loadRoomEvents(nextSnapshot.room.code, participant.id);
+      pauseLocalRoom({
+        clearSavedSession: true,
+        nextNotice: "ルームを終了しました。初期画面に戻りました。",
+      });
     } catch (caught) {
       setError(toErrorMessage(caught));
     } finally {
@@ -1764,9 +1766,12 @@ function RoomLobby({
     }
   }
 
-  function pauseLocalRoom() {
+  function pauseLocalRoom(options: { clearSavedSession?: boolean; nextNotice?: string } = {}) {
     socketRef.current?.disconnect();
     socketRef.current = null;
+    if (options.clearSavedSession) {
+      forgetRoomSession();
+    }
     setSnapshot(null);
     setParticipant(null);
     setSpectatorRoomCode(null);
@@ -1775,11 +1780,11 @@ function RoomLobby({
     setLastRoomSyncAt(null);
     setSocketStatus("idle");
     setIssuedTransferCode(null);
-    setNotice(
+    setNotice(options.nextNotice ?? (
       participant
         ? "この端末では一時退出しました。保存済みのルームからすぐ戻れます。"
-        : "観戦を終了しました。",
-    );
+        : "観戦を終了しました。"
+    ));
     setError("");
   }
 
@@ -2148,8 +2153,8 @@ function RoomLobby({
                   ルーム終了
                 </button>
               )}
-              <button className="secondary-button" type="button" onClick={pauseLocalRoom}>
-                {isSpectating ? "観戦を終了" : "一時退出"}
+              <button className="secondary-button" type="button" onClick={() => pauseLocalRoom({ clearSavedSession: roomClosed })}>
+                {roomClosed ? "初期画面へ戻る" : isSpectating ? "観戦を終了" : "一時退出"}
               </button>
             </div>
           </div>
