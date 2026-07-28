@@ -760,49 +760,43 @@ io.on("connection", (socket) => {
     }
     stateToPersist = normalizeSyncedTimerState(currentGame, currentSnapshot.room.state, stateToPersist);
 
+    const canMergeConflict = currentGame === "johari-window" || [
+      "two-choice", "impression-ranking", "majority-game", "large-majority-game", "truth-lie-game",
+      "typing-speed-game", "value-meter-game", "acting-phrase-game", "song-association-quiz", "drawing-quiz", "memory-logo-drawing",
+      "weird-karuta-game", "emo-hint-game", "person-hint-quiz", "humming-intro-quiz",
+    ].includes(currentGame ?? "");
     let room;
-    try {
-      room = await updateRoomState(
-        roomCode,
-        stateToPersist,
-        currentGame,
-        readRoomStatusFromState(stateToPersist, currentGame),
-        payload.expectedState ?? currentSnapshot.room.state,
-      );
-    } catch (error) {
-      const canMergeConflict = currentGame === "johari-window" || [
-        "two-choice", "impression-ranking", "majority-game", "large-majority-game", "truth-lie-game",
-        "typing-speed-game", "value-meter-game", "acting-phrase-game", "song-association-quiz", "drawing-quiz", "memory-logo-drawing",
-        "weird-karuta-game", "emo-hint-game", "person-hint-quiz", "humming-intro-quiz",
-      ].includes(currentGame ?? "");
-      if (canMergeConflict && error instanceof Error && error.message === "version_conflict") {
+    let candidateState = stateToPersist;
+    let expectedState = payload.expectedState ?? currentSnapshot.room.state;
+    let updateError: unknown = null;
+    for (let attempt = 0; attempt < (canMergeConflict ? 4 : 1); attempt += 1) {
+      try {
+        room = await updateRoomState(
+          roomCode,
+          candidateState,
+          currentGame,
+          readRoomStatusFromState(candidateState, currentGame),
+          expectedState,
+        );
+        break;
+      } catch (error) {
+        updateError = error;
+        if (!(error instanceof Error) || error.message !== "version_conflict" || attempt >= 3) break;
         const latest = await findRoomByCode(roomCode);
-        if (latest) {
-          const merged = currentGame === "johari-window"
-            ? mergeJohariParticipantState(latest.room.state, stateToPersist, requester.id)
-            : mergeParticipantMapDelta(latest.room.state, stateToPersist, currentGame, requester.id);
-          const retryError = validateStateUpdateAuthorization(latest, requester, currentGame, merged);
-          if (!retryError) {
-            try {
-              room = await updateRoomState(
-                roomCode,
-                merged,
-                currentGame,
-                readRoomStatusFromState(merged, currentGame),
-                latest.room.state,
-              );
-            } catch {
-              room = null;
-            }
-          }
-        }
-        if (room) {
-          await redis.set(`room:${room.code}:state`, JSON.stringify(room.state));
-          await emitRoomSnapshot(room.code);
+        if (!latest) break;
+        candidateState = currentGame === "johari-window"
+          ? mergeJohariParticipantState(latest.room.state, candidateState, requester.id)
+          : mergeParticipantMapDelta(latest.room.state, candidateState, currentGame, requester.id);
+        const retryError = validateStateUpdateAuthorization(latest, requester, currentGame, candidateState);
+        if (retryError) {
+          socket.emit("room:error", { error: retryError });
           return;
         }
+        expectedState = latest.room.state;
       }
-      socket.emit("room:error", { error: error instanceof Error && error.message === "version_conflict" ? "version_conflict" : "state_update_failed" });
+    }
+    if (updateError && !room) {
+      socket.emit("room:error", { error: updateError instanceof Error && updateError.message === "version_conflict" ? "version_conflict" : "state_update_failed" });
       return;
     }
     if (!room) {
