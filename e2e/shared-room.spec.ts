@@ -41,7 +41,7 @@ test("host QR and three phone contexts share a waiting room, and close rejects l
   }
   await Promise.all(pages.map(mockApi));
   try {
-    await pages[0].goto(`${baseURL}/`);
+    await pages[0].goto(`${baseURL}?sync=v2`);
     await pages[0].getByLabel("ホスト名").fill("Host");
     await pages[0].getByRole("button", { name: "ルームを作る", exact: true }).last().click();
     await expect(pages[0].getByText("TEST23")).toBeVisible();
@@ -49,7 +49,7 @@ test("host QR and three phone contexts share a waiting room, and close rejects l
     await expect(pages[0].locator("body")).not.toContainText("host-secret");
 
     for (const [index, name] of ["Alice", "Bob", "Carol"].entries()) {
-      await pages[index + 1].goto(`${baseURL}/?room=TEST23`);
+      await pages[index + 1].goto(`${baseURL}?sync=v2&room=TEST23`);
       await pages[index + 1].getByLabel("ニックネーム").fill(name);
       await pages[index + 1].getByRole("button", { name: "参加する" }).click();
       await expect(pages[index + 1].getByText("参加できました")).toBeVisible();
@@ -59,7 +59,7 @@ test("host QR and three phone contexts share a waiting room, and close rejects l
     await pages[0].getByRole("button", { name: "参加を締め切る" }).click();
     await expect(pages[0].getByText("参加受付終了")).toBeVisible();
 
-    await pages[4].goto(`${baseURL}/?room=TEST23`);
+    await pages[4].goto(`${baseURL}?sync=v2&room=TEST23`);
     await pages[4].getByLabel("ニックネーム").fill("Late");
     await pages[4].getByRole("button", { name: "参加する" }).click();
     await expect(pages[4].getByRole("alert")).toContainText("参加受付を締め切っています");

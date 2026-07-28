@@ -186,6 +186,7 @@ type RoomSession = {
   participantId: string;
   participantName: string;
   participantRole: "host" | "player";
+  participantToken?: string;
 };
 
 type ClaimTransferResponse = {
@@ -193,6 +194,7 @@ type ClaimTransferResponse = {
   participantId?: string | null;
   room?: RoomInfo | null;
   participants?: RoomParticipant[];
+  participantToken?: string;
 };
 
 type TransferCodeResponse = {
@@ -742,13 +744,15 @@ function readRoomSession(): RoomSession | null {
   return result.value;
 }
 
-function saveRoomSession(roomCode: string, participant: RoomParticipant | null) {
+function saveRoomSession(roomCode: string, participant: RoomParticipant | null, participantToken?: string) {
   if (!participant) return;
+  const previous = readVersionedStorageResult<RoomSession | null>(ROOM_SESSION_KEY, { initialState: null, validate: (value): value is RoomSession | null => value === null || isRoomSession(value) }).value;
   const session: RoomSession = {
     roomCode,
     participantId: participant.id,
     participantName: participant.name,
     participantRole: participant.role,
+    participantToken: participantToken ?? (previous?.participantId === participant.id ? previous.participantToken : undefined),
   };
   writeVersionedStorage(ROOM_SESSION_KEY, session);
 }
@@ -903,6 +907,18 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
   const [query, setQuery] = useState("");
   const [peopleFilter, setPeopleFilter] = useState<HomePeopleFilter>("all");
   const [hasRoomContext, setHasRoomContext] = useState(false);
+  const [syncMode, setSyncMode] = useState<"all-games" | "v2">(() => {
+    try {
+      const params = new URL(window.location.href).searchParams;
+      const sync = params.get("sync");
+      if (sync === "v2") return "v2";
+      if (sync === "legacy" || sync === "all-games" || params.has("room")) return "all-games";
+      const hasV2Session = Boolean(window.localStorage.getItem("nomikai:shared-room-session:v1"));
+      return hasV2Session ? "v2" : "all-games";
+    } catch {
+      return "all-games";
+    }
+  });
   const visibleGames = activeGames.filter((game) => {
     const matchesCategory = filter === "all" || game.groups.includes(filter);
     const haystack = `${game.title} ${game.description}`.toLocaleLowerCase();
@@ -975,8 +991,39 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
         </section>
       )}
 
-      <RoomLobby onStart={onStart} onPresenceChange={setHasRoomContext} />
-      <SharedRoomLobby apiUrl={API_URL} />
+      <section className="sync-mode-panel" aria-label="スマホ同期ルームの選択">
+        <div>
+          <p className="eyebrow">スマホ同期</p>
+          <h2>同期ルームを選ぶ</h2>
+          <p className="soft-note">迷ったら「全ゲーム同期」を選んでください。新同期ルームは現在4ゲーム対応の試験版です。</p>
+        </div>
+        <div className="sync-mode-tabs" role="group" aria-label="同期ルームの種類">
+          <button
+            type="button"
+            className={syncMode === "all-games" ? "selected" : ""}
+            aria-pressed={syncMode === "all-games"}
+            disabled={hasRoomContext}
+            onClick={() => { setHasRoomContext(false); setSyncMode("all-games"); }}
+          >
+            全ゲーム同期（33ゲーム）
+          </button>
+          <button
+            type="button"
+            className={syncMode === "v2" ? "selected" : ""}
+            aria-pressed={syncMode === "v2"}
+            disabled={hasRoomContext}
+            onClick={() => { setHasRoomContext(false); setSyncMode("v2"); }}
+          >
+            新同期ルーム（4ゲーム・試験版）
+          </button>
+        </div>
+      </section>
+
+      {syncMode === "all-games" ? (
+        <RoomLobby onStart={onStart} onPresenceChange={setHasRoomContext} />
+      ) : (
+        <SharedRoomLobby apiUrl={API_URL} onPresenceChange={setHasRoomContext} />
+      )}
 
       {!hasRoomContext && (
         <>
@@ -1133,13 +1180,13 @@ function RoomLobby({
   const [error, setError] = useState("");
   const socketRef = useRef<Socket | null>(null);
 
-  function rememberRoomSession(roomCode: string, nextParticipant: RoomParticipant | null) {
+  function rememberRoomSession(roomCode: string, nextParticipant: RoomParticipant | null, participantToken?: string) {
     if (!nextParticipant) {
       clearRoomSession();
       setSavedSession(null);
       return;
     }
-    saveRoomSession(roomCode, nextParticipant);
+    saveRoomSession(roomCode, nextParticipant, participantToken);
     setSavedSession(readRoomSession());
   }
 
@@ -1203,6 +1250,7 @@ function RoomLobby({
       socket.emit("room:join", {
         roomCode,
         ...(participant ? { participantId: participant.id } : {}),
+        ...(participant ? { token: readRoomSession()?.participantToken } : {}),
       });
     });
 
@@ -1340,6 +1388,14 @@ function RoomLobby({
       setNotice(`${savedParticipant.name}さんとして保存済みルームに再接続しました。`);
     } catch (caught) {
       setResumeStatus("failed");
+      if (caught instanceof Error && caught.message === "participant_auth_required") {
+        forgetRoomSession();
+        setSnapshot(null);
+        setParticipant(null);
+        setSocketStatus("idle");
+        setError("同期方式が更新されたため、保存済みルームには復帰できません。保存情報を破棄し、参加者はルームコードで再参加、ホストは新しいルームを作成してください。");
+        return;
+      }
       setError(toErrorMessage(caught));
     } finally {
       setIsBusy(false);
@@ -1371,7 +1427,9 @@ function RoomLobby({
     setEventsError("");
     try {
       const query = requesterParticipantId ? `?participantId=${encodeURIComponent(requesterParticipantId)}` : "";
-      const result = await requestJson<{ events: RoomEvent[] }>(`/rooms/${encodeURIComponent(roomCode)}/events${query}`);
+      const stored = readRoomSession();
+      const token = requesterParticipantId && stored?.participantId === requesterParticipantId ? stored.participantToken : undefined;
+      const result = await requestJson<{ events: RoomEvent[] }>(`/rooms/${encodeURIComponent(roomCode)}/events${query}`, { token });
       setRoomEvents(Array.isArray(result.events) ? result.events : []);
     } catch (caught) {
       setEventsError(toErrorMessage(caught));
@@ -1422,15 +1480,15 @@ function RoomLobby({
     setNotice("");
     setIssuedTransferCode(null);
     try {
-      const result = await requestJson<{ room: RoomInfo; host: RoomParticipant | null }>("/rooms", {
+      const result = await requestJson<{ room: RoomInfo; host: RoomParticipant | null; participantToken?: string }>("/rooms", {
         method: "POST",
         body: { hostName: name },
       });
-      const roomSnapshot = await fetchRoomSnapshot(result.room.code, result.host?.id);
+      const roomSnapshot = await fetchRoomSnapshot(result.room.code, result.host?.id, result.participantToken);
       setSnapshot(roomSnapshot);
       setParticipant(result.host);
       setSpectatorRoomCode(null);
-      rememberRoomSession(result.room.code, result.host);
+      rememberRoomSession(result.room.code, result.host, result.participantToken);
       markRoomSynced();
       void loadRoomEvents(result.room.code, result.host?.id ?? null);
       setJoinCode(result.room.code);
@@ -1457,18 +1515,18 @@ function RoomLobby({
     setNotice("");
     setIssuedTransferCode(null);
     try {
-      const result = await requestJson<{ participant: RoomParticipant; room: RoomInfo | null }>(
+      const result = await requestJson<{ participant: RoomParticipant; participantToken?: string; room: RoomInfo | null }>(
         `/rooms/${encodeURIComponent(code)}/join`,
         {
           method: "POST",
           body: { name },
         },
       );
-      const roomSnapshot = await fetchRoomSnapshot(code, result.participant.id);
+      const roomSnapshot = await fetchRoomSnapshot(code, result.participant.id, result.participantToken);
       setSnapshot(roomSnapshot);
       setParticipant(result.participant);
       setSpectatorRoomCode(null);
-      rememberRoomSession(code, result.participant);
+      rememberRoomSession(code, result.participant, result.participantToken);
       markRoomSynced();
       void loadRoomEvents(code, result.participant.id);
       setJoinCode(code);
@@ -1509,12 +1567,12 @@ function RoomLobby({
       const roomSnapshot =
         result.room && Array.isArray(result.participants)
           ? { room: result.room, participants: result.participants }
-          : await fetchRoomSnapshot(result.room?.code ?? code, claimedParticipant.id);
+          : await fetchRoomSnapshot(result.room?.code ?? code, claimedParticipant.id, result.participantToken);
 
       setSnapshot(roomSnapshot);
       setParticipant(claimedParticipant);
       setSpectatorRoomCode(null);
-      rememberRoomSession(roomSnapshot.room.code, claimedParticipant);
+      rememberRoomSession(roomSnapshot.room.code, claimedParticipant, result.participantToken);
       markRoomSynced();
       void loadRoomEvents(roomSnapshot.room.code, claimedParticipant.id);
       const runningGame = toGameKey(roomSnapshot.room.currentGame);
@@ -1823,6 +1881,7 @@ function RoomLobby({
         participantId: participant.id,
         participantName: participant.name,
         participantRole: participant.role,
+        participantToken: readRoomSession()?.participantToken,
       };
       rememberRoomSession(snapshot.room.code, participant);
       onStart(progress.gameKey, roomSession);
@@ -2236,10 +2295,17 @@ function RoomLobby({
   );
 }
 
-async function requestJson<T>(path: string, options: { method?: string; body?: unknown } = {}) {
+async function requestJson<T>(path: string, options: { method?: string; body?: unknown; token?: string } = {}) {
+  const storedSession = readRoomSession();
+  const bodyParticipantId = options.body && typeof options.body === "object" && "participantId" in options.body
+    ? (options.body as { participantId?: unknown }).participantId
+    : null;
+  const token = options.token ?? (typeof bodyParticipantId === "string" && storedSession?.participantId === bodyParticipantId ? storedSession.participantToken : undefined);
+  const headers: Record<string, string> = options.body ? { "Content-Type": "application/json" } : {};
+  if (token) headers["x-room-token"] = token;
   const response = await fetch(`${API_URL}${path}`, {
     method: options.method ?? "GET",
-    headers: options.body ? { "Content-Type": "application/json" } : undefined,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
 
@@ -2251,9 +2317,11 @@ async function requestJson<T>(path: string, options: { method?: string; body?: u
   return payload as T;
 }
 
-async function fetchRoomSnapshot(code: string, participantId?: string | null) {
+async function fetchRoomSnapshot(code: string, participantId?: string | null, participantToken?: string) {
   const query = participantId ? `?participantId=${encodeURIComponent(participantId)}` : "";
-  return requestJson<RoomSnapshot>(`/rooms/${encodeURIComponent(code)}${query}`);
+  const session = readRoomSession();
+  const token = participantToken ?? (participantId && session?.participantId === participantId ? session.participantToken : undefined);
+  return requestJson<RoomSnapshot>(`/rooms/${encodeURIComponent(code)}${query}`, { token });
 }
 
 const roomEventLabels: Record<string, string> = {
@@ -2345,6 +2413,8 @@ function toErrorMessage(error: unknown) {
     participant_required: "ルーム参加者として接続してから操作してください。",
     target_participant_id_required: "対象の参加者が取得できません。",
     participant_not_found: "参加者が見つかりません。",
+    participant_auth_required: "参加者の認証情報がありません。もう一度コードで参加するか、復帰コードを使ってください。",
+    version_conflict: "別の端末でルームが更新されました。最新状態を取得してからもう一度操作してください。",
     room_join_required: "ルームへの接続が切れています。更新または再参加してください。",
     game_mismatch: "現在のゲームと更新内容が一致しません。画面を更新してください。",
     participant_update_mismatch: "別の参加者としての更新はできません。",
@@ -2956,7 +3026,7 @@ function UrlCandidateGame({
     roomSocketRef.current = socket;
 
     socket.on("connect", () => {
-      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId, token: roomSession.participantToken });
     });
 
     socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
@@ -4961,7 +5031,7 @@ function WerewolfGame({
     roomSocketRef.current = socket;
 
     socket.on("connect", () => {
-      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId, token: roomSession.participantToken });
     });
 
     socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
@@ -5842,7 +5912,7 @@ function YamanoteGame({
     roomSocketRef.current = socket;
 
     socket.on("connect", () => {
-      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId, token: roomSession.participantToken });
     });
 
     socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
@@ -6484,7 +6554,7 @@ function JohariWindowGame({
     roomSocketRef.current = socket;
 
     socket.on("connect", () => {
-      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId, token: roomSession.participantToken });
     });
 
     socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
@@ -7128,7 +7198,7 @@ function TurtleSoupGame({
     roomSocketRef.current = socket;
 
     socket.on("connect", () => {
-      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId, token: roomSession.participantToken });
     });
 
     socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
@@ -7652,7 +7722,7 @@ function AnonymousQuestionBoxGame({
     roomSocketRef.current = socket;
 
     socket.on("connect", () => {
-      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId, token: roomSession.participantToken });
     });
 
     socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
@@ -8115,7 +8185,7 @@ function TwoChoiceGame({
     roomSocketRef.current = socket;
 
     socket.on("connect", () => {
-      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId, token: roomSession.participantToken });
     });
 
     socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
@@ -8670,7 +8740,7 @@ function ImpressionRankingGame({
     roomSocketRef.current = socket;
 
     socket.on("connect", () => {
-      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId, token: roomSession.participantToken });
     });
 
     socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
@@ -9260,7 +9330,7 @@ function PartyPackGame({
     roomSocketRef.current = socket;
 
     socket.on("connect", () => {
-      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId, token: roomSession.participantToken });
     });
 
     socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
@@ -10367,7 +10437,7 @@ function WordWolfGame({
     roomSocketRef.current = socket;
 
     socket.on("connect", () => {
-      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId, token: roomSession.participantToken });
     });
 
     socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {
@@ -10924,7 +10994,7 @@ function NgWordGame({
     roomSocketRef.current = socket;
 
     socket.on("connect", () => {
-      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId });
+      socket.emit("room:join", { roomCode: roomSession.roomCode, participantId: roomSession.participantId, token: roomSession.participantToken });
     });
 
     socket.on("room:updated", (nextSnapshot: RoomSnapshot | null) => {

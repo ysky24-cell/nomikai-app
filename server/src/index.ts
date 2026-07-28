@@ -20,6 +20,7 @@ import {
   unregisterParticipantSocketConnection,
   updateRoomProgress,
   updateRoomState,
+  verifyParticipantToken,
 } from "./db.js";
 import { checkRedis, redis } from "./redis.js";
 import { MemoryRoomRepository, PostgresRoomRepository, RoomDomainError, RoomService, type RoomCommand } from "./domain/index.js";
@@ -173,6 +174,10 @@ app.get("/rooms/:code", async (request, response, next) => {
       return;
     }
     const participantId = readOptionalString(request.query.participantId);
+    if (participantId && !(await authenticateLegacyParticipant(request, request.params.code, participantId))) {
+      response.status(401).json({ error: "participant_auth_required" });
+      return;
+    }
     response.json(sanitizeRoomSnapshotForParticipant(snapshot, findParticipant(snapshot, participantId)));
   } catch (error) {
     next(error);
@@ -184,6 +189,12 @@ app.get("/rooms/:code/events", async (request, response, next) => {
     const snapshot = await findRoomByCode(request.params.code);
     if (!snapshot) {
       response.status(404).json({ error: "room_not_found" });
+      return;
+    }
+
+    const participantId = readOptionalString(request.query.participantId);
+    if (participantId && !(await authenticateLegacyParticipant(request, request.params.code, participantId))) {
+      response.status(401).json({ error: "participant_auth_required" });
       return;
     }
 
@@ -204,11 +215,12 @@ app.get("/rooms/:code/events", async (request, response, next) => {
 app.post("/rooms/:code/join", async (request, response, next) => {
   try {
     const name = readRequiredString(request.body?.name, "name");
-    const participant = await addParticipant(request.params.code, name);
-    if (!participant) {
+    const result = await addParticipant(request.params.code, name);
+    if (!result) {
       response.status(404).json({ error: "room_not_found" });
       return;
     }
+    const { participant, participantToken } = result;
 
     const snapshot = await findRoomByCode(request.params.code);
     if (snapshot) {
@@ -216,7 +228,7 @@ app.post("/rooms/:code/join", async (request, response, next) => {
     }
 
     const participantSnapshot = snapshot ? sanitizeRoomSnapshotForParticipant(snapshot, participant) : null;
-    response.status(201).json({ participant, room: participantSnapshot?.room ?? null });
+    response.status(201).json({ participant, participantToken, room: participantSnapshot?.room ?? null });
   } catch (error) {
     next(error);
   }
@@ -225,6 +237,10 @@ app.post("/rooms/:code/join", async (request, response, next) => {
 app.post("/rooms/:code/host/transfer", async (request, response, next) => {
   try {
     const requesterParticipantId = readRequiredString(request.body?.participantId, "participant_id");
+    if (!(await authenticateLegacyParticipant(request, request.params.code, requesterParticipantId))) {
+      response.status(401).json({ error: "participant_auth_required" });
+      return;
+    }
     const targetParticipantId = readRequiredString(request.body?.targetParticipantId, "target_participant_id");
     const snapshot = await transferRoomHost(request.params.code, requesterParticipantId, targetParticipantId);
     if (!snapshot) {
@@ -242,6 +258,10 @@ app.post("/rooms/:code/host/transfer", async (request, response, next) => {
 app.post("/rooms/:code/participants/:targetParticipantId/transfer-code", async (request, response, next) => {
   try {
     const requesterParticipantId = readRequiredString(request.body?.participantId, "participant_id");
+    if (!(await authenticateLegacyParticipant(request, request.params.code, requesterParticipantId))) {
+      response.status(401).json({ error: "participant_auth_required" });
+      return;
+    }
     const result = await createParticipantTransferCode(request.params.code, requesterParticipantId, request.params.targetParticipantId);
     if (!result) {
       response.status(404).json({ error: "room_not_found" });
@@ -279,7 +299,7 @@ app.post("/rooms/:code/claim-transfer", async (request, response, next) => {
 
     await emitRoomSnapshot(result.snapshot.room.code);
     const participantSnapshot = sanitizeRoomSnapshotForParticipant(result.snapshot, result.participant);
-    response.json({ participant: result.participant, room: participantSnapshot.room });
+    response.json({ participant: result.participant, participantToken: result.participantToken, room: participantSnapshot.room });
   } catch (error) {
     next(error);
   }
@@ -288,6 +308,10 @@ app.post("/rooms/:code/claim-transfer", async (request, response, next) => {
 app.delete("/rooms/:code/participants/:targetParticipantId", async (request, response, next) => {
   try {
     const requesterParticipantId = readRequiredString(request.body?.participantId, "participant_id");
+    if (!(await authenticateLegacyParticipant(request, request.params.code, requesterParticipantId))) {
+      response.status(401).json({ error: "participant_auth_required" });
+      return;
+    }
     const snapshot = await removeRoomParticipant(request.params.code, requesterParticipantId, request.params.targetParticipantId);
     if (!snapshot) {
       response.status(404).json({ error: "room_not_found" });
@@ -306,6 +330,10 @@ app.post("/rooms/:code/game/start", async (request, response, next) => {
     const gameKey = readRequiredString(request.body?.gameKey, "game_key");
     const gameTitle = readRequiredString(request.body?.gameTitle, "game_title");
     const participantId = readRequiredString(request.body?.participantId, "participant_id");
+    if (!(await authenticateLegacyParticipant(request, request.params.code, participantId))) {
+      response.status(401).json({ error: "participant_auth_required" });
+      return;
+    }
     const currentSnapshot = await findRoomByCode(request.params.code);
     if (!currentSnapshot) {
       response.status(404).json({ error: "room_not_found" });
@@ -373,6 +401,10 @@ app.post("/rooms/:code/game/advance", async (request, response, next) => {
     }
 
     const participantId = readRequiredString(request.body?.participantId, "participant_id");
+    if (!(await authenticateLegacyParticipant(request, request.params.code, participantId))) {
+      response.status(401).json({ error: "participant_auth_required" });
+      return;
+    }
     if (!isHostParticipant(snapshot, participantId)) {
       response.status(403).json({ error: "host_required" });
       return;
@@ -426,6 +458,10 @@ app.post("/rooms/:code/game/complete", async (request, response, next) => {
     }
 
     const participantId = readRequiredString(request.body?.participantId, "participant_id");
+    if (!(await authenticateLegacyParticipant(request, request.params.code, participantId))) {
+      response.status(401).json({ error: "participant_auth_required" });
+      return;
+    }
     if (!isHostParticipant(snapshot, participantId)) {
       response.status(403).json({ error: "host_required" });
       return;
@@ -462,6 +498,10 @@ app.post("/rooms/:code/game/complete", async (request, response, next) => {
 app.post("/rooms/:code/game/reset", async (request, response, next) => {
   try {
     const participantId = readRequiredString(request.body?.participantId, "participant_id");
+    if (!(await authenticateLegacyParticipant(request, request.params.code, participantId))) {
+      response.status(401).json({ error: "participant_auth_required" });
+      return;
+    }
     const currentSnapshot = await findRoomByCode(request.params.code);
     if (!currentSnapshot) {
       response.status(404).json({ error: "room_not_found" });
@@ -509,6 +549,10 @@ app.post("/rooms/:code/game/reset", async (request, response, next) => {
 app.post("/rooms/:code/close", async (request, response, next) => {
   try {
     const participantId = readRequiredString(request.body?.participantId, "participant_id");
+    if (!(await authenticateLegacyParticipant(request, request.params.code, participantId))) {
+      response.status(401).json({ error: "participant_auth_required" });
+      return;
+    }
     const snapshot = await findRoomByCode(request.params.code);
     if (!snapshot) {
       response.status(404).json({ error: "room_not_found" });
@@ -613,7 +657,7 @@ io.on("connection", (socket) => {
     socket.emit("v2:projection", projection);
   });
 
-  socket.on("room:join", async (payload: { roomCode?: string; participantId?: string }) => {
+  socket.on("room:join", async (payload: { roomCode?: string; participantId?: string; token?: string }) => {
     const roomCode = payload.roomCode?.trim().toUpperCase();
     if (!roomCode) {
       socket.emit("room:error", { error: "room_code_required" });
@@ -629,6 +673,10 @@ io.on("connection", (socket) => {
     const participantId = readOptionalString(payload.participantId) ?? null;
     if (participantId && !findParticipant(snapshot, participantId)) {
       socket.emit("room:error", { error: "participant_not_found" });
+      return;
+    }
+    if (participantId && !(await verifyParticipantToken(roomCode, participantId, readOptionalString(payload.token) ?? ""))) {
+      socket.emit("room:error", { error: "participant_auth_required" });
       return;
     }
 
@@ -648,6 +696,7 @@ io.on("connection", (socket) => {
     socket.join(snapshot.room.code);
     socket.data.roomCode = snapshot.room.code;
     socket.data.participantId = participantId;
+    socket.data.legacyToken = participantId ? readOptionalString(payload.token) : undefined;
 
     if (participantId) {
       await registerParticipantSocketConnection(snapshot.room.id, participantId, socket.id);
@@ -656,7 +705,7 @@ io.on("connection", (socket) => {
     await emitRoomSnapshot(snapshot.room.code);
   });
 
-  socket.on("room:state:update", async (payload: { roomCode?: string; state?: unknown; currentGame?: string | null }) => {
+  socket.on("room:state:update", async (payload: { roomCode?: string; state?: unknown; currentGame?: string | null; expectedState?: unknown }) => {
     const roomCode = payload.roomCode?.trim().toUpperCase();
     if (!roomCode) {
       socket.emit("room:error", { error: "room_code_required" });
@@ -684,6 +733,11 @@ io.on("connection", (socket) => {
       socket.emit("room:error", { error: "participant_required" });
       return;
     }
+    const legacyToken = typeof socket.data.legacyToken === "string" ? socket.data.legacyToken : "";
+    if (!(await verifyParticipantToken(roomCode, participantId, legacyToken))) {
+      socket.emit("room:error", { error: "participant_auth_required" });
+      return;
+    }
 
     const currentGame = payload.currentGame ?? currentSnapshot.room.currentGame;
     let stateToPersist: unknown = restoreProtectedSecretFields(
@@ -692,6 +746,12 @@ io.on("connection", (socket) => {
       payload.state ?? {},
       requester,
     );
+    if (requester.role !== "host" && currentGame === "johari-window") {
+      stateToPersist = mergeJohariParticipantState(currentSnapshot.room.state, stateToPersist, requester.id);
+    }
+    if (requester.role !== "host") {
+      stateToPersist = mergeParticipantMapDelta(currentSnapshot.room.state, stateToPersist, currentGame, requester.id);
+    }
     const authorizationError = validateStateUpdateAuthorization(currentSnapshot, requester, currentGame, stateToPersist);
     if (authorizationError) {
       socket.emit("room:error", { error: authorizationError });
@@ -699,12 +759,51 @@ io.on("connection", (socket) => {
     }
     stateToPersist = normalizeSyncedTimerState(currentGame, currentSnapshot.room.state, stateToPersist);
 
-    const room = await updateRoomState(
-      roomCode,
-      stateToPersist,
-      currentGame,
-      readRoomStatusFromState(stateToPersist, currentGame),
-    );
+    let room;
+    try {
+      room = await updateRoomState(
+        roomCode,
+        stateToPersist,
+        currentGame,
+        readRoomStatusFromState(stateToPersist, currentGame),
+        payload.expectedState ?? currentSnapshot.room.state,
+      );
+    } catch (error) {
+      const canMergeConflict = currentGame === "johari-window" || [
+        "two-choice", "impression-ranking", "majority-game", "large-majority-game", "truth-lie-game",
+        "typing-speed-game", "value-meter-game", "acting-phrase-game", "song-association-quiz", "drawing-quiz", "memory-logo-drawing",
+        "weird-karuta-game", "emo-hint-game", "person-hint-quiz", "humming-intro-quiz",
+      ].includes(currentGame ?? "");
+      if (canMergeConflict && error instanceof Error && error.message === "version_conflict") {
+        const latest = await findRoomByCode(roomCode);
+        if (latest) {
+          const merged = currentGame === "johari-window"
+            ? mergeJohariParticipantState(latest.room.state, stateToPersist, requester.id)
+            : mergeParticipantMapDelta(latest.room.state, stateToPersist, currentGame, requester.id);
+          const retryError = validateStateUpdateAuthorization(latest, requester, currentGame, merged);
+          if (!retryError) {
+            try {
+              room = await updateRoomState(
+                roomCode,
+                merged,
+                currentGame,
+                readRoomStatusFromState(merged, currentGame),
+                latest.room.state,
+              );
+            } catch {
+              room = null;
+            }
+          }
+        }
+        if (room) {
+          await redis.set(`room:${room.code}:state`, JSON.stringify(room.state));
+          await emitRoomSnapshot(room.code);
+          return;
+        }
+      }
+      socket.emit("room:error", { error: error instanceof Error && error.message === "version_conflict" ? "version_conflict" : "state_update_failed" });
+      return;
+    }
     if (!room) {
       socket.emit("room:error", { error: "room_not_found" });
       return;
@@ -962,6 +1061,16 @@ function isHostParticipant(snapshot: RoomSnapshot, participantId: string | null 
 
 function isClosedRoom(snapshot: RoomSnapshot) {
   return snapshot.room.status === "closed";
+}
+
+async function authenticateLegacyParticipant(
+  request: express.Request,
+  roomCode: string,
+  participantId: string,
+) {
+  const token = readOptionalString(request.header("x-room-token"));
+  if (!token) return false;
+  return verifyParticipantToken(roomCode, participantId, token);
 }
 
 function sanitizeRoomEvent(event: {
@@ -2681,6 +2790,10 @@ function sanitizeRoomSnapshotForParticipant(snapshot: RoomSnapshot, requester: R
   if (currentGame === "ng-word") {
     maskNgWordState(state, requester?.id ?? null);
   }
+  if (currentGame === "johari-window") {
+    maskJohariState(state, requester?.id ?? null);
+  }
+  maskParticipantMapState(state, currentGame, requester?.id ?? null);
 
   return nextSnapshot;
 }
@@ -2727,6 +2840,163 @@ function maskNgWordState(state: Record<string, unknown>, participantId: string |
       word: "",
     };
   });
+}
+
+function maskJohariState(state: Record<string, unknown>, participantId: string | null) {
+  const johari = asRecord(state.johari);
+  if (!johari || (johari.step !== "self" && johari.step !== "peer")) return;
+
+  const selfSelections = asRecord(johari.selfSelections) ?? {};
+  const selfSubmitted = asRecord(johari.selfSubmitted) ?? {};
+  johari.selfSelections = participantId && Object.prototype.hasOwnProperty.call(selfSelections, participantId)
+    ? { [participantId]: cloneJson(selfSelections[participantId]) }
+    : {};
+  johari.selfSubmitted = participantId && Object.prototype.hasOwnProperty.call(selfSubmitted, participantId)
+    ? { [participantId]: selfSubmitted[participantId] }
+    : {};
+
+  if (johari.step === "self") {
+    return;
+  }
+
+  const maskNested = (value: unknown) => {
+    const source = asRecord(value) ?? {};
+    return Object.fromEntries(Object.entries(source).map(([targetId, targetValue]) => {
+      const targetMap = asRecord(targetValue) ?? {};
+      return [targetId, participantId && Object.prototype.hasOwnProperty.call(targetMap, participantId) ? { [participantId]: cloneJson(targetMap[participantId]) } : {}];
+    }));
+  };
+  johari.peerSelections = maskNested(johari.peerSelections);
+  johari.peerSubmitted = maskNested(johari.peerSubmitted);
+}
+
+function maskParticipantMapState(state: Record<string, unknown>, gameKey: string | null, participantId: string | null) {
+  const mapKeysByGame: Record<string, string[]> = {
+    "two-choice": ["votes"],
+    "impression-ranking": ["votes"],
+    "majority-game": ["votes"],
+    "large-majority-game": ["votes"],
+    "truth-lie-game": ["votes"],
+    "typing-speed-game": ["guesses"],
+    "value-meter-game": ["guesses", "votes"],
+    "acting-phrase-game": ["votes"],
+    "song-association-quiz": ["guesses"],
+    "drawing-quiz": ["guesses"],
+    "memory-logo-drawing": ["guesses"],
+    "weird-karuta-game": ["guesses"],
+    "emo-hint-game": ["guesses"],
+    "person-hint-quiz": ["guesses"],
+    "humming-intro-quiz": ["guesses"],
+  };
+  const mapKeys = gameKey ? mapKeysByGame[gameKey] : undefined;
+  if (!mapKeys) return;
+  const maskMap = (value: unknown) => {
+    const source = asRecord(value) ?? {};
+    return participantId && Object.prototype.hasOwnProperty.call(source, participantId)
+      ? { [participantId]: cloneJson(source[participantId]) }
+      : {};
+  };
+
+  const directBranchKey = gameKey === "two-choice" ? "twoChoice" : gameKey === "impression-ranking" ? "impression" : null;
+  if (directBranchKey) {
+    const branch = asRecord(state[directBranchKey]);
+    if (!branch || branch.step === "result" || branch.step === "complete") return;
+    for (const mapKey of mapKeys) branch[mapKey] = maskMap(branch[mapKey]);
+    return;
+  }
+
+  const urlCandidate = asRecord(state.urlCandidate);
+  const inner = urlCandidate ? asRecord(urlCandidate.state) : null;
+  if (!inner || inner.step === "result" || inner.step === "complete") return;
+  for (const mapKey of mapKeys) inner[mapKey] = maskMap(inner[mapKey]);
+}
+
+function mergeJohariParticipantState(currentStateValue: unknown, nextStateValue: unknown, requesterId: string) {
+  const currentState = cloneJson(currentStateValue ?? {}) as Record<string, unknown>;
+  const nextState = asRecord(nextStateValue);
+  const currentJohari = asRecord(currentState.johari);
+  const nextJohari = nextState ? asRecord(nextState.johari) : null;
+  if (!currentJohari || !nextJohari || (currentJohari.step !== "self" && currentJohari.step !== "peer")) return nextStateValue;
+
+  const mergedJohari = { ...currentJohari };
+  if (currentJohari.step === "self") {
+    const currentSelections = asRecord(currentJohari.selfSelections) ?? {};
+    const requestedSelections = asRecord(nextJohari.selfSelections) ?? {};
+    const currentSubmitted = asRecord(currentJohari.selfSubmitted) ?? {};
+    const requestedSubmitted = asRecord(nextJohari.selfSubmitted) ?? {};
+    mergedJohari.selfSelections = { ...currentSelections, ...(Object.prototype.hasOwnProperty.call(requestedSelections, requesterId) ? { [requesterId]: cloneJson(requestedSelections[requesterId]) } : {}) };
+    mergedJohari.selfSubmitted = { ...currentSubmitted, ...(Object.prototype.hasOwnProperty.call(requestedSubmitted, requesterId) ? { [requesterId]: requestedSubmitted[requesterId] } : {}) };
+  } else {
+    const mergeNested = (currentValue: unknown, requestedValue: unknown) => {
+      const currentMap = asRecord(currentValue) ?? {};
+      const requestedMap = asRecord(requestedValue) ?? {};
+      const result: Record<string, unknown> = { ...currentMap };
+      for (const [targetId, requestedTarget] of Object.entries(requestedMap)) {
+        const requestedTargetMap = asRecord(requestedTarget);
+        if (!requestedTargetMap || targetId === requesterId) continue;
+        const currentTargetMap = asRecord(currentMap[targetId]) ?? {};
+        if (Object.prototype.hasOwnProperty.call(requestedTargetMap, requesterId)) {
+          result[targetId] = { ...currentTargetMap, [requesterId]: cloneJson(requestedTargetMap[requesterId]) };
+        }
+      }
+      return result;
+    };
+    mergedJohari.peerSelections = mergeNested(currentJohari.peerSelections, nextJohari.peerSelections);
+    mergedJohari.peerSubmitted = mergeNested(currentJohari.peerSubmitted, nextJohari.peerSubmitted);
+  }
+
+  return { ...currentState, ...nextState, johari: mergedJohari };
+}
+
+function mergeParticipantMapDelta(currentStateValue: unknown, nextStateValue: unknown, gameKey: string | null, requesterId: string) {
+  const mapKeysByGame: Record<string, string[]> = {
+    "two-choice": ["votes"],
+    "impression-ranking": ["votes"],
+    "majority-game": ["votes"],
+    "large-majority-game": ["votes"],
+    "truth-lie-game": ["votes"],
+    "typing-speed-game": ["guesses"],
+    "value-meter-game": ["guesses", "votes"],
+    "acting-phrase-game": ["votes"],
+    "song-association-quiz": ["guesses"],
+    "drawing-quiz": ["guesses"],
+    "memory-logo-drawing": ["guesses"],
+    "weird-karuta-game": ["guesses"],
+    "emo-hint-game": ["guesses"],
+    "person-hint-quiz": ["guesses"],
+    "humming-intro-quiz": ["guesses"],
+  };
+  const mapKeys = gameKey ? mapKeysByGame[gameKey] : undefined;
+  if (!mapKeys) return nextStateValue;
+
+  const currentState = asRecord(currentStateValue);
+  const nextState = asRecord(nextStateValue);
+  if (!currentState || !nextState) return nextStateValue;
+  const mergeMaps = (currentValue: unknown, nextValue: unknown) => {
+    const currentMap = asRecord(currentValue) ?? {};
+    const nextMap = asRecord(nextValue) ?? {};
+    return { ...currentMap, ...(Object.prototype.hasOwnProperty.call(nextMap, requesterId) ? { [requesterId]: cloneJson(nextMap[requesterId]) } : {}) };
+  };
+
+  if (["majority-game", "large-majority-game", "truth-lie-game", "typing-speed-game", "value-meter-game", "acting-phrase-game", "song-association-quiz", "drawing-quiz", "memory-logo-drawing", "weird-karuta-game", "emo-hint-game", "person-hint-quiz", "humming-intro-quiz"].includes(gameKey ?? "")) {
+    const currentUrl = asRecord(currentState.urlCandidate);
+    const nextUrl = asRecord(nextState.urlCandidate);
+    const currentInner = currentUrl ? asRecord(currentUrl.state) : null;
+    const nextInner = nextUrl ? asRecord(nextUrl.state) : null;
+    if (!currentUrl || !nextUrl || !currentInner || !nextInner) return nextStateValue;
+    const mergedInner = { ...currentInner };
+    for (const mapKey of mapKeys) mergedInner[mapKey] = mergeMaps(currentInner[mapKey], nextInner[mapKey]);
+    return { ...currentState, ...nextState, urlCandidate: { ...currentUrl, ...nextUrl, state: mergedInner } };
+  }
+
+  const branchKey = gameKey === "two-choice" ? "twoChoice" : gameKey === "impression-ranking" ? "impression" : null;
+  if (!branchKey) return nextStateValue;
+  const currentBranch = asRecord(currentState[branchKey]);
+  const nextBranch = asRecord(nextState[branchKey]);
+  if (!currentBranch || !nextBranch) return nextStateValue;
+  const mergedBranch = { ...currentBranch };
+  for (const mapKey of mapKeys) mergedBranch[mapKey] = mergeMaps(currentBranch[mapKey], nextBranch[mapKey]);
+  return { ...currentState, ...nextState, [branchKey]: mergedBranch };
 }
 
 function restoreProtectedSecretFields(

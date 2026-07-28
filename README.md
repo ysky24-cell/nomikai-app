@@ -13,6 +13,8 @@
 
 v2 は PostgreSQL にルームのスナップショット（参加者・進行状態・有効期限）を保存します。API を再起動しても同じルームコードと復帰トークンで復帰できます。期限切れルームは API の定期ジョブで削除され、通常ログには匿名投稿本文・ゲームのお題・役職・トークンを出力しません。
 
+旧 `/rooms` ルームも参加者ごとの復帰トークンで保護しています。認証導入前に作成したルームや、トークンを持たない保存セッションは安全のため自動復帰できず、そこから引き継ぎコードを発行することもできません。その場合は保存情報を破棄し、参加者はルームコードで再参加、ホストは新しいルームを作成してください。
+
 ローカル確認は `docker compose up --build` で Web/API/PostgreSQL/Redis を起動し、`http://localhost:5173/nomikai-app/` を開きます。本番向けは `.env.example` を複製して値を置き換え、`docker compose -f docker-compose.prod.yml up -d --build` を使ってください。既存の `docker-compose.yml` は Synology の開発・検証用として互換性を維持しています。
 
 静的版（1台で遊ぶ）の公開 URL は [GitHub Pages](https://ysky24-cell.github.io/nomikai-app/) です。複数スマホ参加の QR 共有は Web URL と API URL の両方を HTTPS で公開する必要があります。QR にはルームコードだけを含め、ホスト秘密トークンは含めません。API 停止中・異なるオリジン・ルーム期限切れの場合は再接続できません。

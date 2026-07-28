@@ -1,4 +1,4 @@
-import { createHash, randomInt, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto";
 import pg from "pg";
 import { config } from "./config.js";
 import type { ParticipantRow, ParticipantTransferCodeRow, RoomEventRow, RoomRow, RoomStatus } from "./types.js";
@@ -42,12 +42,14 @@ export async function createRoom(hostName?: string) {
     );
 
     let host: ParticipantRow | null = null;
+    let participantToken: string | null = null;
     if (hostName?.trim()) {
+      participantToken = createParticipantToken();
       const hostResult = await client.query<ParticipantRow>(
-        `INSERT INTO participants (id, room_id, name, role)
-         VALUES ($1, $2, $3, 'host')
+        `INSERT INTO participants (id, room_id, name, role, auth_token_hash)
+         VALUES ($1, $2, $3, 'host', $4)
          RETURNING id, room_id AS "roomId", name, role, connected, created_at AS "createdAt", updated_at AS "updatedAt"`,
-        [randomUUID(), roomId, hostName.trim()],
+        [randomUUID(), roomId, hostName.trim(), hashParticipantToken(participantToken)],
       );
       host = hostResult.rows[0];
     }
@@ -59,7 +61,7 @@ export async function createRoom(hostName?: string) {
     );
 
     await client.query("COMMIT");
-    return { room: roomResult.rows[0], host };
+    return { room: roomResult.rows[0], host, participantToken };
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -96,11 +98,12 @@ export async function addParticipant(code: string, name: string) {
     throw new Error("room_closed");
   }
 
+  const participantToken = createParticipantToken();
   const participantResult = await pool.query<ParticipantRow>(
-    `INSERT INTO participants (id, room_id, name)
-     VALUES ($1, $2, $3)
+    `INSERT INTO participants (id, room_id, name, auth_token_hash)
+     VALUES ($1, $2, $3, $4)
      RETURNING id, room_id AS "roomId", name, role, connected, created_at AS "createdAt", updated_at AS "updatedAt"`,
-    [randomUUID(), roomSnapshot.room.id, name.trim()],
+    [randomUUID(), roomSnapshot.room.id, name.trim(), hashParticipantToken(participantToken)],
   );
 
   const participant = participantResult.rows[0];
@@ -110,7 +113,19 @@ export async function addParticipant(code: string, name: string) {
     [roomSnapshot.room.id, participant.id, JSON.stringify({ name: participant.name })],
   );
 
-  return participant;
+  return { participant, participantToken };
+}
+
+export async function verifyParticipantToken(code: string, participantId: string, token: string) {
+  if (!token.trim() || !participantId.trim()) return false;
+  const result = await pool.query(
+    `SELECT 1
+     FROM participants p
+     INNER JOIN rooms r ON r.id = p.room_id
+     WHERE r.code = $1 AND p.id = $2 AND p.auth_token_hash = $3`,
+    [normalizeRoomCode(code), participantId, hashParticipantToken(token)],
+  );
+  return result.rowCount === 1;
 }
 
 export async function listParticipants(roomId: string) {
@@ -312,6 +327,7 @@ export async function claimParticipantTransfer(code: string, transferCode: strin
       [activeTransferCode.id],
     );
 
+    const participantToken = createParticipantToken();
     const participantResult = await client.query<ParticipantRow>(
       `SELECT id, room_id AS "roomId", name, role, connected, created_at AS "createdAt", updated_at AS "updatedAt"
        FROM participants
@@ -322,6 +338,11 @@ export async function claimParticipantTransfer(code: string, transferCode: strin
     if (!participant) {
       throw new Error("participant_not_found");
     }
+
+    await client.query(
+      "UPDATE participants SET auth_token_hash = $2, updated_at = now() WHERE id = $1 AND room_id = $3",
+      [participant.id, hashParticipantToken(participantToken), room.id],
+    );
 
     await client.query(
       `INSERT INTO room_events (room_id, participant_id, event_type, payload)
@@ -338,7 +359,7 @@ export async function claimParticipantTransfer(code: string, transferCode: strin
 
     await client.query("COMMIT");
     const snapshot = await findRoomByCode(room.code);
-    return snapshot ? { participant, snapshot } : null;
+    return snapshot ? { participant, snapshot, participantToken } : null;
   } catch (error) {
     await client.query("ROLLBACK");
     throw error;
@@ -504,7 +525,13 @@ export async function closeRoom(code: string, requesterParticipantId: string, st
   }
 }
 
-export async function updateRoomState(code: string, state: unknown, currentGame?: string | null, status?: RoomStatus) {
+export async function updateRoomState(
+  code: string,
+  state: unknown,
+  currentGame?: string | null,
+  status?: RoomStatus,
+  expectedState?: unknown,
+) {
   const result = await pool.query<RoomRow>(
     `UPDATE rooms
      SET state = $2::jsonb,
@@ -512,9 +539,11 @@ export async function updateRoomState(code: string, state: unknown, currentGame?
          status = COALESCE($4, status),
          updated_at = now()
      WHERE code = $1
+       AND ($5::jsonb IS NULL OR state = $5::jsonb)
      RETURNING id, code, status, current_game AS "currentGame", state, created_at AS "createdAt", updated_at AS "updatedAt"`,
-    [normalizeRoomCode(code), JSON.stringify(state), currentGame ?? null, status ?? null],
+    [normalizeRoomCode(code), JSON.stringify(state), currentGame ?? null, status ?? null, expectedState == null ? null : JSON.stringify(expectedState)],
   );
+  if (!result.rows[0] && expectedState != null) throw new Error("version_conflict");
   return result.rows[0] ?? null;
 }
 
@@ -622,6 +651,13 @@ async function migrateDatabase() {
       IF to_regclass('public.participants') IS NULL THEN
         RETURN;
       END IF;
+
+      ALTER TABLE public.participants
+        ADD COLUMN IF NOT EXISTS auth_token_hash text;
+
+      CREATE INDEX IF NOT EXISTS participants_auth_token_hash_idx
+        ON public.participants(auth_token_hash)
+        WHERE auth_token_hash IS NOT NULL;
 
       CREATE TABLE IF NOT EXISTS public.participant_transfer_codes (
         id uuid PRIMARY KEY,
@@ -781,4 +817,12 @@ function normalizeParticipantTransferCode(code: string) {
 
 function hashParticipantTransferCode(roomId: string, code: string) {
   return createHash("sha256").update(`${roomId}:${normalizeParticipantTransferCode(code)}`).digest("hex");
+}
+
+function createParticipantToken() {
+  return randomBytes(32).toString("base64url");
+}
+
+function hashParticipantToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
 }

@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS participants (
   room_id uuid NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
   name text NOT NULL,
   role text NOT NULL DEFAULT 'player' CHECK (role IN ('host', 'player')),
+  auth_token_hash text,
   connected boolean NOT NULL DEFAULT false,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now()
@@ -47,6 +48,7 @@ CREATE TABLE IF NOT EXISTS participant_transfer_codes (
 );
 
 CREATE INDEX IF NOT EXISTS participants_room_id_idx ON participants(room_id);
+CREATE INDEX IF NOT EXISTS participants_auth_token_hash_idx ON participants(auth_token_hash) WHERE auth_token_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS room_events_room_id_idx ON room_events(room_id);
 CREATE INDEX IF NOT EXISTS participant_socket_connections_room_id_idx ON participant_socket_connections(room_id);
 CREATE INDEX IF NOT EXISTS participant_socket_connections_participant_id_idx ON participant_socket_connections(participant_id);

@@ -13,6 +13,8 @@ describe("SharedRoomLobby", () => {
   afterEach(() => { cleanup(); window.localStorage.clear(); vi.restoreAllMocks(); });
 
   it("creates a room and renders a local participant QR without host credentials", async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     const fetchMock = vi.spyOn(window, "fetch")
       .mockResolvedValueOnce(new Response(JSON.stringify({ room: projection(), hostToken: "HOST-SECRET", reconnectToken: "RECONNECT-SECRET" }), { status: 201 }));
     const { container } = render(<SharedRoomLobby apiUrl="http://localhost:3000" />);
@@ -23,6 +25,17 @@ describe("SharedRoomLobby", () => {
     expect(container.innerHTML).not.toContain("HOST-SECRET");
     expect(container.innerHTML).not.toContain("RECONNECT-SECRET");
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:3000/v2/rooms", expect.objectContaining({ method: "POST" }));
+    fireEvent.click(screen.getByRole("button", { name: "リンクをコピー" }));
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("sync=v2"));
+  });
+
+  it("marks the shared mode as occupied while reconnecting or waiting", async () => {
+    const presence = vi.fn();
+    vi.spyOn(window, "fetch").mockResolvedValueOnce(new Response(JSON.stringify({ room: projection(), hostToken: "HOST-SECRET", reconnectToken: "RECONNECT-SECRET" }), { status: 201 }));
+    render(<SharedRoomLobby apiUrl="http://localhost:3000" onPresenceChange={presence} />);
+    fireEvent.change(screen.getByLabelText("ホスト名"), { target: { value: "Host" } });
+    fireEvent.click(screen.getAllByRole("button", { name: "ルームを作る" })[1]);
+    await waitFor(() => expect(presence).toHaveBeenLastCalledWith(true));
   });
 
   it("shows closed-room rejection for manual code entry", async () => {

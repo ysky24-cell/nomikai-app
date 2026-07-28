@@ -79,7 +79,7 @@ function roomError(error: unknown) {
   return labels[code] ?? "ルームに接続できませんでした。サーバーの状態を確認してください。";
 }
 
-export function SharedRoomLobby({ apiUrl }: { apiUrl: string }) {
+export function SharedRoomLobby({ apiUrl, onPresenceChange }: { apiUrl: string; onPresenceChange?: (hasPresence: boolean) => void }) {
   const invitedCode = useMemo(() => {
     try { return new URL(window.location.href).searchParams.get("room")?.replace(/[^A-Za-z0-9]/g, "").toUpperCase() ?? ""; } catch { return ""; }
   }, []);
@@ -96,6 +96,10 @@ export function SharedRoomLobby({ apiUrl }: { apiUrl: string }) {
   const [anonymousText, setAnonymousText] = useState("");
   const [hostPrompt, setHostPrompt] = useState("今夜、どちらを選ぶ？");
   const socketRef = useRef<Socket | null>(null);
+
+  useEffect(() => {
+    onPresenceChange?.(Boolean(session));
+  }, [onPresenceChange, projection, session]);
 
   const request = useCallback(async <T,>(path: string, options: { method?: string; body?: unknown; token?: string } = {}) => {
     const response = await fetch(`${apiUrl}${path}`, {
@@ -250,7 +254,9 @@ export function SharedRoomLobby({ apiUrl }: { apiUrl: string }) {
   const inviteUrl = useMemo(() => {
     if (!projection) return "";
     const url = new URL(window.location.href);
-    url.search = `?room=${encodeURIComponent(projection.code)}`;
+    url.searchParams.set("sync", "v2");
+    url.searchParams.delete("room");
+    url.searchParams.set("room", projection.code);
     return url.toString();
   }, [projection]);
   const isHost = session?.role === "host";
