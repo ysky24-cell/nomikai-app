@@ -513,7 +513,7 @@ const activeGames: GameMeta[] = [
   },
   {
     key: "johari-window",
-    status: "beta",
+    status: "ready",
     title: "ジョハリの窓",
     description: "自分と周りが選ぶ特徴ワードを4つの窓で見比べる",
     people: "3人から",
@@ -939,7 +939,7 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
 
   function requestSyncGameStart(game: GameKey) {
     const gameTitle = findGameMeta(game)?.title ?? "選んだゲーム";
-    const needsLegacyRoom = syncMode === "v2" && game === "party-pack";
+    const needsLegacyRoom = syncMode === "v2" && (game === "party-pack" || game === "johari-window");
     const targetMode = needsLegacyRoom ? "all-games" : syncMode;
     if (needsLegacyRoom) {
       setHasRoomContext(false);
@@ -1113,7 +1113,7 @@ function HomeGameSection({
       {games.map((game) => {
         const Icon = game.icon;
         return (
-          <article className={`game-card accent-${game.accent}${game.image ? " has-image" : ""}`} key={game.key}>
+          <article className={`game-card accent-${game.accent}${game.image ? " has-image" : ""}`} data-game-key={game.key} key={game.key}>
             {game.image && (
               <div className="game-card-media">
                 <img src={game.image.src} alt={game.image.alt} loading="lazy" />

@@ -14,6 +14,7 @@
     "preview": "vite preview",
     "room:impression:check": "node scripts/impression-v2-check.mjs",
     "room:party-pack:check": "node scripts/party-pack-room-check.mjs",
+    "room:johari:check": "node scripts/johari-room-check.mjs",
     "room:lifecycle:check": "node scripts/room-lifecycle-check.mjs",
     "room:lifecycle:check:all": "node scripts/room-lifecycle-check-all.mjs"
   },

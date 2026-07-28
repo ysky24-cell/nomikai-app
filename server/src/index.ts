@@ -25,7 +25,7 @@ import {
 import { checkRedis, redis } from "./redis.js";
 import { MemoryRoomRepository, PostgresRoomRepository, RoomDomainError, RoomService, type RoomCommand } from "./domain/index.js";
 import { log, requestCorrelationId } from "./logger.js";
-import { canPartyPackParticipantReveal, readPartyPackPromptMode, validatePartyPackHostReveal } from "./party-pack-authorization.js";
+import { canPartyPackParticipantReveal, readPartyPackPromptMode, validateJohariHostTransition, validatePartyPackHostReveal } from "./party-pack-authorization.js";
 
 const app = express();
 const server = http.createServer(app);
@@ -1185,6 +1185,12 @@ function validateStateUpdateAuthorization(
       const nextPartyPack = asRecord(asRecord(nextStateValue)?.partyPack);
       const revealError = validatePartyPackHostReveal(currentPartyPack, nextPartyPack);
       if (revealError) return revealError;
+    }
+    if (activeGame === "johari-window") {
+      const currentJohari = asRecord(asRecord(snapshot.room.state)?.johari);
+      const nextJohari = asRecord(asRecord(nextStateValue)?.johari);
+      const transitionError = validateJohariHostTransition(currentJohari, nextJohari);
+      if (transitionError) return transitionError;
     }
     return null;
   }
