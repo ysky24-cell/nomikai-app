@@ -3,6 +3,9 @@ import assert from "node:assert/strict";
 import { io } from "socket.io-client";
 
 const apiUrl = (process.env.API_URL ?? process.argv[2] ?? "http://localhost:3000").replace(/\/$/, "");
+const gameKey = process.env.GAME_KEY ?? process.argv[3] ?? "majority-game";
+const gameTitle = gameKey === "large-majority-game" ? "大人数マジョリティ" : "マジョリティゲーム";
+const playerCount = gameKey === "large-majority-game" ? 10 : 3;
 const sockets = [];
 
 async function request(method, path, options = {}) {
@@ -41,13 +44,13 @@ function makeEnvelope(inner, updatedBy) {
   const stepNumber = { setup: 1, play: 2, result: 3, complete: 4 };
   return {
     phase: inner.step === "complete" ? "complete" : "playing",
-    gameKey: "majority-game",
+    gameKey,
     gameTitle: "マジョリティゲーム",
     step: stepNumber[inner.step],
     message: "majority audit",
     updatedBy,
     updatedAt: new Date().toISOString(),
-    urlCandidate: { key: "majority-game", state: inner },
+    urlCandidate: { key: gameKey, state: inner },
   };
 }
 
@@ -55,7 +58,7 @@ function emitUpdate(socket, roomCode, participant, inner, expectedStep, predicat
   const updated = waitFor(socket, "room:updated", (payload) => payload?.room?.state?.urlCandidate?.state?.step === expectedStep && predicate(payload));
   socket.emit("room:state:update", {
     roomCode,
-    currentGame: "majority-game",
+    currentGame: gameKey,
     state: makeEnvelope(inner, participant.id),
     commandId: commandId(expectedStep),
   });
@@ -66,7 +69,7 @@ async function expectNotReady(socket, roomCode, participant, inner) {
   const rejected = waitFor(socket, "room:error", (payload) => payload?.error === "game_not_ready");
   socket.emit("room:state:update", {
     roomCode,
-    currentGame: "majority-game",
+    currentGame: gameKey,
     state: makeEnvelope(inner, participant.id),
     commandId: commandId("early-result"),
   });
@@ -74,12 +77,13 @@ async function expectNotReady(socket, roomCode, participant, inner) {
 }
 
 async function main() {
-  const created = await request("POST", "/rooms", { body: { hostName: "Majority Audit Host" } });
+  const created = await request("POST", "/rooms", { body: { hostName: `${gameTitle} Audit Host` } });
   assert.equal(created.response.status, 201);
   const roomCode = created.data.room.code;
   const host = { ...created.data.host, token: created.data.participantToken };
   const players = [host];
-  for (const name of ["Majority Alice", "Majority Bob"]) {
+  for (let index = 1; index < playerCount; index += 1) {
+    const name = `${gameTitle} Player ${index}`;
     const joined = await request("POST", `/rooms/${roomCode}/join`, { body: { name } });
     assert.equal(joined.response.status, 201);
     players.push({ ...joined.data.participant, token: joined.data.participantToken });
@@ -87,7 +91,7 @@ async function main() {
 
   const started = await request("POST", `/rooms/${roomCode}/game/start`, {
     token: host.token,
-    body: { participantId: host.id, gameKey: "majority-game", gameTitle: "マジョリティゲーム" },
+    body: { participantId: host.id, gameKey, gameTitle },
   });
   assert.equal(started.response.status, 200);
 
@@ -122,7 +126,7 @@ async function main() {
   };
   await emitUpdate(hostSocket, roomCode, host, base, "play");
 
-  const voteUpdates = players.slice(0, 2).map((participant, index) => {
+  const voteUpdates = players.slice(0, -1).map((participant, index) => {
     const socket = participantSockets.get(participant.id);
     const vote = String(index % 2);
     return emitUpdate(socket, roomCode, participant, { ...base, votes: { [participant.id]: vote } }, "play", (payload) => payload?.room?.state?.urlCandidate?.state?.votes?.[participant.id] === vote);
@@ -144,10 +148,11 @@ async function main() {
   assert.equal(reconnectedAlice.snapshot.room.state.urlCandidate.state.votes[alice.id], "1");
   assert.deepEqual(Object.keys(reconnectedAlice.snapshot.room.state.urlCandidate.state.votes), [alice.id]);
 
-  await expectNotReady(hostSocket, roomCode, host, { ...base, step: "result", votes: { [host.id]: "0", [alice.id]: "1" } });
+  const partialVotes = Object.fromEntries(players.slice(0, -1).map((participant, index) => [participant.id, String(index % 2)]));
+  await expectNotReady(hostSocket, roomCode, host, { ...base, step: "result", votes: partialVotes });
 
-  const bob = players[2];
-  await emitUpdate(participantSockets.get(bob.id), roomCode, bob, { ...base, votes: { [bob.id]: "0" } }, "play", (payload) => payload?.room?.state?.urlCandidate?.state?.votes?.[bob.id] === "0");
+  const lastPlayer = players[players.length - 1];
+  await emitUpdate(participantSockets.get(lastPlayer.id), roomCode, lastPlayer, { ...base, votes: { [lastPlayer.id]: "0" } }, "play", (payload) => payload?.room?.state?.urlCandidate?.state?.votes?.[lastPlayer.id] === "0");
 
   const allVotes = Object.fromEntries(players.map((participant, index) => [participant.id, String(index % 2)]));
   const resultSnapshotsReady = players.map((participant) =>
@@ -155,7 +160,7 @@ async function main() {
   );
   participantSockets.get(host.id).emit("room:state:update", {
     roomCode,
-    currentGame: "majority-game",
+    currentGame: gameKey,
     state: makeEnvelope({ ...base, votes: allVotes, step: "result" }, host.id),
     commandId: commandId("result"),
   });

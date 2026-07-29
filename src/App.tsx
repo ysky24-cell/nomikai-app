@@ -114,6 +114,7 @@ import {
   type YamanoteCategory,
 } from "./data/yamanoteThemes";
 import { SharedRoomLobby } from "./SharedRoomLobby";
+import { isNewSyncRoomGameKey } from "./syncRoomCatalog";
 
 type BuiltInGameKey =
   | "yamanote"
@@ -421,7 +422,7 @@ const gameCardImages: Partial<Record<GameKey, GameCardImage>> = {
 };
 
 function getUrlCandidateGameStatus(game: UrlCandidateGameConfig): GameStatus {
-  if (game.key === "werewolf-game" || game.key === "majority-game") return "ready";
+  if (game.key === "werewolf-game" || game.key === "majority-game" || game.key === "large-majority-game") return "ready";
   return isRoomSyncableUrlCandidateKey(game.key) ? "beta" : "facilitator";
 }
 
@@ -917,12 +918,13 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
       if (sync === "v2") return "v2";
       if (sync === "legacy" || sync === "all-games" || params.has("room")) return "all-games";
       const hasV2Session = Boolean(window.localStorage.getItem("nomikai:shared-room-session:v1"));
-      return hasV2Session ? "v2" : "all-games";
+      return hasV2Session ? "v2" : "v2";
     } catch {
-      return "all-games";
+      return "v2";
     }
   });
-  const visibleGames = activeGames.filter((game) => {
+  const syncModeGames = syncMode === "v2" ? activeGames.filter((game) => isNewSyncRoomGameKey(game.key)) : activeGames;
+  const visibleGames = syncModeGames.filter((game) => {
     const matchesCategory = filter === "all" || game.groups.includes(filter);
     const haystack = `${game.title} ${game.description}`.toLocaleLowerCase();
     const matchesQuery = !query.trim() || haystack.includes(query.trim().toLocaleLowerCase());
@@ -936,6 +938,8 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
   const visibleReadyGames = visibleGames.filter((game) => game.status === "ready");
   const visibleBetaGames = visibleGames.filter((game) => game.status === "beta");
   const visibleFacilitatorGames = visibleGames.filter((game) => game.status === "facilitator");
+  const newSyncReadyCount = activeGames.filter((game) => isNewSyncRoomGameKey(game.key) && game.status === "ready").length;
+  const displayedReadyCount = syncMode === "v2" ? newSyncReadyCount : activeGames.filter((game) => game.status === "ready").length;
 
   function requestSyncGameStart(game: GameKey) {
     const gameTitle = findGameMeta(game)?.title ?? "選んだゲーム";
@@ -978,7 +982,7 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
         <div className="top-actions">
           <div className="status-pill">
             <Check size={18} />
-            正式版 {activeGames.filter((game) => game.status === "ready").length}本
+            {syncMode === "v2" ? "新同期ルーム正式版" : "正式版"} {displayedReadyCount}本
           </div>
           {!hasRoomContext && (
             <button className="secondary-button reset-all-button" onClick={confirmResetAll}>
@@ -1041,12 +1045,12 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
             type="button"
             className={syncMode === "v2" ? "selected" : ""}
             aria-pressed={syncMode === "v2"}
-            aria-label="新同期ルーム（5ゲーム・試験版）"
+            aria-label={`新同期ルーム（${newSyncReadyCount}ゲーム・正式版）`}
             disabled={hasRoomContext}
             onClick={() => { setHasRoomContext(false); setSyncMode("v2"); }}
           >
             <span className="sync-mode-name">新同期ルーム</span>
-            <span className="sync-mode-meta">5ゲーム・試験版</span>
+            <span className="sync-mode-meta">{newSyncReadyCount}ゲーム・正式版</span>
           </button>
         </div>
         {syncStartHint && <p className="room-message" role="status">{syncStartHint}</p>}

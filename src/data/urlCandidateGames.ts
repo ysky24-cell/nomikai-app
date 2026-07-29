@@ -746,7 +746,7 @@ const specs: readonly GameSpec[] = [
     icon: "vote",
     groups: ["url", "talk", "large"],
     kind: "default",
-    minPlayers: 3,
+    minPlayers: 10,
     maxPlayers: 50,
     style: "majority",
     setupSteps: setupBase,

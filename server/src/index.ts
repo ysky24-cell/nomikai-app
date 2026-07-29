@@ -769,7 +769,8 @@ io.on("connection", (socket) => {
     let candidateState = stateToPersist;
     let expectedState = payload.expectedState ?? currentSnapshot.room.state;
     let updateError: unknown = null;
-    for (let attempt = 0; attempt < (canMergeConflict ? 4 : 1); attempt += 1) {
+    const maxStateUpdateAttempts = canMergeConflict ? 12 : 1;
+    for (let attempt = 0; attempt < maxStateUpdateAttempts; attempt += 1) {
       try {
         room = await updateRoomState(
           roomCode,
