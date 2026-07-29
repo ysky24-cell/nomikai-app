@@ -416,7 +416,11 @@ export class RoomService {
       if (attempt.count >= 120) throw new RoomDomainError("rate_limited");
       attempt.count += 1;
     }
-    if (room.version !== command.expectedVersion) throw new RoomDomainError("version_conflict");
+    const staleLegacyInput = room.version !== command.expectedVersion && command.kind === "legacy_input";
+    if (room.version !== command.expectedVersion && !staleLegacyInput) throw new RoomDomainError("version_conflict");
+    if (staleLegacyInput && (!room.game || room.game.kind !== "legacy-game" || room.game.gameKey === "count-up-game" || !command.participantId || room.game.inputs[command.participantId])) {
+      throw new RoomDomainError("version_conflict");
+    }
     const actor = command.participantId ? room.participants.find((item) => item.id === command.participantId) : null;
     if (command.kind !== "join" && !actor) throw new RoomDomainError("participant_not_found");
     if (actor && command.kind !== "reconnect") {
