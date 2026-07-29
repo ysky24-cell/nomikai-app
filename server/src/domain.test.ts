@@ -370,10 +370,11 @@ test("all catalog games can use the generic synced input bridge", async () => {
 test("priority legacy games enforce typed input contracts", () => {
   assert.equal(validateLegacyInput("truth-lie-game", "2"), true);
   assert.equal(validateLegacyInput("truth-lie-game", "free text"), false);
-  assert.equal(validateLegacyInput("count-up-game", "42"), true);
-  assert.equal(validateLegacyInput("count-up-game", "forty"), false);
+  assert.equal(validateLegacyInput("count-up-game", "1,2,3"), true);
+  assert.equal(validateLegacyInput("count-up-game", "0,2"), false);
   assert.equal(validateLegacyInput("reverse-word-game", "olleh"), true);
-  assert.equal(validateLegacyInput("typing-speed-game", "入力結果"), true);
+  assert.equal(validateLegacyInput("typing-speed-game", "入力結果|1200"), true);
+  assert.equal(validateLegacyInput("typing-speed-game", "入力結果"), false);
   assert.equal(validateLegacyInput("value-meter-game", "72|甘め"), true);
   assert.equal(validateLegacyInput("value-meter-game", "72"), false);
 });
@@ -381,9 +382,9 @@ test("priority legacy games enforce typed input contracts", () => {
 test("priority legacy games resolve game-specific results after the shared reveal gate", async () => {
   const cases = [
     { key: "truth-lie-game", prompt: "お題", inputs: ["2", "2"], summary: /正解者1人/ },
-    { key: "count-up-game", prompt: "目標30", inputs: ["28", "42"], summary: /目標30、合計70/ },
+    { key: "count-up-game", prompt: "目標6", inputs: ["1,2,3", "1,2"], summary: /目標6、合計9/ },
     { key: "reverse-word-game", prompt: "hello", inputs: ["olleh", "wrong"], summary: /正解者1人/ },
-    { key: "typing-speed-game", prompt: "same text", inputs: ["same text", "same"], summary: /正確入力1人/ },
+    { key: "typing-speed-game", prompt: "same text", inputs: ["same text|1200", "same|800"], summary: /正確入力1人、最速1200ms/ },
     { key: "value-meter-game", prompt: "今日の甘さ", inputs: ["72|甘め", "48|ふつう"], summary: /平均60.0/ },
   ] as const;
   for (const [index, game] of cases.entries()) {

@@ -167,12 +167,18 @@ const legacyGameKeys = new Set([
 ]);
 
 export function validateLegacyInput(gameKey: string, input: string) {
-  if (gameKey === "count-up-game") return /^\d+$/.test(input) && Number(input) >= 0 && Number(input) <= 1000;
+  if (gameKey === "count-up-game") return /^[1-3](?:\s*,\s*[1-3])*$/.test(input);
   if (gameKey === "value-meter-game") {
     const separator = input.indexOf("|");
     if (separator <= 0) return false;
     const value = Number(input.slice(0, separator).trim());
     return Number.isInteger(value) && value >= 1 && value <= 100 && input.slice(separator + 1).trim().length > 0;
+  }
+  if (gameKey === "typing-speed-game") {
+    const separator = input.lastIndexOf("|");
+    if (separator <= 0) return false;
+    const elapsedMs = Number(input.slice(separator + 1).trim());
+    return Number.isInteger(elapsedMs) && elapsedMs >= 1 && elapsedMs <= 120_000 && input.slice(0, separator).trim().length > 0;
   }
   if (gameKey === "truth-lie-game") return ["1", "2", "3", "A", "B", "C"].includes(input.toUpperCase());
   return input.length > 0;
@@ -209,23 +215,29 @@ function reverseText(value: string) {
   return Array.from(value).reverse().join("");
 }
 
+function normalizeTruthAnswer(value: string) {
+  const normalized = value.trim().toUpperCase();
+  return ({ A: "1", B: "2", C: "3" } as Record<string, string>)[normalized] ?? normalized;
+}
+
 function resolveLegacyResult(game: LegacyGameState, participants: RoomParticipant[]): LegacyGameResult {
   const inputs = { ...game.inputs };
   const scores: Record<string, number> = {};
   let summary = `${Object.keys(inputs).length}人の回答を公開しました`;
   if (game.gameKey === "truth-lie-game") {
     const speaker = participants[0]?.id;
-    const answer = speaker ? inputs[speaker]?.toUpperCase() : undefined;
-    participants.forEach((participant) => { if (participant.id !== speaker) scores[participant.id] = answer && inputs[participant.id]?.toUpperCase() === answer ? 1 : 0; });
+    const answer = speaker ? normalizeTruthAnswer(inputs[speaker] ?? "") : undefined;
+    if (speaker) scores[speaker] = 0;
+    participants.forEach((participant) => { if (participant.id !== speaker) scores[participant.id] = answer && normalizeTruthAnswer(inputs[participant.id] ?? "") === answer ? 1 : 0; });
     const correct = Object.values(scores).filter((score) => score === 1).length;
     summary = `正解は${answer ?? "未設定"}、正解者${correct}人`;
   } else if (game.gameKey === "count-up-game") {
-    const values = participants.map((participant) => Number(inputs[participant.id])).filter((value) => Number.isFinite(value));
+    const values = participants.flatMap((participant) => (inputs[participant.id] ?? "").split(",").map((value) => Number(value.trim()))).filter((value) => Number.isFinite(value));
     const targetMatch = game.prompt.match(/\d+/);
     const target = targetMatch ? Number(targetMatch[0]) : 30;
     const total = values.reduce((sum, value) => sum + value, 0);
     const average = values.length ? total / values.length : 0;
-    participants.forEach((participant) => { const value = Number(inputs[participant.id]); scores[participant.id] = Number.isFinite(value) ? Math.abs(value - target) : Number.POSITIVE_INFINITY; });
+    participants.forEach((participant) => { const value = (inputs[participant.id] ?? "").split(",").map((item) => Number(item.trim())).reduce((sum, item) => sum + item, 0); scores[participant.id] = Number.isFinite(value) ? Math.abs(value - target) : Number.POSITIVE_INFINITY; });
     summary = `目標${target}、合計${total}、平均${average.toFixed(1)}`;
   } else if (game.gameKey === "reverse-word-game") {
     const expected = reverseText(game.prompt.trim());
@@ -233,8 +245,15 @@ function resolveLegacyResult(game: LegacyGameState, participants: RoomParticipan
     summary = `正解は${expected}、正解者${Object.values(scores).filter((score) => score === 1).length}人`;
   } else if (game.gameKey === "typing-speed-game") {
     const expected = game.prompt.trim();
-    participants.forEach((participant) => { scores[participant.id] = inputs[participant.id] === expected ? 1 : 0; });
-    summary = `正確入力${Object.values(scores).filter((score) => score === 1).length}人`;
+    const timings = participants.map((participant) => {
+      const separator = (inputs[participant.id] ?? "").lastIndexOf("|");
+      const text = separator > 0 ? inputs[participant.id].slice(0, separator).trim() : "";
+      const elapsedMs = separator > 0 ? Number(inputs[participant.id].slice(separator + 1).trim()) : Number.POSITIVE_INFINITY;
+      return { id: participant.id, text, elapsedMs };
+    });
+    timings.forEach(({ id, text, elapsedMs }) => { scores[id] = text === expected ? Math.max(0, 120_000 - elapsedMs) : 0; });
+    const fastest = timings.filter(({ text }) => text === expected).sort((a, b) => a.elapsedMs - b.elapsedMs)[0];
+    summary = `正確入力${timings.filter(({ text }) => text === expected).length}人${fastest ? `、最速${fastest.elapsedMs}ms` : ""}`;
   } else if (game.gameKey === "value-meter-game") {
     const values = participants.map((participant) => Number(inputs[participant.id]?.split("|", 1)[0])).filter((value) => Number.isFinite(value));
     const average = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
