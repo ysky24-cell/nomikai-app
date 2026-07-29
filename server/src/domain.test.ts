@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { MemoryRoomRepository, RoomDomainError, RoomService, type RoomCommand } from "./domain/index.js";
+import { validateLegacyInput } from "./domain/room.js";
 
 function command(roomCode: string, commandId: string, expectedVersion: number, kind: RoomCommand["kind"], extra: Partial<RoomCommand> = {}): RoomCommand {
   return { roomCode, commandId, expectedVersion, kind, ...extra };
@@ -350,7 +351,7 @@ test("all catalog games can use the generic synced input bridge", async () => {
     const joined = await service.execute(command(host.room.code, `join-${name}`, (await service.getProjection(host.room.code, null))!.version, "join", { name }));
     sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
   }
-  const started = await service.execute(command(host.room.code, "legacy-start", 2, "game_start", { participantId: sessions[0].id, gameKind: "legacy-game", legacyGameKey: "truth-lie-game", mode: "truthLie", prompt: "お題" }), sessions[0].token);
+  const started = await service.execute(command(host.room.code, "legacy-start", 2, "game_start", { participantId: sessions[0].id, gameKind: "legacy-game", legacyGameKey: "reverse-word-game", mode: "reverse", prompt: "お題" }), sessions[0].token);
   assert.equal(started.game?.kind, "legacy-game");
   const early = await service.execute(command(host.room.code, "legacy-early", 3, "game_reveal", { participantId: sessions[0].id }), sessions[0].token).catch((error) => error);
   assert.equal(early.code, "game_not_ready");
@@ -363,4 +364,15 @@ test("all catalog games can use the generic synced input bridge", async () => {
   assert.equal(finished.game?.kind, "legacy-game");
   assert.equal(finished.game.phase, "finished");
   assert.equal(finished.game.result?.[sessions[1].id], "answer-1");
+});
+
+test("priority legacy games enforce typed input contracts", () => {
+  assert.equal(validateLegacyInput("truth-lie-game", "2"), true);
+  assert.equal(validateLegacyInput("truth-lie-game", "free text"), false);
+  assert.equal(validateLegacyInput("count-up-game", "42"), true);
+  assert.equal(validateLegacyInput("count-up-game", "forty"), false);
+  assert.equal(validateLegacyInput("reverse-word-game", "olleh"), true);
+  assert.equal(validateLegacyInput("typing-speed-game", "入力結果"), true);
+  assert.equal(validateLegacyInput("value-meter-game", "72|甘め"), true);
+  assert.equal(validateLegacyInput("value-meter-game", "72"), false);
 });
