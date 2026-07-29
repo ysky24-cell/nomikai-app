@@ -910,18 +910,7 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
   const [peopleFilter, setPeopleFilter] = useState<HomePeopleFilter>("all");
   const [hasRoomContext, setHasRoomContext] = useState(false);
   const [syncStartHint, setSyncStartHint] = useState("");
-  const [syncMode, setSyncMode] = useState<"all-games" | "v2">(() => {
-    try {
-      const params = new URL(window.location.href).searchParams;
-      const sync = params.get("sync");
-      if (sync === "v2") return "v2";
-      if (sync === "legacy" || sync === "all-games" || params.has("room")) return "all-games";
-      return "v2";
-    } catch {
-      return "v2";
-    }
-  });
-  const syncModeGames = syncMode === "v2" ? activeGames.filter((game) => isNewSyncRoomGameKey(game.key)) : activeGames;
+  const syncModeGames = activeGames.filter((game) => isNewSyncRoomGameKey(game.key));
   const visibleGames = syncModeGames.filter((game) => {
     const matchesCategory = filter === "all" || game.groups.includes(filter);
     const haystack = `${game.title} ${game.description}`.toLocaleLowerCase();
@@ -937,21 +926,14 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
   const visibleBetaGames = visibleGames.filter((game) => game.status === "beta");
   const visibleFacilitatorGames = visibleGames.filter((game) => game.status === "facilitator");
   const newSyncReadyCount = activeGames.filter((game) => isNewSyncRoomGameKey(game.key) && game.status === "ready").length;
-  const displayedReadyCount = syncMode === "v2" ? newSyncReadyCount : activeGames.filter((game) => game.status === "ready").length;
+  const displayedReadyCount = newSyncReadyCount;
 
   function requestSyncGameStart(game: GameKey) {
     const gameTitle = findGameMeta(game)?.title ?? "選んだゲーム";
     window.dispatchEvent(new CustomEvent("nomikai:new-sync-game-request", { detail: game }));
-    const needsLegacyRoom = syncMode === "v2" && (game === "party-pack" || game === "johari-window");
-    const targetMode = needsLegacyRoom ? "all-games" : syncMode;
-    if (needsLegacyRoom) {
-      setHasRoomContext(false);
-      setSyncMode("all-games");
-    }
+    const targetMode = "v2";
     setSyncStartHint(
-      needsLegacyRoom
-        ? `「${gameTitle}」は全ゲーム同期ルームで利用できます。対応モードへ切り替えました。`
-        : hasRoomContext
+      hasRoomContext
         ? `「${gameTitle}」を始めるときは、参加中の同期ルームでホストがゲームを開始してください。`
         : `「${gameTitle}」は、まず同期ルームに参加してください。参加後はホストがルーム内で開始します。`,
     );
@@ -960,8 +942,6 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
     const lobby = document.getElementById(lobbyId);
     if (lobby && typeof lobby.scrollIntoView === "function") {
       scrollToLobby();
-    } else if (needsLegacyRoom) {
-      window.requestAnimationFrame(scrollToLobby);
     }
   }
 
@@ -981,7 +961,7 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
         <div className="top-actions">
           <div className="status-pill">
             <Check size={18} />
-            {syncMode === "v2" ? "新同期ルーム正式版" : "正式版"} {displayedReadyCount}本
+            新同期ルーム正式版 {displayedReadyCount}本
           </div>
           {!hasRoomContext && (
             <button className="secondary-button reset-all-button" onClick={confirmResetAll}>
@@ -1022,46 +1002,11 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
         </section>
       )}
 
-      <section className="sync-mode-panel" aria-label="スマホ同期ルームの選択">
-        <div>
-          <p className="eyebrow">スマホ同期</p>
-          <h2>同期ルームを選ぶ</h2>
-          <p className="soft-note">ゲーム開始は同期ルームが入口です。1台で回す場合も、ここで作成したルームから進行します。</p>
-        </div>
-        <div className="sync-mode-tabs" role="group" aria-label="同期ルームの種類">
-          <button
-            type="button"
-            className={syncMode === "all-games" ? "selected" : ""}
-            aria-pressed={syncMode === "all-games"}
-            aria-label="全ゲーム同期（33ゲーム）"
-            disabled={hasRoomContext}
-            onClick={() => { setHasRoomContext(false); setSyncMode("all-games"); }}
-          >
-            <span className="sync-mode-name">全ゲーム同期</span>
-            <span className="sync-mode-meta">33ゲーム対応</span>
-          </button>
-          <button
-            type="button"
-            className={syncMode === "v2" ? "selected" : ""}
-            aria-pressed={syncMode === "v2"}
-            aria-label={`新同期ルーム（${newSyncReadyCount}ゲーム・正式版）`}
-            disabled={hasRoomContext}
-            onClick={() => { setHasRoomContext(false); setSyncMode("v2"); }}
-          >
-            <span className="sync-mode-name">新同期ルーム</span>
-            <span className="sync-mode-meta">{newSyncReadyCount}ゲーム・正式版</span>
-          </button>
-        </div>
-        {syncStartHint && <p className="room-message" role="status">{syncStartHint}</p>}
-      </section>
-
       <div id="sync-room-target">
-        {syncMode === "all-games" ? (
-          <RoomLobby onStart={onStart} onPresenceChange={setHasRoomContext} />
-        ) : (
-          <SharedRoomLobby apiUrl={API_URL} onPresenceChange={setHasRoomContext} />
-        )}
+        <SharedRoomLobby apiUrl={API_URL} onPresenceChange={setHasRoomContext} />
       </div>
+
+      {syncStartHint && <p className="room-message" role="status">{syncStartHint}</p>}
 
       {!hasRoomContext && (
         <>
