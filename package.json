@@ -17,6 +17,7 @@
     "room:johari:check": "node scripts/johari-room-check.mjs",
     "room:majority:check": "node scripts/majority-room-check.mjs",
     "room:large-majority:check": "node scripts/majority-room-check.mjs",
+    "room:shared-majority:check": "node scripts/shared-majority-check.mjs",
     "room:anonymous:check": "node scripts/anonymous-room-check.mjs",
     "room:lifecycle:check": "node scripts/room-lifecycle-check.mjs",
     "room:lifecycle:check:all": "node scripts/room-lifecycle-check-all.mjs"
