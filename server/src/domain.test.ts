@@ -341,3 +341,26 @@ test("werewolf auto-advances expired night and voting phases on reconnect", asyn
   assert.equal(voting?.game?.kind, "werewolf");
   assert.equal(voting.game.phase, "voting");
 });
+
+test("all catalog games can use the generic synced input bridge", async () => {
+  const service = new RoomService(new MemoryRoomRepository());
+  const host = await service.createRoom("Host");
+  const sessions = [{ id: host.room.self!.id, token: host.hostToken }];
+  for (const name of ["Alice", "Bob"]) {
+    const joined = await service.execute(command(host.room.code, `join-${name}`, (await service.getProjection(host.room.code, null))!.version, "join", { name }));
+    sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
+  }
+  const started = await service.execute(command(host.room.code, "legacy-start", 2, "game_start", { participantId: sessions[0].id, gameKind: "legacy-game", legacyGameKey: "truth-lie-game", mode: "truthLie", prompt: "お題" }), sessions[0].token);
+  assert.equal(started.game?.kind, "legacy-game");
+  const early = await service.execute(command(host.room.code, "legacy-early", 3, "game_reveal", { participantId: sessions[0].id }), sessions[0].token).catch((error) => error);
+  assert.equal(early.code, "game_not_ready");
+  let version = 3;
+  for (const [index, session] of sessions.entries()) {
+    const result = await service.execute(command(host.room.code, `legacy-input-${index}`, version, "legacy_input", { participantId: session.id, input: `answer-${index}` }), session.token);
+    version = result.version;
+  }
+  const finished = await service.execute(command(host.room.code, "legacy-finish", version, "game_reveal", { participantId: sessions[0].id }), sessions[0].token);
+  assert.equal(finished.game?.kind, "legacy-game");
+  assert.equal(finished.game.phase, "finished");
+  assert.equal(finished.game.result?.[sessions[1].id], "answer-1");
+});

@@ -422,8 +422,7 @@ const gameCardImages: Partial<Record<GameKey, GameCardImage>> = {
 };
 
 function getUrlCandidateGameStatus(game: UrlCandidateGameConfig): GameStatus {
-  if (game.key === "werewolf-game" || game.key === "majority-game" || game.key === "large-majority-game") return "ready";
-  return isRoomSyncableUrlCandidateKey(game.key) ? "beta" : "facilitator";
+  return isNewSyncRoomGameKey(game.key) ? "ready" : "facilitator";
 }
 
 const urlCandidateGameMeta: GameMeta[] = urlCandidateGameConfigs.map((game) => ({

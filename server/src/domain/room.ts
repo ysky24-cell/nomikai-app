@@ -61,7 +61,15 @@ type WerewolfGameState = {
   seerResults: Record<string, { targetId: string; role: WerewolfRole }[]>;
   phaseDeadlineAt: number | null;
 };
-export type RoomGameState = TwoChoiceGameState | ImpressionGameState | MajorityGameState | AnonymousGameState | WordWolfGameState | WerewolfGameState;
+type LegacyGameState = {
+  kind: "legacy-game";
+  gameKey: string;
+  prompt: string;
+  mode: string;
+  phase: "playing" | "finished";
+  inputs: Record<string, string>;
+};
+export type RoomGameState = TwoChoiceGameState | ImpressionGameState | MajorityGameState | AnonymousGameState | WordWolfGameState | WerewolfGameState | LegacyGameState;
 
 export type RoomRecord = {
   id: string;
@@ -94,17 +102,20 @@ export type PublicRoomGame =
   | { kind: "majority-game"; prompt: string; phase: "voting" | "revealed"; voteCount: number; participantCount: number; ownVote?: string; result?: Record<string, number> }
   | { kind: "anonymous-box"; prompt: string; entries: Array<{ id: string; text: string; status: AnonymousEntryStatus }>; ownEntry?: { id: string; text: string; status: AnonymousEntryStatus } }
   | { kind: "word-wolf"; phase: "discussion" | "voting" | "revealed"; phaseDeadlineAt: number | null; participantCount: number; voteCount: number; ownTopic?: string; ownVote?: string; winner?: "majority" | "minority" | "draw"; voteResults?: Record<string, number> }
-  | { kind: "werewolf"; phase: "night" | "day" | "voting" | "revote" | "finished"; phaseDeadlineAt: number | null; aliveIds: string[]; ownRole?: WerewolfRole; teammates?: string[]; ownSeerResults?: { targetId: string; role: WerewolfRole }[]; ownVote?: string; tiedTargetIds?: string[]; winner?: "werewolf" | "villager" };
+  | { kind: "werewolf"; phase: "night" | "day" | "voting" | "revote" | "finished"; phaseDeadlineAt: number | null; aliveIds: string[]; ownRole?: WerewolfRole; teammates?: string[]; ownSeerResults?: { targetId: string; role: WerewolfRole }[]; ownVote?: string; tiedTargetIds?: string[]; winner?: "werewolf" | "villager" }
+  | { kind: "legacy-game"; gameKey: string; prompt: string; mode: string; phase: "playing" | "finished"; inputCount: number; participantCount: number; ownInput?: string; result?: Record<string, string> };
 
 export type RoomCommand = {
   roomCode: string;
   commandId: string;
   expectedVersion: number;
-  kind: "join" | "reconnect" | "leave" | "kick" | "start" | "close" | "game_start" | "game_answer" | "game_reveal" | "anonymous_submit" | "anonymous_moderate" | "game_vote" | "game_phase" | "werewolf_action";
+  kind: "join" | "reconnect" | "leave" | "kick" | "start" | "close" | "game_start" | "game_answer" | "game_reveal" | "anonymous_submit" | "anonymous_moderate" | "game_vote" | "game_phase" | "werewolf_action" | "legacy_input";
   participantId?: string;
   targetParticipantId?: string;
   name?: string;
-  gameKind?: "two-choice" | "impression-ranking" | "majority-game" | "anonymous-box" | "word-wolf" | "werewolf";
+  gameKind?: "two-choice" | "impression-ranking" | "majority-game" | "anonymous-box" | "word-wolf" | "werewolf" | "legacy-game";
+  legacyGameKey?: string;
+  mode?: string;
   prompt?: string;
   deadlineAt?: number | null;
   choice?: TwoChoiceAnswer;
@@ -116,6 +127,7 @@ export type RoomCommand = {
   minorityTopic?: string;
   voteTargetId?: string;
   action?: "kill" | "guard" | "inspect";
+  input?: string;
 };
 
 export interface RoomRepository {
@@ -144,6 +156,19 @@ export class RoomDomainError extends Error {
 const codeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 const maxParticipants = 30;
 const ttlMs = 6 * 60 * 60 * 1000;
+const legacyGameKeys = new Set([
+  "yamanote", "word-wolf", "ng-word", "party-pack", "johari-window", "turtle-soup", "truth-lie-game", "count-up-game", "reverse-word-game", "song-association-quiz", "drawing-quiz", "hazard-card-game", "typing-speed-game", "memory-logo-drawing", "value-meter-game", "acting-phrase-game", "party-sugoroku", "territory-board-game", "weird-karuta-game", "emo-hint-game", "resource-negotiation-game", "life-event-sugoroku", "arm-wrestling-tournament", "safe-random-draw", "person-hint-quiz", "large-majority-game", "humming-intro-quiz", "loanword-ban-game",
+]);
+const legacyMinimumPlayers: Record<string, number> = {
+  "word-wolf": 4,
+  "ng-word": 3,
+  "party-pack": 3,
+  "johari-window": 3,
+  "acting-phrase-game": 3,
+  "resource-negotiation-game": 3,
+  "emo-hint-game": 3,
+  "large-majority-game": 10,
+};
 
 function token(size = 24) {
   const bytes = randomBytes(size);
@@ -286,7 +311,7 @@ export class RoomService {
     if (!roomCode) throw new RoomDomainError("room_code_required");
     if (typeof command.commandId !== "string" || !command.commandId.trim()) throw new RoomDomainError("command_id_required");
     if (!Number.isInteger(command.expectedVersion) || command.expectedVersion < 0) throw new RoomDomainError("expected_version_invalid");
-    if (!("join reconnect leave kick start close game_start game_answer game_reveal anonymous_submit anonymous_moderate game_vote game_phase werewolf_action" as const).split(" ").includes(command.kind)) throw new RoomDomainError("command_kind_invalid");
+    if (!("join reconnect leave kick start close game_start game_answer game_reveal anonymous_submit anonymous_moderate game_vote game_phase werewolf_action legacy_input" as const).split(" ").includes(command.kind)) throw new RoomDomainError("command_kind_invalid");
     command = { ...command, roomCode, commandId: command.commandId.trim() };
     const suppliedToken = typeof tokenValue === "string" ? tokenValue : undefined;
     const resultKey = `${command.roomCode}:${command.commandId}`;
@@ -318,7 +343,7 @@ export class RoomService {
       const expectedHash = actor.role === "host" ? room.hostTokenHash : actor.reconnectTokenHash;
       if (!suppliedToken || hashToken(suppliedToken) !== expectedHash) throw new RoomDomainError("token_invalid");
     }
-    if (room.status === "closed" && ["game_start", "game_answer", "game_reveal", "anonymous_submit", "anonymous_moderate", "game_vote", "game_phase", "werewolf_action"].includes(command.kind)) {
+    if (room.status === "closed" && ["game_start", "game_answer", "game_reveal", "anonymous_submit", "anonymous_moderate", "game_vote", "game_phase", "werewolf_action", "legacy_input"].includes(command.kind)) {
       throw new RoomDomainError("room_closed");
     }
     let issuedReconnectToken: string | undefined;
@@ -351,7 +376,7 @@ export class RoomService {
       actor.connected = true;
     } else if (command.kind === "game_start") {
       if (actor!.role !== "host") throw new RoomDomainError("host_required");
-      if (command.gameKind !== "two-choice" && command.gameKind !== "impression-ranking" && command.gameKind !== "majority-game" && command.gameKind !== "anonymous-box" && command.gameKind !== "word-wolf" && command.gameKind !== "werewolf") throw new RoomDomainError("game_kind_invalid");
+      if (command.gameKind !== "two-choice" && command.gameKind !== "impression-ranking" && command.gameKind !== "majority-game" && command.gameKind !== "anonymous-box" && command.gameKind !== "word-wolf" && command.gameKind !== "werewolf" && command.gameKind !== "legacy-game") throw new RoomDomainError("game_kind_invalid");
       const prompt = typeof command.prompt === "string" ? command.prompt.trim() : "";
       if (!prompt) throw new RoomDomainError("prompt_required");
       if (command.gameKind === "two-choice") {
@@ -368,12 +393,17 @@ export class RoomService {
         const ids = room.participants.map((item) => item.id);
         const minorityCount = Math.max(1, Math.min(ids.length - 1, Math.floor(command.minorityCount ?? 1)));
         room.game = { kind: "word-wolf", phase: "discussion", phaseDeadlineAt: typeof command.deadlineAt === "number" ? command.deadlineAt : this.now() + 60_000, majorityTopic: command.majorityTopic?.trim() || prompt, minorityTopic: command.minorityTopic?.trim() || "別のお題", minorityIds: randomOrder(ids).slice(0, minorityCount), votes: {} };
-      } else {
+      } else if (command.gameKind === "werewolf") {
         const ids = randomOrder(room.participants.map((item) => item.id));
         const wolfCount = Math.max(1, Math.floor(ids.length / 4));
         const roles: Record<string, WerewolfRole> = {};
         ids.forEach((id, index) => { roles[id] = index < wolfCount ? "werewolf" : index === wolfCount ? "seer" : index === wolfCount + 1 ? "guard" : "villager"; });
         room.game = { kind: "werewolf", phase: "night", phaseDeadlineAt: typeof command.deadlineAt === "number" ? command.deadlineAt : this.now() + 60_000, roles, aliveIds: ids, nightActions: {}, votes: {}, tiedTargetIds: [], seerResults: {} };
+      } else {
+        const gameKey = command.legacyGameKey?.trim();
+        if (!gameKey || !legacyGameKeys.has(gameKey)) throw new RoomDomainError("game_kind_invalid");
+        if (room.participants.length < (legacyMinimumPlayers[gameKey] ?? 2)) throw new RoomDomainError("not_enough_participants");
+        room.game = { kind: "legacy-game", gameKey, prompt, mode: command.mode?.trim() || "default", phase: "playing", inputs: {} };
       }
       room.status = "playing";
     } else if (command.kind === "game_answer") {
@@ -398,13 +428,19 @@ export class RoomService {
         if (game.phase !== "voting" || room.participants.some((item) => !game.votes[item.id])) throw new RoomDomainError("game_not_ready");
         game.phase = "revealed";
       } else if (room.game.kind === "word-wolf") {
-        if (room.game.phase !== "voting") throw new RoomDomainError("game_not_ready");
-        resolveWordWolf(room.game);
-        room.game.phaseDeadlineAt = null;
+        const game = room.game;
+        if (game.phase !== "voting" || room.participants.some((item) => !game.votes[item.id])) throw new RoomDomainError("game_not_ready");
+        resolveWordWolf(game);
+        game.phaseDeadlineAt = null;
       } else if (room.game.kind === "werewolf") {
-        if (room.game.phase !== "voting" && room.game.phase !== "revote") throw new RoomDomainError("game_not_ready");
-        resolveWerewolfVotes(room.game);
-        room.game.phaseDeadlineAt = room.game.winner ? null : this.now() + 60_000;
+        const game = room.game;
+        if ((game.phase !== "voting" && game.phase !== "revote") || game.aliveIds.some((id) => !game.votes[id])) throw new RoomDomainError("game_not_ready");
+        resolveWerewolfVotes(game);
+        game.phaseDeadlineAt = game.winner ? null : this.now() + 60_000;
+      } else if (room.game.kind === "legacy-game") {
+        const game = room.game;
+        if (game.phase !== "playing" || room.participants.some((item) => !game.inputs[item.id])) throw new RoomDomainError("game_not_ready");
+        game.phase = "finished";
       } else throw new RoomDomainError("game_not_active");
     } else if (command.kind === "anonymous_submit") {
       if (!room.game || room.game.kind !== "anonymous-box") throw new RoomDomainError("game_not_active");
@@ -436,7 +472,7 @@ export class RoomService {
       } else if (room.game.kind === "word-wolf") {
         if (room.game.phase !== "voting") throw new RoomDomainError("game_not_ready");
         const target = command.voteTargetId;
-        if (!target || !room.participants.some((item) => item.id === target)) throw new RoomDomainError("vote_target_invalid");
+        if (!target || !room.participants.some((item) => item.id === target) || target === actor!.id) throw new RoomDomainError("vote_target_invalid");
         room.game.votes[actor!.id] = target;
       } else {
         if ((room.game.phase !== "voting" && room.game.phase !== "revote") || !room.game.aliveIds.includes(actor!.id)) throw new RoomDomainError("game_not_ready");
@@ -457,6 +493,12 @@ export class RoomService {
         } else if (room.game.phase === "day") { room.game.phase = "voting"; room.game.phaseDeadlineAt = this.now() + 60_000; }
         else throw new RoomDomainError("game_not_ready");
       } else throw new RoomDomainError("game_not_active");
+    } else if (command.kind === "legacy_input") {
+      if (!room.game || room.game.kind !== "legacy-game" || room.game.phase !== "playing") throw new RoomDomainError("game_not_ready");
+      const input = typeof command.input === "string" ? command.input.trim() : "";
+      if (!input) throw new RoomDomainError("input_required");
+      if (input.length > 500) throw new RoomDomainError("input_too_long");
+      room.game.inputs[actor!.id] = input;
     } else if (command.kind === "werewolf_action") {
       if (!room.game || room.game.kind !== "werewolf" || room.game.phase !== "night" || !room.game.aliveIds.includes(actor!.id)) throw new RoomDomainError("game_not_ready");
       const target = command.targetParticipantId;
@@ -552,6 +594,19 @@ export class RoomService {
         ...(participantId && game.votes[participantId] ? { ownVote: game.votes[participantId] } : {}),
         ...(game.phase === "revote" ? { tiedTargetIds: [...game.tiedTargetIds] } : {}),
         ...(game.phase === "finished" ? { winner: game.winner } : {}),
+      };
+    } else if (room.game?.kind === "legacy-game") {
+      const game = room.game;
+      projection.game = {
+        kind: "legacy-game",
+        gameKey: game.gameKey,
+        prompt: game.prompt,
+        mode: game.mode,
+        phase: game.phase,
+        inputCount: Object.keys(game.inputs).length,
+        participantCount: room.participants.length,
+        ...(participantId && game.inputs[participantId] ? { ownInput: game.inputs[participantId] } : {}),
+        ...(game.phase === "finished" ? { result: Object.fromEntries(Object.entries(game.inputs).map(([id, input]) => [id, input])) } : {}),
       };
     }
     return projection;
