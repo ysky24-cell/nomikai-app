@@ -5,7 +5,8 @@ const api = (process.argv[2] || "http://localhost:3000").replace(/\/$/, "");
 const source = fs.readFileSync(new URL("../src/syncRoomCatalog.ts", import.meta.url), "utf8");
 const keys = [...source.matchAll(/^\s*"([a-z0-9-]+)",?$/gm)].map((match) => match[1]);
 const native = new Set(["two-choice", "impression-ranking", "majority-game", "anonymous-box", "word-wolf", "werewolf-game"]);
-const legacyKeys = keys.filter((key) => !native.has(key));
+const requestedKeys = (process.argv[3] || process.env.NOMIKAI_SHARED_KEYS || "").split(",").map((key) => key.trim()).filter(Boolean);
+const legacyKeys = keys.filter((key) => !native.has(key) && (requestedKeys.length === 0 || requestedKeys.includes(key)));
 
 async function json(path, options = {}) {
   const response = await fetch(`${api}${path}`, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } });
