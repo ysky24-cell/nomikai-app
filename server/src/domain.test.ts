@@ -402,6 +402,7 @@ test("priority legacy games resolve game-specific results after the shared revea
     const finished = game.key === "count-up-game"
       ? await service.getProjection(host.room.code, sessions[0].id, sessions[0].token)
       : await service.execute(command(host.room.code, `finish-${index}`, version, "game_reveal", { participantId: sessions[0].id }), sessions[0].token);
+    assert.ok(finished);
     assert.equal(finished.game?.kind, "legacy-game");
     assert.match(finished.game.result?.summary ?? "", game.summary);
     assert.equal(Object.keys(finished.game.result?.scores ?? {}).length, sessions.length);

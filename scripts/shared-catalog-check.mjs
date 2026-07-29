@@ -77,7 +77,8 @@ for (const gameKey of legacyKeys) {
   const reconnected = await command(created.room, disconnected.token, { commandId: `${gameKey}-reconnect`, expectedVersion: version, kind: "reconnect", participantId: disconnected.id });
   version = reconnected.version;
   const restored = await json(`/v2/rooms/${created.room.code}?participantId=${encodeURIComponent(disconnected.id)}`, { headers: { "x-room-token": disconnected.token } });
-  assert.equal(restored.game?.ownInput, priorityInputs[gameKey]?.[1] ?? "answer-1", `${gameKey}: reconnect lost own input`);
+  const expectedReconnectInput = gameKey === "count-up-game" ? "1,2,3" : priorityInputs[gameKey]?.[1] ?? "answer-1";
+  assert.equal(restored.game?.ownInput, expectedReconnectInput, `${gameKey}: reconnect lost own input`);
   const finished = gameKey === "count-up-game" ? await json(`/v2/rooms/${created.room.code}?participantId=${encodeURIComponent(host.id)}`, { headers: { "x-room-token": host.token } }) : await command(created.room, host.token, { commandId: `${gameKey}-finish`, expectedVersion: version, kind: "game_reveal", participantId: host.id });
   assert.equal(finished.game?.phase, "finished", `${gameKey}: result did not finish`);
   checks.push(gameKey);
