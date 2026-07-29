@@ -382,7 +382,7 @@ test("priority legacy games enforce typed input contracts", () => {
 test("priority legacy games resolve game-specific results after the shared reveal gate", async () => {
   const cases = [
     { key: "truth-lie-game", prompt: "お題", inputs: ["2", "2"], summary: /正解者1人/ },
-    { key: "count-up-game", prompt: "目標6", inputs: ["1,2,3", "1,2"], summary: /目標6、合計9/ },
+    { key: "count-up-game", prompt: "目標9", inputs: ["1,2,3", "1,2"], summary: /目標9、合計9/ },
     { key: "reverse-word-game", prompt: "hello", inputs: ["olleh", "wrong"], summary: /正解者1人/ },
     { key: "typing-speed-game", prompt: "same text", inputs: ["same text|1200", "same|800"], summary: /正確入力1人、最速1200ms/ },
     { key: "value-meter-game", prompt: "今日の甘さ", inputs: ["72|甘め", "48|ふつう"], summary: /平均60.0/ },
@@ -399,7 +399,9 @@ test("priority legacy games resolve game-specific results after the shared revea
       const result = await service.execute(command(host.room.code, `input-${index}-${playerIndex}`, version, "legacy_input", { participantId: session.id, input: game.inputs[playerIndex] }), session.token);
       version = result.version;
     }
-    const finished = await service.execute(command(host.room.code, `finish-${index}`, version, "game_reveal", { participantId: sessions[0].id }), sessions[0].token);
+    const finished = game.key === "count-up-game"
+      ? await service.getProjection(host.room.code, sessions[0].id, sessions[0].token)
+      : await service.execute(command(host.room.code, `finish-${index}`, version, "game_reveal", { participantId: sessions[0].id }), sessions[0].token);
     assert.equal(finished.game?.kind, "legacy-game");
     assert.match(finished.game.result?.summary ?? "", game.summary);
     assert.equal(Object.keys(finished.game.result?.scores ?? {}).length, sessions.length);

@@ -37,11 +37,19 @@ for (const gameKey of legacyKeys) {
     version = joined.version;
     players.push({ id: joined.credentials.participantId, token: joined.credentials.reconnectToken });
   }
-  const started = await command(created.room, host.token, { commandId: `${gameKey}-start`, expectedVersion: version, kind: "game_start", participantId: host.id, gameKind: "legacy-game", legacyGameKey: gameKey, mode: "shared-input", prompt: `${gameKey} acceptance` });
+  const prompt = gameKey === "count-up-game" ? "目標12" : `${gameKey} acceptance`;
+  const started = await command(created.room, host.token, { commandId: `${gameKey}-start`, expectedVersion: version, kind: "game_start", participantId: host.id, gameKind: "legacy-game", legacyGameKey: gameKey, mode: "shared-input", prompt });
   version = started.version;
   const early = await fetch(`${api}/v2/rooms/${created.room.code}/commands`, { method: "POST", headers: { "content-type": "application/json", "x-room-token": host.token }, body: JSON.stringify({ commandId: `${gameKey}-early`, expectedVersion: version, kind: "game_reveal", participantId: host.id }) });
   assert.ok([400, 409].includes(early.status), `${gameKey}: early reveal accepted`);
-  const inputResults = await Promise.all(players.map(async (player, index) => {
+  const inputResults = gameKey === "count-up-game" ? await (async () => {
+    let nextVersion = version;
+    for (const [index, player] of players.entries()) {
+      const submitted = await command(created.room, player.token, { commandId: `${gameKey}-turn-${index}`, expectedVersion: nextVersion, kind: "legacy_input", participantId: player.id, input: "1,2,3" });
+      nextVersion = submitted.version;
+    }
+    return players.map(() => ({ version: nextVersion }));
+  })() : await Promise.all(players.map(async (player, index) => {
     const input = priorityInputs[gameKey]?.[index] ?? `answer-${index}`;
     const privateBefore = await json(`/v2/rooms/${created.room.code}?participantId=${encodeURIComponent(player.id)}`, { headers: { "x-room-token": player.token } });
     assert.equal(privateBefore.game?.ownInput, undefined, `${gameKey}: input leaked before submission`);
@@ -70,7 +78,7 @@ for (const gameKey of legacyKeys) {
   version = reconnected.version;
   const restored = await json(`/v2/rooms/${created.room.code}?participantId=${encodeURIComponent(disconnected.id)}`, { headers: { "x-room-token": disconnected.token } });
   assert.equal(restored.game?.ownInput, priorityInputs[gameKey]?.[1] ?? "answer-1", `${gameKey}: reconnect lost own input`);
-  const finished = await command(created.room, host.token, { commandId: `${gameKey}-finish`, expectedVersion: version, kind: "game_reveal", participantId: host.id });
+  const finished = gameKey === "count-up-game" ? await json(`/v2/rooms/${created.room.code}?participantId=${encodeURIComponent(host.id)}`, { headers: { "x-room-token": host.token } }) : await command(created.room, host.token, { commandId: `${gameKey}-finish`, expectedVersion: version, kind: "game_reveal", participantId: host.id });
   assert.equal(finished.game?.phase, "finished", `${gameKey}: result did not finish`);
   checks.push(gameKey);
 }

@@ -68,6 +68,10 @@ type LegacyGameState = {
   mode: string;
   phase: "playing" | "finished";
   inputs: Record<string, string>;
+  turnIndex?: number;
+  currentTotal?: number;
+  targetNumber?: number;
+  turnHistory?: Array<{ playerId: string; add: number; total: number }>;
   result?: LegacyGameResult;
 };
 export type LegacyGameResult = {
@@ -109,7 +113,7 @@ export type PublicRoomGame =
   | { kind: "anonymous-box"; prompt: string; entries: Array<{ id: string; text: string; status: AnonymousEntryStatus }>; ownEntry?: { id: string; text: string; status: AnonymousEntryStatus } }
   | { kind: "word-wolf"; phase: "discussion" | "voting" | "revealed"; phaseDeadlineAt: number | null; participantCount: number; voteCount: number; ownTopic?: string; ownVote?: string; winner?: "majority" | "minority" | "draw"; voteResults?: Record<string, number> }
   | { kind: "werewolf"; phase: "night" | "day" | "voting" | "revote" | "finished"; phaseDeadlineAt: number | null; aliveIds: string[]; ownRole?: WerewolfRole; teammates?: string[]; ownSeerResults?: { targetId: string; role: WerewolfRole }[]; ownVote?: string; tiedTargetIds?: string[]; winner?: "werewolf" | "villager" }
-  | { kind: "legacy-game"; gameKey: string; prompt: string; mode: string; phase: "playing" | "finished"; inputCount: number; participantCount: number; ownInput?: string; result?: LegacyGameResult };
+  | { kind: "legacy-game"; gameKey: string; prompt: string; mode: string; phase: "playing" | "finished"; inputCount: number; participantCount: number; ownInput?: string; currentPlayerId?: string; currentTotal?: number; targetNumber?: number; turnHistory?: Array<{ playerId: string; add: number; total: number }>; result?: LegacyGameResult };
 
 export type RoomCommand = {
   roomCode: string;
@@ -232,12 +236,12 @@ function resolveLegacyResult(game: LegacyGameState, participants: RoomParticipan
     const correct = Object.values(scores).filter((score) => score === 1).length;
     summary = `正解は${answer ?? "未設定"}、正解者${correct}人`;
   } else if (game.gameKey === "count-up-game") {
-    const values = participants.flatMap((participant) => (inputs[participant.id] ?? "").split(",").map((value) => Number(value.trim()))).filter((value) => Number.isFinite(value));
+    const values = (game.turnHistory ?? []).map((turn) => turn.add).filter((value) => Number.isFinite(value));
     const targetMatch = game.prompt.match(/\d+/);
     const target = targetMatch ? Number(targetMatch[0]) : 30;
     const total = values.reduce((sum, value) => sum + value, 0);
     const average = values.length ? total / values.length : 0;
-    participants.forEach((participant) => { const value = (inputs[participant.id] ?? "").split(",").map((item) => Number(item.trim())).reduce((sum, item) => sum + item, 0); scores[participant.id] = Number.isFinite(value) ? Math.abs(value - target) : Number.POSITIVE_INFINITY; });
+    participants.forEach((participant) => { const value = (game.turnHistory ?? []).filter((turn) => turn.playerId === participant.id).reduce((sum, turn) => sum + turn.add, 0); scores[participant.id] = Number.isFinite(value) ? Math.abs(value - target) : Number.POSITIVE_INFINITY; });
     summary = `目標${target}、合計${total}、平均${average.toFixed(1)}`;
   } else if (game.gameKey === "reverse-word-game") {
     const expected = reverseText(game.prompt.trim());
@@ -479,7 +483,7 @@ export class RoomService {
         const gameKey = command.legacyGameKey?.trim();
         if (!gameKey || !legacyGameKeys.has(gameKey)) throw new RoomDomainError("game_kind_invalid");
         if (room.participants.length < (legacyMinimumPlayers[gameKey] ?? 2)) throw new RoomDomainError("not_enough_participants");
-        room.game = { kind: "legacy-game", gameKey, prompt, mode: command.mode?.trim() || "default", phase: "playing", inputs: {} };
+        room.game = { kind: "legacy-game", gameKey, prompt, mode: command.mode?.trim() || "default", phase: "playing", inputs: {}, ...(gameKey === "count-up-game" ? { turnIndex: 0, currentTotal: 0, targetNumber: Number(prompt.match(/\d+/)?.[0] ?? 30), turnHistory: [] } : {}) };
       }
       room.status = "playing";
     } else if (command.kind === "game_answer") {
@@ -515,6 +519,7 @@ export class RoomService {
         game.phaseDeadlineAt = game.winner ? null : this.now() + 60_000;
       } else if (room.game.kind === "legacy-game") {
         const game = room.game;
+        if (game.gameKey === "count-up-game") throw new RoomDomainError("game_not_ready");
         if (game.phase !== "playing" || room.participants.some((item) => !game.inputs[item.id])) throw new RoomDomainError("game_not_ready");
         game.phase = "finished";
         game.result = resolveLegacyResult(game, room.participants);
@@ -576,7 +581,25 @@ export class RoomService {
       if (!input) throw new RoomDomainError("input_required");
       if (input.length > 500) throw new RoomDomainError("input_too_long");
       if (!validateLegacyInput(room.game.gameKey, input)) throw new RoomDomainError("input_invalid");
-      room.game.inputs[actor!.id] = input;
+      if (room.game.gameKey === "count-up-game") {
+        const participants = room.participants;
+        const currentIndex = room.game.turnIndex ?? 0;
+        const currentPlayer = participants[currentIndex % participants.length];
+        if (!currentPlayer || currentPlayer.id !== actor!.id) throw new RoomDomainError("not_your_turn");
+        const add = input.split(",").reduce((sum, value) => sum + Number(value.trim()), 0);
+        const total = (room.game.currentTotal ?? 0) + add;
+        room.game.inputs[actor!.id] = input;
+        room.game.currentTotal = total;
+        room.game.turnHistory = [...(room.game.turnHistory ?? []), { playerId: actor!.id, add, total }];
+        if (total >= (room.game.targetNumber ?? 30)) {
+          room.game.phase = "finished";
+          room.game.result = resolveLegacyResult(room.game, room.participants);
+        } else {
+          room.game.turnIndex = (currentIndex + 1) % participants.length;
+        }
+      } else {
+        room.game.inputs[actor!.id] = input;
+      }
     } else if (command.kind === "werewolf_action") {
       if (!room.game || room.game.kind !== "werewolf" || room.game.phase !== "night" || !room.game.aliveIds.includes(actor!.id)) throw new RoomDomainError("game_not_ready");
       const target = command.targetParticipantId;
@@ -681,9 +704,10 @@ export class RoomService {
         prompt: game.prompt,
         mode: game.mode,
         phase: game.phase,
-        inputCount: Object.keys(game.inputs).length,
+        inputCount: game.gameKey === "count-up-game" ? (game.turnHistory?.length ?? 0) : Object.keys(game.inputs).length,
         participantCount: room.participants.length,
         ...(participantId && game.inputs[participantId] ? { ownInput: game.inputs[participantId] } : {}),
+        ...(game.gameKey === "count-up-game" ? { currentPlayerId: room.participants[(game.turnIndex ?? 0) % room.participants.length]?.id, currentTotal: game.currentTotal ?? 0, targetNumber: game.targetNumber ?? 30, turnHistory: [...(game.turnHistory ?? [])] } : {}),
         ...(game.phase === "finished" && game.result ? { result: game.result } : {}),
       };
     }
