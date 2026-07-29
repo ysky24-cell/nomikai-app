@@ -21,9 +21,9 @@ async function command(room, token, body) {
 const checks = [];
 const priorityInputs = {
   "truth-lie-game": ["2", "1"],
-  "count-up-game": ["42", "17"],
+  "count-up-game": ["1,2,3", "1,2"],
   "reverse-word-game": ["olleh", "dlrow"],
-  "typing-speed-game": ["same text", "same text"],
+  "typing-speed-game": ["same text|1200", "same text|1500"],
   "value-meter-game": ["72|甘め", "48|ふつう"],
 };
 for (const gameKey of legacyKeys) {
