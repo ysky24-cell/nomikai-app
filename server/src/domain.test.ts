@@ -414,7 +414,8 @@ test("legacy rooms created before progression was stored remain playable after r
   assert.equal(restored?.game?.kind, "legacy-game");
   assert.equal(restored?.game?.progression, "turn");
   const submitted = await service.execute(command(host.room.code, "old-turn-answer", started.version, "legacy_input", { participantId: hostId, input: "新宿" }), host.hostToken);
-  assert.equal(submitted.game?.currentPlayerId, joined.credentials!.participantId);
+  assert.equal(submitted.game?.kind, "legacy-game");
+  if (submitted.game?.kind === "legacy-game") assert.equal(submitted.game.currentPlayerId, joined.credentials!.participantId);
 });
 
 test("priority legacy games resolve game-specific results after the shared reveal gate", async () => {
