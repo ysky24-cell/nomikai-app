@@ -363,7 +363,8 @@ test("all catalog games can use the generic synced input bridge", async () => {
   const finished = await service.execute(command(host.room.code, "legacy-finish", version, "game_reveal", { participantId: sessions[0].id }), sessions[0].token);
   assert.equal(finished.game?.kind, "legacy-game");
   assert.equal(finished.game.phase, "finished");
-  assert.equal(finished.game.result?.[sessions[1].id], "answer-1");
+  assert.equal(finished.game.result?.inputs[sessions[1].id], "answer-1");
+  assert.match(finished.game.result?.summary ?? "", /正解/);
 });
 
 test("priority legacy games enforce typed input contracts", () => {
@@ -375,4 +376,31 @@ test("priority legacy games enforce typed input contracts", () => {
   assert.equal(validateLegacyInput("typing-speed-game", "入力結果"), true);
   assert.equal(validateLegacyInput("value-meter-game", "72|甘め"), true);
   assert.equal(validateLegacyInput("value-meter-game", "72"), false);
+});
+
+test("priority legacy games resolve game-specific results after the shared reveal gate", async () => {
+  const cases = [
+    { key: "truth-lie-game", prompt: "お題", inputs: ["2", "2"], summary: /正解者1人/ },
+    { key: "count-up-game", prompt: "目標30", inputs: ["28", "42"], summary: /目標30、合計70/ },
+    { key: "reverse-word-game", prompt: "hello", inputs: ["olleh", "wrong"], summary: /正解者1人/ },
+    { key: "typing-speed-game", prompt: "same text", inputs: ["same text", "same"], summary: /正確入力1人/ },
+    { key: "value-meter-game", prompt: "今日の甘さ", inputs: ["72|甘め", "48|ふつう"], summary: /平均60.0/ },
+  ] as const;
+  for (const [index, game] of cases.entries()) {
+    const service = new RoomService(new MemoryRoomRepository());
+    const host = await service.createRoom(`Host-${index}`);
+    const sessions = [{ id: host.room.self!.id, token: host.hostToken }];
+    const joined = await service.execute(command(host.room.code, `join-${index}`, 1, "join", { name: `Player-${index}` }));
+    sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
+    const started = await service.execute(command(host.room.code, `start-${index}`, 2, "game_start", { participantId: sessions[0].id, gameKind: "legacy-game", legacyGameKey: game.key, prompt: game.prompt }), sessions[0].token);
+    let version = started.version;
+    for (const [playerIndex, session] of sessions.entries()) {
+      const result = await service.execute(command(host.room.code, `input-${index}-${playerIndex}`, version, "legacy_input", { participantId: session.id, input: game.inputs[playerIndex] }), session.token);
+      version = result.version;
+    }
+    const finished = await service.execute(command(host.room.code, `finish-${index}`, version, "game_reveal", { participantId: sessions[0].id }), sessions[0].token);
+    assert.equal(finished.game?.kind, "legacy-game");
+    assert.match(finished.game.result?.summary ?? "", game.summary);
+    assert.equal(Object.keys(finished.game.result?.scores ?? {}).length, sessions.length);
+  }
 });

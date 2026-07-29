@@ -68,6 +68,12 @@ type LegacyGameState = {
   mode: string;
   phase: "playing" | "finished";
   inputs: Record<string, string>;
+  result?: LegacyGameResult;
+};
+export type LegacyGameResult = {
+  inputs: Record<string, string>;
+  summary: string;
+  scores: Record<string, number>;
 };
 export type RoomGameState = TwoChoiceGameState | ImpressionGameState | MajorityGameState | AnonymousGameState | WordWolfGameState | WerewolfGameState | LegacyGameState;
 
@@ -103,7 +109,7 @@ export type PublicRoomGame =
   | { kind: "anonymous-box"; prompt: string; entries: Array<{ id: string; text: string; status: AnonymousEntryStatus }>; ownEntry?: { id: string; text: string; status: AnonymousEntryStatus } }
   | { kind: "word-wolf"; phase: "discussion" | "voting" | "revealed"; phaseDeadlineAt: number | null; participantCount: number; voteCount: number; ownTopic?: string; ownVote?: string; winner?: "majority" | "minority" | "draw"; voteResults?: Record<string, number> }
   | { kind: "werewolf"; phase: "night" | "day" | "voting" | "revote" | "finished"; phaseDeadlineAt: number | null; aliveIds: string[]; ownRole?: WerewolfRole; teammates?: string[]; ownSeerResults?: { targetId: string; role: WerewolfRole }[]; ownVote?: string; tiedTargetIds?: string[]; winner?: "werewolf" | "villager" }
-  | { kind: "legacy-game"; gameKey: string; prompt: string; mode: string; phase: "playing" | "finished"; inputCount: number; participantCount: number; ownInput?: string; result?: Record<string, string> };
+  | { kind: "legacy-game"; gameKey: string; prompt: string; mode: string; phase: "playing" | "finished"; inputCount: number; participantCount: number; ownInput?: string; result?: LegacyGameResult };
 
 export type RoomCommand = {
   roomCode: string;
@@ -197,6 +203,45 @@ function normalizeName(name: string) {
 
 function randomOrder<T>(items: readonly T[]) {
   return [...items].sort(() => randomBytes(2).readUInt16BE(0) / 65536 - 0.5);
+}
+
+function reverseText(value: string) {
+  return Array.from(value).reverse().join("");
+}
+
+function resolveLegacyResult(game: LegacyGameState, participants: RoomParticipant[]): LegacyGameResult {
+  const inputs = { ...game.inputs };
+  const scores: Record<string, number> = {};
+  let summary = `${Object.keys(inputs).length}人の回答を公開しました`;
+  if (game.gameKey === "truth-lie-game") {
+    const speaker = participants[0]?.id;
+    const answer = speaker ? inputs[speaker]?.toUpperCase() : undefined;
+    participants.forEach((participant) => { if (participant.id !== speaker) scores[participant.id] = answer && inputs[participant.id]?.toUpperCase() === answer ? 1 : 0; });
+    const correct = Object.values(scores).filter((score) => score === 1).length;
+    summary = `正解は${answer ?? "未設定"}、正解者${correct}人`;
+  } else if (game.gameKey === "count-up-game") {
+    const values = participants.map((participant) => Number(inputs[participant.id])).filter((value) => Number.isFinite(value));
+    const targetMatch = game.prompt.match(/\d+/);
+    const target = targetMatch ? Number(targetMatch[0]) : 30;
+    const total = values.reduce((sum, value) => sum + value, 0);
+    const average = values.length ? total / values.length : 0;
+    participants.forEach((participant) => { const value = Number(inputs[participant.id]); scores[participant.id] = Number.isFinite(value) ? Math.abs(value - target) : Number.POSITIVE_INFINITY; });
+    summary = `目標${target}、合計${total}、平均${average.toFixed(1)}`;
+  } else if (game.gameKey === "reverse-word-game") {
+    const expected = reverseText(game.prompt.trim());
+    participants.forEach((participant) => { scores[participant.id] = inputs[participant.id] === expected ? 1 : 0; });
+    summary = `正解は${expected}、正解者${Object.values(scores).filter((score) => score === 1).length}人`;
+  } else if (game.gameKey === "typing-speed-game") {
+    const expected = game.prompt.trim();
+    participants.forEach((participant) => { scores[participant.id] = inputs[participant.id] === expected ? 1 : 0; });
+    summary = `正確入力${Object.values(scores).filter((score) => score === 1).length}人`;
+  } else if (game.gameKey === "value-meter-game") {
+    const values = participants.map((participant) => Number(inputs[participant.id]?.split("|", 1)[0])).filter((value) => Number.isFinite(value));
+    const average = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+    participants.forEach((participant) => { const value = Number(inputs[participant.id]?.split("|", 1)[0]); scores[participant.id] = Number.isFinite(value) ? value : 0; });
+    summary = `平均${average.toFixed(1)}、範囲1〜100`;
+  }
+  return { inputs, summary, scores };
 }
 
 function werewolfWinner(game: WerewolfGameState): "werewolf" | "villager" | undefined {
@@ -453,6 +498,7 @@ export class RoomService {
         const game = room.game;
         if (game.phase !== "playing" || room.participants.some((item) => !game.inputs[item.id])) throw new RoomDomainError("game_not_ready");
         game.phase = "finished";
+        game.result = resolveLegacyResult(game, room.participants);
       } else throw new RoomDomainError("game_not_active");
     } else if (command.kind === "anonymous_submit") {
       if (!room.game || room.game.kind !== "anonymous-box") throw new RoomDomainError("game_not_active");
@@ -619,7 +665,7 @@ export class RoomService {
         inputCount: Object.keys(game.inputs).length,
         participantCount: room.participants.length,
         ...(participantId && game.inputs[participantId] ? { ownInput: game.inputs[participantId] } : {}),
-        ...(game.phase === "finished" ? { result: Object.fromEntries(Object.entries(game.inputs).map(([id, input]) => [id, input])) } : {}),
+        ...(game.phase === "finished" && game.result ? { result: game.result } : {}),
       };
     }
     return projection;
