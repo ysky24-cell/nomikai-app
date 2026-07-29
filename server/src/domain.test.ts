@@ -390,7 +390,7 @@ test("priority legacy games resolve game-specific results after the shared revea
     const service = new RoomService(new MemoryRoomRepository());
     const host = await service.createRoom(`Host-${index}`);
     const sessions = [{ id: host.room.self!.id, token: host.hostToken }];
-    const joined = await service.execute(command(host.room.code, `join-${index}`, 1, "join", { name: `Player-${index}` }));
+    const joined = await service.execute(command(host.room.code, `join-${index}`, (await service.getProjection(host.room.code, null))!.version, "join", { name: `Player-${index}` }));
     sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
     const started = await service.execute(command(host.room.code, `start-${index}`, joined.version, "game_start", { participantId: sessions[0].id, gameKind: "legacy-game", legacyGameKey: game.key, prompt: game.prompt }), sessions[0].token);
     let version = started.version;
