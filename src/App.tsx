@@ -917,8 +917,7 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
       const sync = params.get("sync");
       if (sync === "v2") return "v2";
       if (sync === "legacy" || sync === "all-games" || params.has("room")) return "all-games";
-      const hasV2Session = Boolean(window.localStorage.getItem("nomikai:shared-room-session:v1"));
-      return hasV2Session ? "v2" : "v2";
+      return "v2";
     } catch {
       return "v2";
     }
