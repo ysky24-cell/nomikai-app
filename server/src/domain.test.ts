@@ -392,7 +392,7 @@ test("priority legacy games resolve game-specific results after the shared revea
     const sessions = [{ id: host.room.self!.id, token: host.hostToken }];
     const joined = await service.execute(command(host.room.code, `join-${index}`, 1, "join", { name: `Player-${index}` }));
     sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
-    const started = await service.execute(command(host.room.code, `start-${index}`, 2, "game_start", { participantId: sessions[0].id, gameKind: "legacy-game", legacyGameKey: game.key, prompt: game.prompt }), sessions[0].token);
+    const started = await service.execute(command(host.room.code, `start-${index}`, joined.version, "game_start", { participantId: sessions[0].id, gameKind: "legacy-game", legacyGameKey: game.key, prompt: game.prompt }), sessions[0].token);
     let version = started.version;
     for (const [playerIndex, session] of sessions.entries()) {
       const result = await service.execute(command(host.room.code, `input-${index}-${playerIndex}`, version, "legacy_input", { participantId: session.id, input: game.inputs[playerIndex] }), session.token);
