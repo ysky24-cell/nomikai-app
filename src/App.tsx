@@ -941,6 +941,7 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
 
   function requestSyncGameStart(game: GameKey) {
     const gameTitle = findGameMeta(game)?.title ?? "選んだゲーム";
+    window.dispatchEvent(new CustomEvent("nomikai:new-sync-game-request", { detail: game }));
     const needsLegacyRoom = syncMode === "v2" && (game === "party-pack" || game === "johari-window");
     const targetMode = needsLegacyRoom ? "all-games" : syncMode;
     if (needsLegacyRoom) {

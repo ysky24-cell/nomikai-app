@@ -109,6 +109,17 @@ export function SharedRoomLobby({ apiUrl, onPresenceChange }: { apiUrl: string; 
     onPresenceChange?.(Boolean(session));
   }, [onPresenceChange, projection, session]);
 
+  useEffect(() => {
+    const handleRequestedGame = (event: Event) => {
+      const key = (event as CustomEvent<string>).detail;
+      if (typeof key === "string" && LEGACY_SYNC_GAME_KEYS.includes(key as typeof LEGACY_SYNC_GAME_KEYS[number])) {
+        setLegacyGameKey(key as typeof legacyGameKey);
+      }
+    };
+    window.addEventListener("nomikai:new-sync-game-request", handleRequestedGame);
+    return () => window.removeEventListener("nomikai:new-sync-game-request", handleRequestedGame);
+  }, []);
+
   const request = useCallback(async <T,>(path: string, options: { method?: string; body?: unknown; token?: string } = {}) => {
     const response = await fetch(`${apiUrl}${path}`, {
       method: options.method ?? "GET",
@@ -293,6 +304,7 @@ export function SharedRoomLobby({ apiUrl, onPresenceChange }: { apiUrl: string; 
     <section id="shared-room-lobby" className="shared-room-lobby" aria-label="みんなのスマホで遊ぶ">
       <div className="shared-room-heading">
         <div><p className="eyebrow">複数端末モード</p><h2>みんなのスマホで遊ぶ</h2><p>代表者がルームを作り、参加者は自分のスマホから参加できます。</p></div>
+        {activeGame?.kind === "legacy-game" && <p className="soft-note">{activeGame.gameKey === "truth-lie-game" ? "1〜3またはA〜Cで回答" : activeGame.gameKey === "count-up-game" ? "0〜1000の整数で回答" : activeGame.gameKey === "value-meter-game" ? "数値|理由（例: 72|甘め）で回答" : activeGame.gameKey === "typing-speed-game" ? "入力した文章を送信" : "お題に合わせて回答"}</p>}
         <Users size={28} aria-hidden="true" />
       </div>
       {!projection && (

@@ -159,6 +159,18 @@ const ttlMs = 6 * 60 * 60 * 1000;
 const legacyGameKeys = new Set([
   "yamanote", "word-wolf", "ng-word", "party-pack", "johari-window", "turtle-soup", "truth-lie-game", "count-up-game", "reverse-word-game", "song-association-quiz", "drawing-quiz", "hazard-card-game", "typing-speed-game", "memory-logo-drawing", "value-meter-game", "acting-phrase-game", "party-sugoroku", "territory-board-game", "weird-karuta-game", "emo-hint-game", "resource-negotiation-game", "life-event-sugoroku", "arm-wrestling-tournament", "safe-random-draw", "person-hint-quiz", "large-majority-game", "humming-intro-quiz", "loanword-ban-game",
 ]);
+
+export function validateLegacyInput(gameKey: string, input: string) {
+  if (gameKey === "count-up-game") return /^\d+$/.test(input) && Number(input) >= 0 && Number(input) <= 1000;
+  if (gameKey === "value-meter-game") {
+    const separator = input.indexOf("|");
+    if (separator <= 0) return false;
+    const value = Number(input.slice(0, separator).trim());
+    return Number.isInteger(value) && value >= 1 && value <= 100 && input.slice(separator + 1).trim().length > 0;
+  }
+  if (gameKey === "truth-lie-game") return ["1", "2", "3", "A", "B", "C"].includes(input.toUpperCase());
+  return input.length > 0;
+}
 const legacyMinimumPlayers: Record<string, number> = {
   "word-wolf": 4,
   "ng-word": 3,
@@ -498,6 +510,7 @@ export class RoomService {
       const input = typeof command.input === "string" ? command.input.trim() : "";
       if (!input) throw new RoomDomainError("input_required");
       if (input.length > 500) throw new RoomDomainError("input_too_long");
+      if (!validateLegacyInput(room.game.gameKey, input)) throw new RoomDomainError("input_invalid");
       room.game.inputs[actor!.id] = input;
     } else if (command.kind === "werewolf_action") {
       if (!room.game || room.game.kind !== "werewolf" || room.game.phase !== "night" || !room.game.aliveIds.includes(actor!.id)) throw new RoomDomainError("game_not_ready");
