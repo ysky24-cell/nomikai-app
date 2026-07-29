@@ -304,7 +304,7 @@ export function SharedRoomLobby({ apiUrl, onPresenceChange }: { apiUrl: string; 
     <section id="shared-room-lobby" className="shared-room-lobby" aria-label="みんなのスマホで遊ぶ">
       <div className="shared-room-heading">
         <div><p className="eyebrow">複数端末モード</p><h2>みんなのスマホで遊ぶ</h2><p>代表者がルームを作り、参加者は自分のスマホから参加できます。</p></div>
-        {activeGame?.kind === "legacy-game" && <p className="soft-note">{activeGame.gameKey === "truth-lie-game" ? "1〜3またはA〜Cで回答" : activeGame.gameKey === "count-up-game" ? "1〜3をカンマ区切りで回答（例: 1,2）" : activeGame.gameKey === "value-meter-game" ? "数値|理由（例: 72|甘め）で回答" : activeGame.gameKey === "typing-speed-game" ? "文章|ミリ秒（例: same text|1200）で回答" : "お題に合わせて回答"}</p>}
+        {activeGame?.kind === "legacy-game" && <p className="soft-note">{activeGame.gameKey === "truth-lie-game" ? "1〜3またはA〜Cで回答" : activeGame.gameKey === "count-up-game" ? "1〜3をカンマ区切りで回答（例: 1,2）" : activeGame.gameKey === "reverse-word-game" ? "お題を逆順に入力（全員同時回答版）" : activeGame.gameKey === "value-meter-game" ? "数値|理由（例: 72|甘め）で回答" : activeGame.gameKey === "typing-speed-game" ? "文章|ミリ秒（例: same text|1200）で回答" : "お題に合わせて回答"}</p>}
         <Users size={28} aria-hidden="true" />
       </div>
       {!projection && (
