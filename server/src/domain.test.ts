@@ -356,11 +356,12 @@ test("all catalog games can use the generic synced input bridge", async () => {
   const early = await service.execute(command(host.room.code, "legacy-early", 3, "game_reveal", { participantId: sessions[0].id }), sessions[0].token).catch((error) => error);
   assert.equal(early.code, "game_not_ready");
   let version = 3;
+  let finished = started;
   for (const [index, session] of sessions.entries()) {
     const result = await service.execute(command(host.room.code, `legacy-input-${index}`, version, "legacy_input", { participantId: session.id, input: `answer-${index}` }), session.token);
     version = result.version;
+    finished = result;
   }
-  const finished = await service.execute(command(host.room.code, "legacy-finish", version, "game_reveal", { participantId: sessions[0].id }), sessions[0].token);
   assert.equal(finished.game?.kind, "legacy-game");
   assert.equal(finished.game.phase, "finished");
   assert.equal(finished.game.result?.inputs[sessions[1].id], "answer-1");
@@ -379,6 +380,43 @@ test("priority legacy games enforce typed input contracts", () => {
   assert.equal(validateLegacyInput("value-meter-game", "72"), false);
 });
 
+test("turn-based catalog games advance to the next player and finish a round automatically", async () => {
+  const service = new RoomService(new MemoryRoomRepository());
+  const host = await service.createRoom("Host");
+  const joined = await service.execute(command(host.room.code, "join-turn", 0, "join", { name: "Alice" }));
+  const hostId = host.room.self!.id;
+  const playerId = joined.credentials!.participantId;
+  const started = await service.execute(command(host.room.code, "start-turn", joined.version, "game_start", { participantId: hostId, gameKind: "legacy-game", legacyGameKey: "yamanote", prompt: "駅名" }), host.hostToken);
+  assert.equal(started.game?.kind, "legacy-game");
+  assert.equal(started.game?.progression, "turn");
+  const first = await service.execute(command(host.room.code, "turn-host", started.version, "legacy_input", { participantId: hostId, input: "新宿" }), host.hostToken);
+  assert.equal(first.game?.kind, "legacy-game");
+  assert.equal(first.game?.phase, "playing");
+  assert.equal(first.game?.currentPlayerId, playerId);
+  const second = await service.execute(command(host.room.code, "turn-player", first.version, "legacy_input", { participantId: playerId, input: "渋谷" }), joined.credentials!.reconnectToken);
+  assert.equal(second.game?.kind, "legacy-game");
+  assert.equal(second.game?.phase, "finished");
+  assert.equal(second.game?.result?.inputs[playerId], "渋谷");
+});
+
+test("legacy rooms created before progression was stored remain playable after reconnect", async () => {
+  const repository = new MemoryRoomRepository();
+  const service = new RoomService(repository);
+  const host = await service.createRoom("Host");
+  const joined = await service.execute(command(host.room.code, "join-old-turn", 0, "join", { name: "Alice" }));
+  const hostId = host.room.self!.id;
+  const started = await service.execute(command(host.room.code, "start-old-turn", joined.version, "game_start", { participantId: hostId, gameKind: "legacy-game", legacyGameKey: "yamanote", prompt: "駅名" }), host.hostToken);
+  const oldRoom = await repository.get(host.room.code);
+  assert.ok(oldRoom?.game && oldRoom.game.kind === "legacy-game");
+  delete (oldRoom.game as { progression?: string }).progression;
+  await repository.save(oldRoom);
+  const restored = await service.getProjection(host.room.code, hostId, host.hostToken);
+  assert.equal(restored?.game?.kind, "legacy-game");
+  assert.equal(restored?.game?.progression, "turn");
+  const submitted = await service.execute(command(host.room.code, "old-turn-answer", started.version, "legacy_input", { participantId: hostId, input: "新宿" }), host.hostToken);
+  assert.equal(submitted.game?.currentPlayerId, joined.credentials!.participantId);
+});
+
 test("priority legacy games resolve game-specific results after the shared reveal gate", async () => {
   const cases = [
     { key: "truth-lie-game", prompt: "お題", inputs: ["2", "2"], summary: /正解者1人/ },
@@ -395,13 +433,13 @@ test("priority legacy games resolve game-specific results after the shared revea
     sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
     const started = await service.execute(command(host.room.code, `start-${index}`, joined.version, "game_start", { participantId: sessions[0].id, gameKind: "legacy-game", legacyGameKey: game.key, prompt: game.prompt }), sessions[0].token);
     let version = started.version;
+    let finished = started;
     for (const [playerIndex, session] of sessions.entries()) {
       const result = await service.execute(command(host.room.code, `input-${index}-${playerIndex}`, version, "legacy_input", { participantId: session.id, input: game.inputs[playerIndex] }), session.token);
       version = result.version;
+      finished = result;
     }
-    const finished = game.key === "count-up-game"
-      ? await service.getProjection(host.room.code, sessions[0].id, sessions[0].token)
-      : await service.execute(command(host.room.code, `finish-${index}`, version, "game_reveal", { participantId: sessions[0].id }), sessions[0].token);
+    if (game.key === "count-up-game") finished = (await service.getProjection(host.room.code, sessions[0].id, sessions[0].token))!;
     assert.ok(finished);
     assert.equal(finished.game?.kind, "legacy-game");
     assert.match(finished.game.result?.summary ?? "", game.summary);

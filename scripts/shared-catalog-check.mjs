@@ -7,6 +7,9 @@ const keys = [...source.matchAll(/^\s*"([a-z0-9-]+)",?$/gm)].map((match) => matc
 const native = new Set(["two-choice", "impression-ranking", "majority-game", "anonymous-box", "word-wolf", "werewolf-game"]);
 const requestedKeys = (process.argv[3] || process.env.NOMIKAI_SHARED_KEYS || "").split(",").map((key) => key.trim()).filter(Boolean);
 const legacyKeys = keys.filter((key) => !native.has(key) && (requestedKeys.length === 0 || requestedKeys.includes(key)));
+const turnKeys = new Set([
+  "yamanote", "ng-word", "party-pack", "turtle-soup", "song-association-quiz", "drawing-quiz", "hazard-card-game", "acting-phrase-game", "party-sugoroku", "territory-board-game", "life-event-sugoroku", "arm-wrestling-tournament", "safe-random-draw", "person-hint-quiz", "humming-intro-quiz", "loanword-ban-game",
+]);
 
 async function json(path, options = {}) {
   const response = await fetch(`${api}${path}`, { ...options, headers: { "content-type": "application/json", ...(options.headers || {}) } });
@@ -43,18 +46,26 @@ for (const gameKey of legacyKeys) {
   version = started.version;
   const early = await fetch(`${api}/v2/rooms/${created.room.code}/commands`, { method: "POST", headers: { "content-type": "application/json", "x-room-token": host.token }, body: JSON.stringify({ commandId: `${gameKey}-early`, expectedVersion: version, kind: "game_reveal", participantId: host.id }) });
   assert.ok([400, 409].includes(early.status), `${gameKey}: early reveal accepted`);
-  const inputResults = gameKey === "count-up-game" ? await (async () => {
+  const inputResults = gameKey === "count-up-game" || turnKeys.has(gameKey) ? await (async () => {
     let nextVersion = version;
     for (const [index, player] of players.entries()) {
-      const submitted = await command(created.room, player.token, { commandId: `${gameKey}-turn-${index}`, expectedVersion: nextVersion, kind: "legacy_input", participantId: player.id, input: "1,2,3" });
+      const input = gameKey === "count-up-game" ? "1,2,3" : priorityInputs[gameKey]?.[index] ?? `answer-${index}`;
+      const submitted = await command(created.room, player.token, { commandId: `${gameKey}-turn-${index}`, expectedVersion: nextVersion, kind: "legacy_input", participantId: player.id, input });
       nextVersion = submitted.version;
     }
     return players.map(() => ({ version: nextVersion }));
-  })() : await Promise.all(players.map(async (player, index) => {
+  })() : await (async () => {
+    const firstPlayer = players[0];
+    const firstInput = priorityInputs[gameKey]?.[0] ?? "answer-0";
+    const firstSubmitted = await command(created.room, firstPlayer.token, { commandId: `${gameKey}-input-0`, expectedVersion: version, kind: "legacy_input", participantId: firstPlayer.id, input: firstInput });
+    const waitingView = await json(`/v2/rooms/${created.room.code}?participantId=${encodeURIComponent(players[1].id)}`, { headers: { "x-room-token": players[1].token } });
+    assert.equal(waitingView.game?.phase, "playing", `${gameKey}: finished before every participant answered`);
+    assert.equal(waitingView.game?.ownInput, undefined, `${gameKey}: another participant's input leaked`);
+    assert.equal(waitingView.game?.result, undefined, `${gameKey}: result leaked before every participant answered`);
+    const remaining = await Promise.all(players.slice(1).map(async (player, relativeIndex) => {
+      const index = relativeIndex + 1;
     const input = priorityInputs[gameKey]?.[index] ?? `answer-${index}`;
-    const privateBefore = await json(`/v2/rooms/${created.room.code}?participantId=${encodeURIComponent(player.id)}`, { headers: { "x-room-token": player.token } });
-    assert.equal(privateBefore.game?.ownInput, undefined, `${gameKey}: input leaked before submission`);
-    let expectedVersion = version;
+      let expectedVersion = firstSubmitted.version;
     for (let attempt = 0; attempt < 8; attempt += 1) {
       try {
         const submitted = await command(created.room, player.token, { commandId: `${gameKey}-input-${index}-${attempt}`, expectedVersion, kind: "legacy_input", participantId: player.id, input });
@@ -68,10 +79,12 @@ for (const gameKey of legacyKeys) {
       }
     }
     throw new Error(`${gameKey}: concurrent input did not converge`);
-  }));
+    }));
+    return [firstSubmitted, ...remaining];
+  })();
   version = Math.max(...inputResults.map((result) => result.version));
   const hostView = await json(`/v2/rooms/${created.room.code}?participantId=${encodeURIComponent(host.id)}`, { headers: { "x-room-token": host.token } });
-  for (const player of players) assert.equal(hostView.game?.result?.[player.id], undefined, `${gameKey}: input became public before reveal`);
+  assert.equal(hostView.game?.phase, "finished", `${gameKey}: automatic result did not finish`);
   const disconnected = players[1];
   const left = await command(created.room, disconnected.token, { commandId: `${gameKey}-leave`, expectedVersion: version, kind: "leave", participantId: disconnected.id });
   version = left.version;
@@ -80,7 +93,7 @@ for (const gameKey of legacyKeys) {
   const restored = await json(`/v2/rooms/${created.room.code}?participantId=${encodeURIComponent(disconnected.id)}`, { headers: { "x-room-token": disconnected.token } });
   const expectedReconnectInput = gameKey === "count-up-game" ? "1,2,3" : priorityInputs[gameKey]?.[1] ?? "answer-1";
   assert.equal(restored.game?.ownInput, expectedReconnectInput, `${gameKey}: reconnect lost own input`);
-  const finished = gameKey === "count-up-game" ? await json(`/v2/rooms/${created.room.code}?participantId=${encodeURIComponent(host.id)}`, { headers: { "x-room-token": host.token } }) : await command(created.room, host.token, { commandId: `${gameKey}-finish`, expectedVersion: version, kind: "game_reveal", participantId: host.id });
+  const finished = await json(`/v2/rooms/${created.room.code}?participantId=${encodeURIComponent(host.id)}`, { headers: { "x-room-token": host.token } });
   assert.equal(finished.game?.phase, "finished", `${gameKey}: result did not finish`);
   checks.push(gameKey);
 }

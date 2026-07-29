@@ -66,6 +66,7 @@ type LegacyGameState = {
   gameKey: string;
   prompt: string;
   mode: string;
+  progression: "simultaneous" | "turn" | "count-up";
   phase: "playing" | "finished";
   inputs: Record<string, string>;
   turnIndex?: number;
@@ -113,7 +114,7 @@ export type PublicRoomGame =
   | { kind: "anonymous-box"; prompt: string; entries: Array<{ id: string; text: string; status: AnonymousEntryStatus }>; ownEntry?: { id: string; text: string; status: AnonymousEntryStatus } }
   | { kind: "word-wolf"; phase: "discussion" | "voting" | "revealed"; phaseDeadlineAt: number | null; participantCount: number; voteCount: number; ownTopic?: string; ownVote?: string; winner?: "majority" | "minority" | "draw"; voteResults?: Record<string, number> }
   | { kind: "werewolf"; phase: "night" | "day" | "voting" | "revote" | "finished"; phaseDeadlineAt: number | null; aliveIds: string[]; ownRole?: WerewolfRole; teammates?: string[]; ownSeerResults?: { targetId: string; role: WerewolfRole }[]; ownVote?: string; tiedTargetIds?: string[]; winner?: "werewolf" | "villager" }
-  | { kind: "legacy-game"; gameKey: string; prompt: string; mode: string; phase: "playing" | "finished"; inputCount: number; participantCount: number; ownInput?: string; currentPlayerId?: string; currentTotal?: number; targetNumber?: number; turnHistory?: Array<{ playerId: string; add: number; total: number }>; result?: LegacyGameResult };
+  | { kind: "legacy-game"; gameKey: string; prompt: string; mode: string; progression: "simultaneous" | "turn" | "count-up"; phase: "playing" | "finished"; inputCount: number; participantCount: number; remainingCount: number; ownInput?: string; currentPlayerId?: string; currentTotal?: number; targetNumber?: number; turnHistory?: Array<{ playerId: string; add: number; total: number }>; result?: LegacyGameResult };
 
 export type RoomCommand = {
   roomCode: string;
@@ -169,6 +170,30 @@ const ttlMs = 6 * 60 * 60 * 1000;
 const legacyGameKeys = new Set([
   "yamanote", "word-wolf", "ng-word", "party-pack", "johari-window", "turtle-soup", "truth-lie-game", "count-up-game", "reverse-word-game", "song-association-quiz", "drawing-quiz", "hazard-card-game", "typing-speed-game", "memory-logo-drawing", "value-meter-game", "acting-phrase-game", "party-sugoroku", "territory-board-game", "weird-karuta-game", "emo-hint-game", "resource-negotiation-game", "life-event-sugoroku", "arm-wrestling-tournament", "safe-random-draw", "person-hint-quiz", "large-majority-game", "humming-intro-quiz", "loanword-ban-game",
 ]);
+
+const legacyProgressionByKey: Record<string, LegacyGameState["progression"]> = {
+  yamanote: "turn",
+  "ng-word": "turn",
+  "party-pack": "turn",
+  "turtle-soup": "turn",
+  "song-association-quiz": "turn",
+  "drawing-quiz": "turn",
+  "hazard-card-game": "turn",
+  "acting-phrase-game": "turn",
+  "party-sugoroku": "turn",
+  "territory-board-game": "turn",
+  "life-event-sugoroku": "turn",
+  "arm-wrestling-tournament": "turn",
+  "safe-random-draw": "turn",
+  "person-hint-quiz": "turn",
+  "humming-intro-quiz": "turn",
+  "loanword-ban-game": "turn",
+  "count-up-game": "count-up",
+};
+
+function legacyProgression(gameKey: string): LegacyGameState["progression"] {
+  return legacyProgressionByKey[gameKey] ?? "simultaneous";
+}
 
 export function validateLegacyInput(gameKey: string, input: string) {
   if (gameKey === "count-up-game") return /^[1-3](?:\s*,\s*[1-3])*$/.test(input);
@@ -404,6 +429,10 @@ export class RoomService {
       room.version += 1;
       await this.repository.save(room);
     }
+    // Rooms started before this field existed must remain usable after a reconnect.
+    if (room.game?.kind === "legacy-game" && !room.game.progression) {
+      room.game.progression = legacyProgression(room.game.gameKey);
+    }
     const rateKey = `${room.code}:${command.participantId ?? "anonymous"}`;
     const now = this.now();
     if (this.commandAttempts.size > 5_000) {
@@ -418,7 +447,7 @@ export class RoomService {
     }
     const staleLegacyInput = room.version !== command.expectedVersion && command.kind === "legacy_input";
     if (room.version !== command.expectedVersion && !staleLegacyInput) throw new RoomDomainError("version_conflict");
-    if (staleLegacyInput && (!room.game || room.game.kind !== "legacy-game" || room.game.gameKey === "count-up-game" || !command.participantId || room.game.inputs[command.participantId])) {
+    if (staleLegacyInput && (!room.game || room.game.kind !== "legacy-game" || room.game.progression !== "simultaneous" || !command.participantId || room.game.inputs[command.participantId])) {
       throw new RoomDomainError("version_conflict");
     }
     const actor = command.participantId ? room.participants.find((item) => item.id === command.participantId) : null;
@@ -487,7 +516,8 @@ export class RoomService {
         const gameKey = command.legacyGameKey?.trim();
         if (!gameKey || !legacyGameKeys.has(gameKey)) throw new RoomDomainError("game_kind_invalid");
         if (room.participants.length < (legacyMinimumPlayers[gameKey] ?? 2)) throw new RoomDomainError("not_enough_participants");
-        room.game = { kind: "legacy-game", gameKey, prompt, mode: command.mode?.trim() || "default", phase: "playing", inputs: {}, ...(gameKey === "count-up-game" ? { turnIndex: 0, currentTotal: 0, targetNumber: Number(prompt.match(/\d+/)?.[0] ?? 30), turnHistory: [] } : {}) };
+        const progression = legacyProgression(gameKey);
+        room.game = { kind: "legacy-game", gameKey, prompt, mode: command.mode?.trim() || progression, progression, phase: "playing", inputs: {}, ...(progression === "turn" || progression === "count-up" ? { turnIndex: 0 } : {}), ...(progression === "count-up" ? { currentTotal: 0, targetNumber: Number(prompt.match(/\d+/)?.[0] ?? 30), turnHistory: [] } : {}) };
       }
       room.status = "playing";
     } else if (command.kind === "game_answer") {
@@ -585,7 +615,7 @@ export class RoomService {
       if (!input) throw new RoomDomainError("input_required");
       if (input.length > 500) throw new RoomDomainError("input_too_long");
       if (!validateLegacyInput(room.game.gameKey, input)) throw new RoomDomainError("input_invalid");
-      if (room.game.gameKey === "count-up-game") {
+      if (room.game.progression === "count-up") {
         const participants = room.participants;
         const currentIndex = room.game.turnIndex ?? 0;
         const currentPlayer = participants[currentIndex % participants.length];
@@ -601,8 +631,25 @@ export class RoomService {
         } else {
           room.game.turnIndex = (currentIndex + 1) % participants.length;
         }
+      } else if (room.game.progression === "turn") {
+        const participants = room.participants;
+        const currentIndex = room.game.turnIndex ?? 0;
+        const currentPlayer = participants[currentIndex % participants.length];
+        if (!currentPlayer || currentPlayer.id !== actor!.id) throw new RoomDomainError("not_your_turn");
+        room.game.inputs[actor!.id] = input;
+        const nextTurn = currentIndex + 1;
+        if (nextTurn >= participants.length) {
+          room.game.phase = "finished";
+          room.game.result = resolveLegacyResult(room.game, participants);
+        } else {
+          room.game.turnIndex = nextTurn;
+        }
       } else {
         room.game.inputs[actor!.id] = input;
+        if (room.participants.every((participant) => room.game?.kind === "legacy-game" && Boolean(room.game.inputs[participant.id]))) {
+          room.game.phase = "finished";
+          room.game.result = resolveLegacyResult(room.game, room.participants);
+        }
       }
     } else if (command.kind === "werewolf_action") {
       if (!room.game || room.game.kind !== "werewolf" || room.game.phase !== "night" || !room.game.aliveIds.includes(actor!.id)) throw new RoomDomainError("game_not_ready");
@@ -702,16 +749,20 @@ export class RoomService {
       };
     } else if (room.game?.kind === "legacy-game") {
       const game = room.game;
+      const progression = game.progression ?? legacyProgression(game.gameKey);
       projection.game = {
         kind: "legacy-game",
         gameKey: game.gameKey,
         prompt: game.prompt,
         mode: game.mode,
+        progression,
         phase: game.phase,
-        inputCount: game.gameKey === "count-up-game" ? (game.turnHistory?.length ?? 0) : Object.keys(game.inputs).length,
+        inputCount: progression === "count-up" ? (game.turnHistory?.length ?? 0) : Object.keys(game.inputs).length,
         participantCount: room.participants.length,
+        remainingCount: game.phase === "finished" ? 0 : progression === "turn" || progression === "count-up" ? Math.max(0, room.participants.length - (game.turnIndex ?? 0)) : room.participants.filter((participant) => !game.inputs[participant.id]).length,
         ...(participantId && game.inputs[participantId] ? { ownInput: game.inputs[participantId] } : {}),
-        ...(game.gameKey === "count-up-game" ? { currentPlayerId: room.participants[(game.turnIndex ?? 0) % room.participants.length]?.id, currentTotal: game.currentTotal ?? 0, targetNumber: game.targetNumber ?? 30, turnHistory: [...(game.turnHistory ?? [])] } : {}),
+        ...(progression === "turn" || progression === "count-up" ? { currentPlayerId: room.participants[(game.turnIndex ?? 0) % room.participants.length]?.id } : {}),
+        ...(progression === "count-up" ? { currentTotal: game.currentTotal ?? 0, targetNumber: game.targetNumber ?? 30, turnHistory: [...(game.turnHistory ?? [])] } : {}),
         ...(game.phase === "finished" && game.result ? { result: game.result } : {}),
       };
     }
