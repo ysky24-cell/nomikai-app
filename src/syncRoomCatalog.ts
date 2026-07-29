@@ -1,6 +1,7 @@
 export const NEW_SYNC_ROOM_GAME_KEYS = [
   "two-choice",
   "impression-ranking",
+  "majority-game",
   "anonymous-box",
   "word-wolf",
   "werewolf-game",

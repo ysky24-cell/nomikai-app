@@ -26,6 +26,12 @@ type ImpressionGameState = {
   phase: "voting" | "revealed";
   votes: Record<string, string>;
 };
+type MajorityGameState = {
+  kind: "majority-game";
+  prompt: string;
+  phase: "voting" | "revealed";
+  votes: Record<string, string>;
+};
 type AnonymousEntry = { id: string; text: string; authorId: string; status: AnonymousEntryStatus };
 type AnonymousGameState = {
   kind: "anonymous-box";
@@ -55,7 +61,7 @@ type WerewolfGameState = {
   seerResults: Record<string, { targetId: string; role: WerewolfRole }[]>;
   phaseDeadlineAt: number | null;
 };
-export type RoomGameState = TwoChoiceGameState | ImpressionGameState | AnonymousGameState | WordWolfGameState | WerewolfGameState;
+export type RoomGameState = TwoChoiceGameState | ImpressionGameState | MajorityGameState | AnonymousGameState | WordWolfGameState | WerewolfGameState;
 
 export type RoomRecord = {
   id: string;
@@ -85,6 +91,7 @@ export type RoomProjection = {
 export type PublicRoomGame =
   | { kind: "two-choice"; prompt: string; deadlineAt: number | null; phase: "answering" | "revealed"; answeredCount: number; participantCount: number; ownAnswer?: TwoChoiceAnswer; result?: { A: number; B: number; pass: number } }
   | { kind: "impression-ranking"; prompt: string; phase: "voting" | "revealed"; voteCount: number; participantCount: number; ownVote?: string; result?: Record<string, number> }
+  | { kind: "majority-game"; prompt: string; phase: "voting" | "revealed"; voteCount: number; participantCount: number; ownVote?: string; result?: Record<string, number> }
   | { kind: "anonymous-box"; prompt: string; entries: Array<{ id: string; text: string; status: AnonymousEntryStatus }>; ownEntry?: { id: string; text: string; status: AnonymousEntryStatus } }
   | { kind: "word-wolf"; phase: "discussion" | "voting" | "revealed"; phaseDeadlineAt: number | null; participantCount: number; voteCount: number; ownTopic?: string; ownVote?: string; winner?: "majority" | "minority" | "draw"; voteResults?: Record<string, number> }
   | { kind: "werewolf"; phase: "night" | "day" | "voting" | "revote" | "finished"; phaseDeadlineAt: number | null; aliveIds: string[]; ownRole?: WerewolfRole; teammates?: string[]; ownSeerResults?: { targetId: string; role: WerewolfRole }[]; ownVote?: string; tiedTargetIds?: string[]; winner?: "werewolf" | "villager" };
@@ -97,7 +104,7 @@ export type RoomCommand = {
   participantId?: string;
   targetParticipantId?: string;
   name?: string;
-  gameKind?: "two-choice" | "impression-ranking" | "anonymous-box" | "word-wolf" | "werewolf";
+  gameKind?: "two-choice" | "impression-ranking" | "majority-game" | "anonymous-box" | "word-wolf" | "werewolf";
   prompt?: string;
   deadlineAt?: number | null;
   choice?: TwoChoiceAnswer;
@@ -344,7 +351,7 @@ export class RoomService {
       actor.connected = true;
     } else if (command.kind === "game_start") {
       if (actor!.role !== "host") throw new RoomDomainError("host_required");
-      if (command.gameKind !== "two-choice" && command.gameKind !== "impression-ranking" && command.gameKind !== "anonymous-box" && command.gameKind !== "word-wolf" && command.gameKind !== "werewolf") throw new RoomDomainError("game_kind_invalid");
+      if (command.gameKind !== "two-choice" && command.gameKind !== "impression-ranking" && command.gameKind !== "majority-game" && command.gameKind !== "anonymous-box" && command.gameKind !== "word-wolf" && command.gameKind !== "werewolf") throw new RoomDomainError("game_kind_invalid");
       const prompt = typeof command.prompt === "string" ? command.prompt.trim() : "";
       if (!prompt) throw new RoomDomainError("prompt_required");
       if (command.gameKind === "two-choice") {
@@ -352,6 +359,9 @@ export class RoomService {
       } else if (command.gameKind === "impression-ranking") {
         if (room.participants.length < 3) throw new RoomDomainError("not_enough_participants");
         room.game = { kind: "impression-ranking", prompt, phase: "voting", votes: {} };
+      } else if (command.gameKind === "majority-game") {
+        if (room.participants.length < 3) throw new RoomDomainError("not_enough_participants");
+        room.game = { kind: "majority-game", prompt, phase: "voting", votes: {} };
       } else if (command.gameKind === "anonymous-box") {
         room.game = { kind: "anonymous-box", prompt, entries: [] };
       } else if (command.gameKind === "word-wolf") {
@@ -383,6 +393,10 @@ export class RoomService {
         const game = room.game;
         if (game.phase !== "voting" || room.participants.some((item) => !game.votes[item.id])) throw new RoomDomainError("game_not_ready");
         game.phase = "revealed";
+      } else if (room.game.kind === "majority-game") {
+        const game = room.game;
+        if (game.phase !== "voting" || room.participants.some((item) => !game.votes[item.id])) throw new RoomDomainError("game_not_ready");
+        game.phase = "revealed";
       } else if (room.game.kind === "word-wolf") {
         if (room.game.phase !== "voting") throw new RoomDomainError("game_not_ready");
         resolveWordWolf(room.game);
@@ -407,12 +421,17 @@ export class RoomService {
       if (!entry) throw new RoomDomainError("entry_not_found");
       entry.status = command.moderationStatus;
     } else if (command.kind === "game_vote") {
-      if (!room.game || (room.game.kind !== "impression-ranking" && room.game.kind !== "word-wolf" && room.game.kind !== "werewolf")) throw new RoomDomainError("game_not_active");
+      if (!room.game || (room.game.kind !== "impression-ranking" && room.game.kind !== "majority-game" && room.game.kind !== "word-wolf" && room.game.kind !== "werewolf")) throw new RoomDomainError("game_not_active");
       if (room.game.kind === "impression-ranking") {
         if (room.game.phase !== "voting") throw new RoomDomainError("game_not_ready");
         const target = command.voteTargetId;
         if (!target || target !== "skip" && !room.participants.some((item) => item.id === target)) throw new RoomDomainError("vote_target_invalid");
         if (target === actor!.id) throw new RoomDomainError("vote_target_invalid");
+        room.game.votes[actor!.id] = target;
+      } else if (room.game.kind === "majority-game") {
+        if (room.game.phase !== "voting") throw new RoomDomainError("game_not_ready");
+        const target = command.voteTargetId;
+        if (target !== "A" && target !== "B" && target !== "skip") throw new RoomDomainError("vote_target_invalid");
         room.game.votes[actor!.id] = target;
       } else if (room.game.kind === "word-wolf") {
         if (room.game.phase !== "voting") throw new RoomDomainError("game_not_ready");
@@ -483,6 +502,17 @@ export class RoomService {
       const game = room.game;
       projection.game = {
         kind: "impression-ranking",
+        prompt: game.prompt,
+        phase: game.phase,
+        voteCount: Object.keys(game.votes).length,
+        participantCount: room.participants.length,
+        ...(participantId && game.votes[participantId] ? { ownVote: game.votes[participantId] } : {}),
+        ...(game.phase === "revealed" ? { result: Object.values(game.votes).reduce<Record<string, number>>((acc, target) => { acc[target] = (acc[target] ?? 0) + 1; return acc; }, {}) } : {}),
+      };
+    } else if (room.game?.kind === "majority-game") {
+      const game = room.game;
+      projection.game = {
+        kind: "majority-game",
         prompt: game.prompt,
         phase: game.phase,
         voteCount: Object.keys(game.votes).length,

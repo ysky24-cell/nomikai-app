@@ -195,6 +195,30 @@ test("impression ranking supports concurrent private votes, reconnect, and host-
   assert.deepEqual(playerProjection.game.result, { [playerA.id]: 1, [playerB.id]: 1, skip: 1 });
 });
 
+test("majority room accepts simultaneous private votes and reveals the full result", async () => {
+  const service = new RoomService(new MemoryRoomRepository());
+  const host = await service.createRoom("Host");
+  const sessions: Array<{ id: string; token: string; host?: boolean }> = [{ id: host.room.self!.id, token: host.hostToken, host: true }];
+  for (const name of ["Alice", "Bob"]) {
+    const current = await service.getProjection(host.room.code, null);
+    const joined = await service.execute(command(host.room.code, `join-${name}`, current!.version, "join", { name }));
+    sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
+  }
+  const started = await service.execute(command(host.room.code, "start-majority", 2, "game_start", { participantId: host.room.self!.id, gameKind: "majority-game", prompt: "A or B?" }), host.hostToken);
+  assert.equal(started.game?.kind, "majority-game");
+  await assert.rejects(service.execute(command(host.room.code, "early-majority-reveal", 3, "game_reveal", { participantId: host.room.self!.id }), host.hostToken), (error: unknown) => error instanceof RoomDomainError && error.code === "game_not_ready");
+  const votes = ["A", "B", "A"] as const;
+  for (const [index, session] of sessions.entries()) {
+    const current = await service.getProjection(host.room.code, null);
+    await service.execute(command(host.room.code, `vote-${index}`, current!.version, "game_vote", { participantId: session.id, voteTargetId: votes[index] }), session.token);
+  }
+  const revealed = await service.execute(command(host.room.code, "reveal-majority", (await service.getProjection(host.room.code, null))!.version, "game_reveal", { participantId: host.room.self!.id }), host.hostToken);
+  assert.equal(revealed.game?.kind, "majority-game");
+  assert.deepEqual(revealed.game?.result, { A: 2, B: 1 });
+  const playerProjection = await service.getProjection(host.room.code, sessions[1].id, sessions[1].token);
+  assert.deepEqual(playerProjection?.game?.kind === "majority-game" ? playerProjection.game.result : null, { A: 2, B: 1 });
+});
+
 test("anonymous submissions never expose author identity and follow moderation states", async () => {
   const service = new RoomService(new MemoryRoomRepository());
   const host = await service.createRoom("Host");
