@@ -769,7 +769,7 @@ io.on("connection", (socket) => {
     let candidateState = stateToPersist;
     let expectedState = payload.expectedState ?? currentSnapshot.room.state;
     let updateError: unknown = null;
-    const maxStateUpdateAttempts = canMergeConflict ? 12 : 1;
+    const maxStateUpdateAttempts = canMergeConflict ? 24 : 1;
     for (let attempt = 0; attempt < maxStateUpdateAttempts; attempt += 1) {
       try {
         room = await updateRoomState(
@@ -782,7 +782,8 @@ io.on("connection", (socket) => {
         break;
       } catch (error) {
         updateError = error;
-        if (!(error instanceof Error) || error.message !== "version_conflict" || attempt >= 3) break;
+        if (!(error instanceof Error) || error.message !== "version_conflict" || attempt >= maxStateUpdateAttempts - 1) break;
+        if (canMergeConflict) await new Promise((resolve) => setTimeout(resolve, 5 + attempt * 5));
         const latest = await findRoomByCode(roomCode);
         if (!latest) break;
         candidateState = currentGame === "johari-window"
