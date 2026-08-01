@@ -114,7 +114,7 @@ import {
   type YamanoteCategory,
 } from "./data/yamanoteThemes";
 import { SharedRoomLobby } from "./SharedRoomLobby";
-import { isNewSyncRoomGameKey } from "./syncRoomCatalog";
+import { isNativeSyncRoomGameKey, isNewSyncRoomGameKey } from "./syncRoomCatalog";
 
 type BuiltInGameKey =
   | "yamanote"
@@ -131,6 +131,7 @@ type GameKey = BuiltInGameKey | UrlCandidateGameKey;
 
 type HomeFilter = "all" | "url" | "talk" | "reaction" | "luck" | "drawing" | "board" | "large";
 type RoomEntryMode = "join" | "create" | "recover" | "watch";
+type AppRoomMode = "pages" | "legacy" | "v2";
 
 type Player = {
   id: string;
@@ -235,7 +236,9 @@ type GameMeta = {
 
 const STORAGE_PREFIX = "nomikai-app:v1:";
 const ROOM_SESSION_KEY = `${STORAGE_PREFIX}room-session`;
-const API_URL = (import.meta.env.VITE_API_URL || "http://localhost:3000").replace(/\/$/, "");
+const API_URL = (import.meta.env.VITE_API_URL ?? "").trim().replace(/\/$/, "");
+const ROOM_MODE = resolveRoomMode();
+const LOCAL_PREVIEW_HOST = typeof window !== "undefined" && ["localhost", "127.0.0.1", "::1"].includes(window.location.hostname);
 const publicAsset = (path: string) => `${import.meta.env.BASE_URL}${path}`;
 const STORED_GAME_KEYS: readonly GameKey[] = [
   "yamanote",
@@ -275,6 +278,51 @@ const roomEntryOptions: readonly SegmentedOption<RoomEntryMode>[] = [
   { value: "recover", label: "別端末から復帰" },
   { value: "watch", label: "観戦" },
 ];
+
+function normalizeRoomMode(value: unknown): AppRoomMode | null {
+  if (typeof value !== "string") return null;
+  switch (value.trim().toLowerCase()) {
+    case "pages":
+    case "static":
+    case "disabled":
+      return "pages";
+    case "legacy":
+    case "all-games":
+    case "simple":
+      return "legacy";
+    case "v2":
+    case "room":
+    case "docker":
+    case "enabled":
+    case "required":
+      return "v2";
+    default:
+      return null;
+  }
+}
+
+function readRequestedRoomMode(): AppRoomMode | null {
+  try {
+    const sync = new URL(window.location.href).searchParams.get("sync");
+    return normalizeRoomMode(sync);
+  } catch {
+    return null;
+  }
+}
+
+function resolveRoomMode(): AppRoomMode {
+  const configured = normalizeRoomMode(import.meta.env.VITE_ROOM_MODE);
+  if (configured) return configured;
+  const requested = readRequestedRoomMode();
+  if (requested) return requested;
+  if (
+    typeof window !== "undefined" &&
+    window.location.hostname.toLowerCase().endsWith(".github.io")
+  ) {
+    return "pages";
+  }
+  return "legacy";
+}
 
 const urlCandidateIconMap: Record<UrlCandidateIconName, LucideIcon> = {
   timer: Timer,
@@ -894,6 +942,7 @@ function App() {
       onStart={startGame}
       onResetAll={resetAllGames}
       partySession={partySession}
+      roomMode={ROOM_MODE}
     />
   );
 
@@ -904,13 +953,36 @@ function emptyPartySessionFallback(): PartySession {
   return { sessionId: "", participants: [], lastGameKey: null, recentGameKeys: [], updatedAt: "1970-01-01T00:00:00.000Z" };
 }
 
-function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: GameKey, roomSession?: RoomSession | null) => void; onResetAll: () => void; partySession: PartySession }) {
+function RoomModeNotice({ roomMode }: { roomMode: Exclude<AppRoomMode, "pages"> }) {
+  return (
+    <section className="room-panel" aria-label="Docker版同期ルームの設定" role="status">
+      <div className="room-panel-heading">
+        <div>
+          <p className="eyebrow">{roomMode === "v2" ? "v2同期ルーム（正式版＋簡易ブリッジ）" : "簡易同期版"}</p>
+          <h2>同期ルームのAPI URLが未設定です</h2>
+          <p>
+            GitHub Pagesの静的版ではSocket.IO同期を使いません。Docker版で利用する場合は、
+            参加者端末から届くAPI URLを <code>VITE_API_URL</code> に明示して再ビルドしてください。
+          </p>
+        </div>
+      </div>
+      <p className="room-message error" role="alert">
+        localhostへは自動接続しません。例：<code>VITE_API_URL=https://api.example.com</code>
+      </p>
+    </section>
+  );
+}
+
+function HomeScreen({ onStart, onResetAll, partySession, roomMode }: { onStart: (game: GameKey, roomSession?: RoomSession | null) => void; onResetAll: () => void; partySession: PartySession; roomMode: AppRoomMode }) {
   const [filter, setFilter] = useState<HomeFilter>("all");
   const [query, setQuery] = useState("");
   const [peopleFilter, setPeopleFilter] = useState<HomePeopleFilter>("all");
   const [hasRoomContext, setHasRoomContext] = useState(false);
   const [syncStartHint, setSyncStartHint] = useState("");
-  const syncModeGames = activeGames.filter((game) => isNewSyncRoomGameKey(game.key));
+  const [syncGameKey, setSyncGameKey] = useState<GameKey | null>(null);
+  const syncModeGames = roomMode === "pages"
+    ? activeGames
+    : activeGames.filter((game) => isNewSyncRoomGameKey(game.key));
   const visibleGames = syncModeGames.filter((game) => {
     const matchesCategory = filter === "all" || game.groups.includes(filter);
     const haystack = `${game.title} ${game.description}`.toLocaleLowerCase();
@@ -926,16 +998,36 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
   const visibleBetaGames = visibleGames.filter((game) => game.status === "beta");
   const visibleFacilitatorGames = visibleGames.filter((game) => game.status === "facilitator");
   const newSyncReadyCount = activeGames.filter((game) => isNewSyncRoomGameKey(game.key) && game.status === "ready").length;
-  const displayedReadyCount = newSyncReadyCount;
+  const nativeSyncReadyCount = activeGames.filter((game) => isNativeSyncRoomGameKey(game.key) && game.status === "ready").length;
+  const bridgeSyncReadyCount = Math.max(0, newSyncReadyCount - nativeSyncReadyCount);
+  const displayedReadyCount = roomMode === "pages"
+    ? activeGames.filter((game) => game.status === "ready").length
+    : newSyncReadyCount;
 
   function requestSyncGameStart(game: GameKey) {
     const gameTitle = findGameMeta(game)?.title ?? "選んだゲーム";
+    setSyncGameKey(game);
+    if (roomMode === "pages") {
+      onStart(game);
+      return;
+    }
     window.dispatchEvent(new CustomEvent("nomikai:new-sync-game-request", { detail: game }));
-    const targetMode = "v2";
+    const targetMode = roomMode;
+    if (!API_URL && !LOCAL_PREVIEW_HOST) {
+      setSyncStartHint(
+        `「${gameTitle}」は、まず同期ルームに参加してください。Docker版ではVITE_API_URLに参加者端末から届くAPI URLを明示して再ビルドしてください。`,
+      );
+      return;
+    }
+    const nativeRoomGame = ["two-choice", "impression-ranking", "majority-game", "anonymous-box", "word-wolf", "werewolf-game"].includes(game);
     setSyncStartHint(
-      hasRoomContext
-        ? `「${gameTitle}」を始めるときは、参加中の同期ルームでホストがゲームを開始してください。`
-        : `「${gameTitle}」は、まず同期ルームに参加してください。参加後はホストがルーム内で開始します。`,
+      targetMode === "v2" && !nativeRoomGame
+        ? `全ゲーム同期ルーム：「${gameTitle}」は簡易同期ブリッジで参加者へ同期します。`
+        : !API_URL && targetMode === "legacy"
+          ? `「${gameTitle}」は、まず同期ルームに参加してください。`
+          : hasRoomContext
+          ? `「${gameTitle}」を始めるときは、参加中の同期ルームでホストがゲームを開始してください。`
+          : `「${gameTitle}」は、まず${targetMode === "v2" ? "正式版同期ルーム" : "簡易同期ルーム"}に参加してください。参加後はホストがルーム内で開始します。`,
     );
     const lobbyId = targetMode === "v2" ? "shared-room-lobby" : "sync-room-lobby";
     const scrollToLobby = () => document.getElementById(lobbyId)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -954,14 +1046,22 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
     <main className="app-shell">
       <section className="top-bar" aria-label="アプリ概要">
         <div>
-          <p className="eyebrow">同期ルーム / 1台共有対応</p>
+          <p className="eyebrow">{roomMode === "pages" ? "静的版 / 1台共有" : "同期ルーム / 1台共有対応"}</p>
           <h1>飲み会アプリ</h1>
-          <p className="lead">まず同期ルームを作成してゲームを開始します。1台で回すことも、各自のスマホから同じルームに参加することもできます。</p>
+          <p className="lead">
+            {roomMode === "pages"
+              ? "この静的版は1台で遊ぶためのゲーム集です。参加者名を入力して、その場で進行できます。"
+              : "まず同期ルームを作成してゲームを開始します。1台で回すことも、各自のスマホから同じルームに参加することもできます。"}
+          </p>
         </div>
         <div className="top-actions">
           <div className="status-pill">
             <Check size={18} />
-            新同期ルーム正式版 {displayedReadyCount}本
+            {roomMode === "pages"
+              ? `静的版 ${displayedReadyCount}本`
+              : roomMode === "v2"
+                ? `v2同期 ${nativeSyncReadyCount}本正式 / ${bridgeSyncReadyCount}本簡易`
+                : `簡易同期版 ${displayedReadyCount}本`}
           </div>
           {!hasRoomContext && (
             <button className="secondary-button reset-all-button" onClick={confirmResetAll}>
@@ -1002,11 +1102,30 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
         </section>
       )}
 
-      <div id="sync-room-target">
-        <SharedRoomLobby apiUrl={API_URL} onPresenceChange={setHasRoomContext} />
-      </div>
+      {roomMode !== "pages" && (
+        <div id="sync-room-target">
+          {API_URL || LOCAL_PREVIEW_HOST ? (
+            roomMode === "v2" ? (
+              <div id="sync-room-lobby">
+                <SharedRoomLobby apiUrl={API_URL} onPresenceChange={setHasRoomContext} />
+              </div>
+            ) : (
+              <RoomLobby onStart={onStart} onPresenceChange={setHasRoomContext} />
+            )
+          ) : (
+            <RoomModeNotice roomMode={roomMode} />
+          )}
+        </div>
+      )}
 
       {syncStartHint && <p className="room-message" role="status">{syncStartHint}</p>}
+      {roomMode === "v2" && syncGameKey && syncStartHint.startsWith("全ゲーム同期ルーム") && (
+        <div className="sync-mode-toggle" role="group" aria-label="同期モード">
+          <button type="button" className="secondary-button" aria-pressed="true">
+            全ゲーム同期（33ゲーム）
+          </button>
+        </div>
+      )}
 
       {!hasRoomContext && (
         <>
@@ -1022,9 +1141,9 @@ function HomeScreen({ onStart, onResetAll, partySession }: { onStart: (game: Gam
             </p>
           </section>
 
-          <HomeGameSection games={visibleReadyGames} onStart={requestSyncGameStart} status="ready" />
-          <HomeGameSection games={visibleBetaGames} onStart={requestSyncGameStart} status="beta" />
-          <HomeGameSection games={visibleFacilitatorGames} onStart={requestSyncGameStart} status="facilitator" />
+          <HomeGameSection games={visibleReadyGames} onStart={requestSyncGameStart} status="ready" roomMode={roomMode} />
+          <HomeGameSection games={visibleBetaGames} onStart={requestSyncGameStart} status="beta" roomMode={roomMode} />
+          <HomeGameSection games={visibleFacilitatorGames} onStart={requestSyncGameStart} status="facilitator" roomMode={roomMode} />
 
           {futureGames.length > 0 && (
             <section className="future-section" aria-label="追加予定ゲーム">
@@ -1049,10 +1168,12 @@ function HomeGameSection({
   games,
   onStart,
   status,
+  roomMode,
 }: {
   games: GameMeta[];
   onStart: (game: GameKey, roomSession?: RoomSession | null) => void;
   status: GameStatus;
+  roomMode: AppRoomMode;
 }) {
   if (games.length === 0) return null;
   const copy = gameStatusCopy[status];
@@ -1074,7 +1195,13 @@ function HomeGameSection({
               <div>
                 <span className={`game-status-badge status-${game.status}`}>{gameStatusCopy[game.status].label}</span>
                 <span className="game-mode-badge">
-                  {game.status === "ready" ? "同期版（1台共有可）" : game.status === "facilitator" ? "進行カード" : "QR対応予定"}
+                  {roomMode === "pages"
+                    ? "静的版（1台共有）"
+                    : game.status === "ready"
+                      ? roomMode === "v2"
+                        ? isNativeSyncRoomGameKey(game.key) ? "正式同期版" : "簡易同期版（ブリッジ）"
+                        : "簡易同期版"
+                      : game.status === "facilitator" ? "進行カード" : "QR対応予定"}
                 </span>
                 <h2>{game.title}</h2>
                 <p>{game.description}</p>

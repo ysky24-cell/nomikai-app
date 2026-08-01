@@ -4,7 +4,11 @@ import { MemoryRoomRepository, RoomDomainError, RoomService, type RoomCommand } 
 import { validateLegacyInput } from "./domain/room.js";
 
 function command(roomCode: string, commandId: string, expectedVersion: number, kind: RoomCommand["kind"], extra: Partial<RoomCommand> = {}): RoomCommand {
-  return { roomCode, commandId, expectedVersion, kind, ...extra };
+  return { roomCode, commandId, expectedVersion, kind, ...(kind === "join" ? { joinNonce: `test-${commandId}-nonce` } : {}), ...extra };
+}
+
+async function lockRoom(service: RoomService, roomCode: string, version: number, participantId: string, token: string, commandId: string) {
+  return service.execute(command(roomCode, commandId, version, "start", { participantId }), token);
 }
 
 test("creates readable room credentials and keeps projection secrets private", async () => {
@@ -104,10 +108,9 @@ test("serializes concurrent commands so no participant update is lost", async ()
   ]);
   const fulfilled = [first, second].filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<RoomService["execute"]>>> => result.status === "fulfilled");
   const rejected = [first, second].filter((result) => result.status === "rejected");
-  assert.equal(fulfilled.length, 1);
-  assert.equal(rejected.length, 1);
-  assert.equal((rejected[0] as PromiseRejectedResult).reason.code, "version_conflict");
-  assert.equal((await service.getProjection(created.room.code, null))?.participants.length, 2);
+  assert.equal(fulfilled.length, 2);
+  assert.equal(rejected.length, 0);
+  assert.equal((await service.getProjection(created.room.code, null))?.participants.length, 3);
 });
 
 test("keeps two-choice answers private until every participant answers", async () => {
@@ -116,8 +119,9 @@ test("keeps two-choice answers private until every participant answers", async (
   const joined = await service.execute(command(host.room.code, "join", 0, "join", { name: "Alice" }));
   const playerId = joined.credentials!.participantId;
   const playerToken = joined.credentials!.reconnectToken;
-  await service.execute(command(host.room.code, "start-choice", 1, "game_start", { participantId: host.room.self!.id, gameKind: "two-choice", prompt: "A or B?" }), host.hostToken);
-  const playerAnswer = await service.execute(command(host.room.code, "answer-player", 2, "game_answer", { participantId: playerId, choice: "A" }), playerToken);
+  const locked = await lockRoom(service, host.room.code, joined.version, host.room.self!.id, host.hostToken, "lock-choice");
+  const started = await service.execute(command(host.room.code, "start-choice", locked.version, "game_start", { participantId: host.room.self!.id, gameKind: "two-choice", prompt: "A or B?" }), host.hostToken);
+  const playerAnswer = await service.execute(command(host.room.code, "answer-player", started.version, "game_answer", { participantId: playerId, choice: "A" }), playerToken);
   assert.equal(playerAnswer.game?.kind, "two-choice");
   assert.equal(playerAnswer.game.ownAnswer, "A");
   assert.equal("result" in playerAnswer.game, false);
@@ -129,8 +133,8 @@ test("keeps two-choice answers private until every participant answers", async (
     service.getProjection(host.room.code, playerId),
     (error: unknown) => error instanceof RoomDomainError && error.code === "token_invalid",
   );
-  await service.execute(command(host.room.code, "answer-host", 3, "game_answer", { participantId: host.room.self!.id, choice: "B" }), host.hostToken);
-  const revealed = await service.execute(command(host.room.code, "reveal", 4, "game_reveal", { participantId: host.room.self!.id }), host.hostToken);
+  const hostAnswer = await service.execute(command(host.room.code, "answer-host", playerAnswer.version, "game_answer", { participantId: host.room.self!.id, choice: "B" }), host.hostToken);
+  const revealed = await service.execute(command(host.room.code, "reveal", hostAnswer.version, "game_reveal", { participantId: host.room.self!.id }), host.hostToken);
   assert.deepEqual(revealed.game && revealed.game.kind === "two-choice" ? revealed.game.result : null, { A: 1, B: 1, pass: 0 });
 });
 
@@ -143,10 +147,11 @@ test("impression ranking supports concurrent private votes, reconnect, and host-
     const joined = await service.execute(command(host.room.code, `join-${name}`, current!.version, "join", { name }));
     sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
   }
-  const started = await service.execute(command(host.room.code, "start-impression", 2, "game_start", { participantId: host.room.self!.id, gameKind: "impression-ranking", prompt: "一番頼れそうな人は？" }), host.hostToken);
+  const locked = await lockRoom(service, host.room.code, 2, host.room.self!.id, host.hostToken, "lock-impression");
+  const started = await service.execute(command(host.room.code, "start-impression", locked.version, "game_start", { participantId: host.room.self!.id, gameKind: "impression-ranking", prompt: "一番頼れそうな人は？" }), host.hostToken);
   assert.equal(started.game?.kind, "impression-ranking");
   await assert.rejects(
-    service.execute(command(host.room.code, "early-reveal", 3, "game_reveal", { participantId: host.room.self!.id }), host.hostToken),
+    service.execute(command(host.room.code, "early-reveal", started.version, "game_reveal", { participantId: host.room.self!.id }), host.hostToken),
     (error: unknown) => error instanceof RoomDomainError && error.code === "game_not_ready",
   );
 
@@ -157,12 +162,11 @@ test("impression ranking supports concurrent private votes, reconnect, and host-
   assert.equal(privateBeforeVote.game.voteCount, 0);
   assert.equal("result" in privateBeforeVote.game, false);
   const simultaneous = await Promise.allSettled([
-    service.execute(command(host.room.code, "vote-a", 3, "game_vote", { participantId: playerA.id, voteTargetId: playerB.id }), playerA.token),
-    service.execute(command(host.room.code, "vote-b", 3, "game_vote", { participantId: playerB.id, voteTargetId: "skip" }), playerB.token),
+    service.execute(command(host.room.code, "vote-a", started.version, "game_vote", { participantId: playerA.id, voteTargetId: playerB.id }), playerA.token),
+    service.execute(command(host.room.code, "vote-b", started.version, "game_vote", { participantId: playerB.id, voteTargetId: "skip" }), playerB.token),
   ]);
-  assert.equal(simultaneous.filter((result) => result.status === "fulfilled").length, 1);
-  assert.equal(simultaneous.filter((result) => result.status === "rejected").length, 1);
-  assert.equal((simultaneous.find((result) => result.status === "rejected") as PromiseRejectedResult).reason.code, "version_conflict");
+  assert.equal(simultaneous.filter((result) => result.status === "fulfilled").length, 2);
+  assert.equal(simultaneous.filter((result) => result.status === "rejected").length, 0);
   const playerAVote = await service.getProjection(host.room.code, playerA.id, playerA.token);
   const playerBVote = await service.getProjection(host.room.code, playerB.id, playerB.token);
   assert.equal(playerAVote?.game?.kind, "impression-ranking");
@@ -184,8 +188,9 @@ test("impression ranking supports concurrent private votes, reconnect, and host-
   const reconnected = await service.execute(command(host.room.code, "reconnect-b", left.version, "reconnect", { participantId: playerB.id }), playerB.token);
   assert.equal(reconnected.participants.find((item) => item.id === playerB.id)?.connected, true);
   assert.equal(reconnected.game?.kind, "impression-ranking");
-  assert.equal(reconnected.game.ownVote, "skip");
-  const voteHost = await service.execute(command(host.room.code, "vote-host", reconnected.version, "game_vote", { participantId: host.room.self!.id, voteTargetId: playerA.id }), host.hostToken);
+  assert.equal(reconnected.game.ownVote, undefined);
+  const restoredVote = await service.execute(command(host.room.code, "vote-b-after-reconnect", reconnected.version, "game_vote", { participantId: playerB.id, voteTargetId: "skip" }), playerB.token);
+  const voteHost = await service.execute(command(host.room.code, "vote-host", restoredVote.version, "game_vote", { participantId: host.room.self!.id, voteTargetId: playerA.id }), host.hostToken);
   assert.equal(voteHost.game?.kind, "impression-ranking");
   const revealed = await service.execute(command(host.room.code, "reveal", voteHost.version, "game_reveal", { participantId: host.room.self!.id }), host.hostToken);
   assert.equal(revealed.game?.kind, "impression-ranking");
@@ -205,9 +210,10 @@ test("majority room accepts simultaneous private votes and reveals the full resu
     const joined = await service.execute(command(host.room.code, `join-${name}`, current!.version, "join", { name }));
     sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
   }
-  const started = await service.execute(command(host.room.code, "start-majority", 2, "game_start", { participantId: host.room.self!.id, gameKind: "majority-game", prompt: "A or B?" }), host.hostToken);
+  const locked = await lockRoom(service, host.room.code, 2, host.room.self!.id, host.hostToken, "lock-majority");
+  const started = await service.execute(command(host.room.code, "start-majority", locked.version, "game_start", { participantId: host.room.self!.id, gameKind: "majority-game", prompt: "A or B?" }), host.hostToken);
   assert.equal(started.game?.kind, "majority-game");
-  await assert.rejects(service.execute(command(host.room.code, "early-majority-reveal", 3, "game_reveal", { participantId: host.room.self!.id }), host.hostToken), (error: unknown) => error instanceof RoomDomainError && error.code === "game_not_ready");
+  await assert.rejects(service.execute(command(host.room.code, "early-majority-reveal", started.version, "game_reveal", { participantId: host.room.self!.id }), host.hostToken), (error: unknown) => error instanceof RoomDomainError && error.code === "game_not_ready");
   const votes = ["A", "B", "A"] as const;
   for (const [index, session] of sessions.entries()) {
     const current = await service.getProjection(host.room.code, null);
@@ -226,8 +232,9 @@ test("anonymous submissions never expose author identity and follow moderation s
   const joined = await service.execute(command(host.room.code, "join", 0, "join", { name: "Alice" }));
   const playerId = joined.credentials!.participantId;
   const playerToken = joined.credentials!.reconnectToken;
-  await service.execute(command(host.room.code, "start-anon", 1, "game_start", { participantId: host.room.self!.id, gameKind: "anonymous-box", prompt: "質問を投稿" }), host.hostToken);
-  const submitted = await service.execute(command(host.room.code, "submit", 2, "anonymous_submit", { participantId: playerId, text: "秘密の質問" }), playerToken);
+  const locked = await lockRoom(service, host.room.code, joined.version, host.room.self!.id, host.hostToken, "lock-anon");
+  const started = await service.execute(command(host.room.code, "start-anon", locked.version, "game_start", { participantId: host.room.self!.id, gameKind: "anonymous-box", prompt: "質問を投稿" }), host.hostToken);
+  const submitted = await service.execute(command(host.room.code, "submit", started.version, "anonymous_submit", { participantId: playerId, text: "秘密の質問" }), playerToken);
   assert.equal(submitted.game?.kind, "anonymous-box");
   assert.equal(submitted.game.ownEntry?.text, "秘密の質問");
   const publicProjection = await service.getProjection(host.room.code, null);
@@ -237,7 +244,7 @@ test("anonymous submissions never expose author identity and follow moderation s
   const entry = hostProjection!.game?.kind === "anonymous-box" ? hostProjection!.game.entries[0] : null;
   assert.ok(entry);
   assert.equal("authorId" in entry, false);
-  await service.execute(command(host.room.code, "display", 3, "anonymous_moderate", { participantId: host.room.self!.id, targetEntryId: entry!.id, moderationStatus: "displayed" }), host.hostToken);
+  await service.execute(command(host.room.code, "display", submitted.version, "anonymous_moderate", { participantId: host.room.self!.id, targetEntryId: entry!.id, moderationStatus: "displayed" }), host.hostToken);
   const displayed = await service.getProjection(host.room.code, playerId, playerToken);
   assert.equal(displayed?.game?.kind, "anonymous-box");
   assert.equal(displayed!.game.entries[0]?.status, "displayed");
@@ -247,21 +254,30 @@ test("anonymous submissions never expose author identity and follow moderation s
 test("word wolf assigns private topics and only reveals votes after the host closes voting", async () => {
   const service = new RoomService(new MemoryRoomRepository());
   const host = await service.createRoom("Host");
-  const joined = await service.execute(command(host.room.code, "join", 0, "join", { name: "Alice" }));
-  const playerId = joined.credentials!.participantId;
-  const playerToken = joined.credentials!.reconnectToken;
-  await service.execute(command(host.room.code, "start", 1, "game_start", { participantId: host.room.self!.id, gameKind: "word-wolf", prompt: "同じ話題", majorityTopic: "海", minorityTopic: "山", minorityCount: 1 }), host.hostToken);
+  const sessions: Array<{ id: string; token: string }> = [{ id: host.room.self!.id, token: host.hostToken }];
+  for (const name of ["Alice", "Bob", "Carol"]) {
+    const current = await service.getProjection(host.room.code, null);
+    const joined = await service.execute(command(host.room.code, `join-${name}`, current!.version, "join", { name }));
+    sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
+  }
+  const beforeStart = await service.getProjection(host.room.code, null);
+  const locked = await lockRoom(service, host.room.code, beforeStart!.version, host.room.self!.id, host.hostToken, "lock-word-wolf");
+  const started = await service.execute(command(host.room.code, "start", locked.version, "game_start", { participantId: host.room.self!.id, gameKind: "word-wolf", prompt: "同じ話題", majorityTopic: "海", minorityTopic: "山", minorityCount: 1 }), host.hostToken);
   const publicProjection = await service.getProjection(host.room.code, null);
+  assert.equal(publicProjection?.version, started.version);
   assert.equal(publicProjection?.game?.kind, "word-wolf");
   assert.equal("ownTopic" in publicProjection!.game!, false);
-  const privateProjection = await service.getProjection(host.room.code, playerId, playerToken);
+  const privateProjection = await service.getProjection(host.room.code, sessions[1].id, sessions[1].token);
   assert.equal(privateProjection?.game?.kind, "word-wolf");
   assert.ok(privateProjection!.game?.ownTopic);
-  await assert.rejects(service.execute(command(host.room.code, "early-vote", 2, "game_vote", { participantId: playerId, voteTargetId: host.room.self!.id }), playerToken), (error: unknown) => error instanceof RoomDomainError && error.code === "game_not_ready");
-  await service.execute(command(host.room.code, "voting", 2, "game_phase", { participantId: host.room.self!.id }), host.hostToken);
-  await service.execute(command(host.room.code, "vote-player", 3, "game_vote", { participantId: playerId, voteTargetId: host.room.self!.id }), playerToken);
-  await service.execute(command(host.room.code, "vote-host", 4, "game_vote", { participantId: host.room.self!.id, voteTargetId: playerId }), host.hostToken);
-  const revealed = await service.execute(command(host.room.code, "reveal", 5, "game_reveal", { participantId: host.room.self!.id }), host.hostToken);
+  await assert.rejects(service.execute(command(host.room.code, "early-vote", publicProjection!.version, "game_vote", { participantId: sessions[1].id, voteTargetId: host.room.self!.id }), sessions[1].token), (error: unknown) => error instanceof RoomDomainError && error.code === "game_not_ready");
+  await service.execute(command(host.room.code, "voting", publicProjection!.version, "game_phase", { participantId: host.room.self!.id }), host.hostToken);
+  for (const [index, session] of sessions.entries()) {
+    const current = await service.getProjection(host.room.code, null);
+    const target = sessions.find((candidate) => candidate.id !== session.id)?.id ?? host.room.self!.id;
+    await service.execute(command(host.room.code, `vote-${index}`, current!.version, "game_vote", { participantId: session.id, voteTargetId: target }), session.token);
+  }
+  const revealed = await service.execute(command(host.room.code, "reveal", (await service.getProjection(host.room.code, null))!.version, "game_reveal", { participantId: host.room.self!.id }), host.hostToken);
   assert.equal(revealed.game?.kind, "word-wolf");
   assert.equal(revealed.game?.phase, "revealed");
   assert.ok(revealed.game?.voteResults);
@@ -271,7 +287,13 @@ test("word wolf advances expired phases after reconnect using the server clock",
   let now = 1_000;
   const service = new RoomService(new MemoryRoomRepository(() => now), () => now);
   const host = await service.createRoom("Host");
-  await service.execute(command(host.room.code, "start", 0, "game_start", { participantId: host.room.self!.id, gameKind: "word-wolf", prompt: "話題", deadlineAt: 2_000 }), host.hostToken);
+  for (const name of ["Alice", "Bob", "Carol"]) {
+    const current = await service.getProjection(host.room.code, null);
+    await service.execute(command(host.room.code, `join-${name}`, current!.version, "join", { name }));
+  }
+  const beforeStart = await service.getProjection(host.room.code, null);
+  const locked = await lockRoom(service, host.room.code, beforeStart!.version, host.room.self!.id, host.hostToken, "lock-expired-word-wolf");
+  await service.execute(command(host.room.code, "start", locked.version, "game_start", { participantId: host.room.self!.id, gameKind: "word-wolf", prompt: "話題", majorityTopic: "海", minorityTopic: "山", deadlineAt: 2_000 }), host.hostToken);
   now = 2_001;
   const voting = await service.getProjection(host.room.code, host.room.self!.id, host.reconnectToken);
   assert.equal(voting?.game?.kind, "word-wolf");
@@ -290,7 +312,8 @@ test("werewolf resolves guard success and tied votes into a constrained revote",
     const joined = await service.execute(command(host.room.code, `join-${name}`, sessions.length - 1, "join", { name }));
     sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
   }
-  await service.execute(command(host.room.code, "start", 3, "game_start", { participantId: host.room.self!.id, gameKind: "werewolf", prompt: "夜の議論" }), host.hostToken);
+  const locked = await lockRoom(service, host.room.code, 3, host.room.self!.id, host.hostToken, "lock-werewolf");
+  const started = await service.execute(command(host.room.code, "start", locked.version, "game_start", { participantId: host.room.self!.id, gameKind: "werewolf", prompt: "夜の議論" }), host.hostToken);
   const roles = new Map<string, string>();
   for (const session of sessions) {
     const privateProjection = await service.getProjection(host.room.code, session.id, session.id === host.room.self!.id ? host.reconnectToken : session.token);
@@ -300,28 +323,32 @@ test("werewolf resolves guard success and tied votes into a constrained revote",
   const guard = sessions.find((session) => roles.get(session.id) === "guard")!;
   const target = sessions.find((session) => session.id !== wolf.id && session.id !== guard.id)!;
   const tokenFor = (session: { id: string; token: string }) => session.id === host.room.self!.id ? host.hostToken : session.token;
-  await service.execute(command(host.room.code, "kill", 4, "werewolf_action", { participantId: wolf.id, action: "kill", targetParticipantId: target.id }), tokenFor(wolf));
-  await service.execute(command(host.room.code, "guard", 5, "werewolf_action", { participantId: guard.id, action: "guard", targetParticipantId: target.id }), tokenFor(guard));
-  const day = await service.execute(command(host.room.code, "day", 6, "game_phase", { participantId: host.room.self!.id }), host.hostToken);
+  const kill = await service.execute(command(host.room.code, "kill", started.version, "werewolf_action", { participantId: wolf.id, action: "kill", targetParticipantId: target.id }), tokenFor(wolf));
+  const guardAction = await service.execute(command(host.room.code, "guard", kill.version, "werewolf_action", { participantId: guard.id, action: "guard", targetParticipantId: target.id }), tokenFor(guard));
+  const day = await service.execute(command(host.room.code, "day", guardAction.version, "game_phase", { participantId: host.room.self!.id }), host.hostToken);
   assert.equal(day.game?.kind, "werewolf");
   assert.ok(day.game?.aliveIds.includes(target.id));
-  await service.execute(command(host.room.code, "voting", 7, "game_phase", { participantId: host.room.self!.id }), host.hostToken);
+  const voting = await service.execute(command(host.room.code, "voting", day.version, "game_phase", { participantId: host.room.self!.id }), host.hostToken);
   const alive = day.game?.kind === "werewolf" ? day.game.aliveIds : [];
   const a = alive[0];
   const b = alive[1];
+  let voteVersion = voting.version;
   for (const [index, session] of sessions.filter((item) => alive.includes(item.id)).entries()) {
-    await service.execute(command(host.room.code, `vote-${index}`, 8 + index, "game_vote", { participantId: session.id, voteTargetId: index % 2 === 0 ? a : b }), session.id === host.room.self!.id ? host.hostToken : session.token);
+    const vote = await service.execute(command(host.room.code, `vote-${index}`, voteVersion, "game_vote", { participantId: session.id, voteTargetId: index % 2 === 0 ? a : b }), session.id === host.room.self!.id ? host.hostToken : session.token);
+    voteVersion = vote.version;
   }
-  const revote = await service.execute(command(host.room.code, "tie", 12, "game_reveal", { participantId: host.room.self!.id }), host.hostToken);
+  const revote = await service.execute(command(host.room.code, "tie", voteVersion, "game_reveal", { participantId: host.room.self!.id }), host.hostToken);
   assert.equal(revote.game?.kind, "werewolf");
   assert.equal(revote.game?.phase, "revote");
   assert.equal(revote.game?.tiedTargetIds?.length, 2);
   const constrainedTarget = revote.game?.kind === "werewolf" ? revote.game.tiedTargetIds?.[0] : undefined;
   assert.ok(constrainedTarget);
+  let revoteVersion = revote.version;
   for (const [index, session] of sessions.filter((item) => (revote.game?.kind === "werewolf" ? revote.game.aliveIds.includes(item.id) : false)).entries()) {
-    await service.execute(command(host.room.code, `revote-${index}`, 13 + index, "game_vote", { participantId: session.id, voteTargetId: constrainedTarget }), tokenFor(session));
+    const vote = await service.execute(command(host.room.code, `revote-${index}`, revoteVersion, "game_vote", { participantId: session.id, voteTargetId: constrainedTarget }), tokenFor(session));
+    revoteVersion = vote.version;
   }
-  const afterRevote = await service.execute(command(host.room.code, "resolve-revote", 17, "game_reveal", { participantId: host.room.self!.id }), host.hostToken);
+  const afterRevote = await service.execute(command(host.room.code, "resolve-revote", revoteVersion, "game_reveal", { participantId: host.room.self!.id }), host.hostToken);
   assert.equal(afterRevote.game?.kind, "werewolf");
   assert.equal(afterRevote.game.phase === "day" || afterRevote.game.phase === "finished", true);
   assert.equal(afterRevote.game.aliveIds.includes(constrainedTarget), false);
@@ -332,7 +359,8 @@ test("werewolf auto-advances expired night and voting phases on reconnect", asyn
   const service = new RoomService(new MemoryRoomRepository(() => now), () => now);
   const host = await service.createRoom("Host");
   for (const name of ["Alice", "Bob", "Carol"]) await service.execute(command(host.room.code, `join-${name}`, (await service.getProjection(host.room.code, null))!.version, "join", { name }));
-  await service.execute(command(host.room.code, "start", 3, "game_start", { participantId: host.room.self!.id, gameKind: "werewolf", prompt: "夜", deadlineAt: 2_000 }), host.hostToken);
+  const locked = await lockRoom(service, host.room.code, 3, host.room.self!.id, host.hostToken, "lock-expired-werewolf");
+  await service.execute(command(host.room.code, "start", locked.version, "game_start", { participantId: host.room.self!.id, gameKind: "werewolf", prompt: "夜", deadlineAt: 2_000 }), host.hostToken);
   now = 2_001;
   const day = await service.getProjection(host.room.code, host.room.self!.id, host.reconnectToken);
   assert.equal(day?.game?.kind, "werewolf");
@@ -351,11 +379,12 @@ test("all catalog games can use the generic synced input bridge", async () => {
     const joined = await service.execute(command(host.room.code, `join-${name}`, (await service.getProjection(host.room.code, null))!.version, "join", { name }));
     sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
   }
-  const started = await service.execute(command(host.room.code, "legacy-start", 2, "game_start", { participantId: sessions[0].id, gameKind: "legacy-game", legacyGameKey: "reverse-word-game", mode: "reverse", prompt: "お題" }), sessions[0].token);
+  const locked = await lockRoom(service, host.room.code, 2, sessions[0].id, sessions[0].token, "lock-legacy");
+  const started = await service.execute(command(host.room.code, "legacy-start", locked.version, "game_start", { participantId: sessions[0].id, gameKind: "legacy-game", legacyGameKey: "reverse-word-game", mode: "reverse", prompt: "お題" }), sessions[0].token);
   assert.equal(started.game?.kind, "legacy-game");
-  const early = await service.execute(command(host.room.code, "legacy-early", 3, "game_reveal", { participantId: sessions[0].id }), sessions[0].token).catch((error) => error);
+  const early = await service.execute(command(host.room.code, "legacy-early", started.version, "game_reveal", { participantId: sessions[0].id }), sessions[0].token).catch((error) => error);
   assert.equal(early.code, "game_not_ready");
-  let version = 3;
+  let version = started.version;
   let finished = started;
   for (const [index, session] of sessions.entries()) {
     const result = await service.execute(command(host.room.code, `legacy-input-${index}`, version, "legacy_input", { participantId: session.id, input: `answer-${index}` }), session.token);
@@ -386,7 +415,8 @@ test("turn-based catalog games advance to the next player and finish a round aut
   const joined = await service.execute(command(host.room.code, "join-turn", 0, "join", { name: "Alice" }));
   const hostId = host.room.self!.id;
   const playerId = joined.credentials!.participantId;
-  const started = await service.execute(command(host.room.code, "start-turn", joined.version, "game_start", { participantId: hostId, gameKind: "legacy-game", legacyGameKey: "yamanote", prompt: "駅名" }), host.hostToken);
+  const locked = await lockRoom(service, host.room.code, joined.version, hostId, host.hostToken, "lock-turn");
+  const started = await service.execute(command(host.room.code, "start-turn", locked.version, "game_start", { participantId: hostId, gameKind: "legacy-game", legacyGameKey: "yamanote", prompt: "駅名" }), host.hostToken);
   assert.equal(started.game?.kind, "legacy-game");
   assert.equal(started.game?.progression, "turn");
   const first = await service.execute(command(host.room.code, "turn-host", started.version, "legacy_input", { participantId: hostId, input: "新宿" }), host.hostToken);
@@ -399,13 +429,54 @@ test("turn-based catalog games advance to the next player and finish a round aut
   assert.equal(second.game?.result?.inputs[playerId], "渋谷");
 });
 
+test("safe departure keeps turn and count-up games playable", async () => {
+  const turnService = new RoomService(new MemoryRoomRepository());
+  const turnHost = await turnService.createRoom("Host");
+  const turnAlice = await turnService.execute(command(turnHost.room.code, "turn-join-a", 0, "join", { name: "Alice" }));
+  const turnBob = await turnService.execute(command(turnHost.room.code, "turn-join-b", turnAlice.version, "join", { name: "Bob" }));
+  const turnHostId = turnHost.room.self!.id;
+  const turnAliceId = turnAlice.credentials!.participantId;
+  const turnLocked = await lockRoom(turnService, turnHost.room.code, turnBob.version, turnHostId, turnHost.hostToken, "turn-departure-lock");
+  const turnStarted = await turnService.execute(command(turnHost.room.code, "turn-departure-start", turnLocked.version, "game_start", {
+    participantId: turnHostId,
+    gameKind: "legacy-game",
+    legacyGameKey: "yamanote",
+    prompt: "駅名",
+  }), turnHost.hostToken);
+  const turnAfterHost = await turnService.execute(command(turnHost.room.code, "turn-departure-input", turnStarted.version, "legacy_input", { participantId: turnHostId, input: "新宿" }), turnHost.hostToken);
+  const turnAfterLeave = await turnService.execute(command(turnHost.room.code, "turn-departure-leave", turnAfterHost.version, "leave", { participantId: turnAliceId }), turnAlice.credentials!.reconnectToken);
+  assert.equal(turnAfterLeave.game?.kind, "legacy-game");
+  assert.equal(turnAfterLeave.game?.currentPlayerId, turnBob.credentials!.participantId);
+
+  const countService = new RoomService(new MemoryRoomRepository());
+  const countHost = await countService.createRoom("Host");
+  const countAlice = await countService.execute(command(countHost.room.code, "count-join-a", 0, "join", { name: "Alice" }));
+  const countBob = await countService.execute(command(countHost.room.code, "count-join-b", countAlice.version, "join", { name: "Bob" }));
+  const countHostId = countHost.room.self!.id;
+  const countAliceId = countAlice.credentials!.participantId;
+  const countLocked = await lockRoom(countService, countHost.room.code, countBob.version, countHostId, countHost.hostToken, "count-departure-lock");
+  const countStarted = await countService.execute(command(countHost.room.code, "count-departure-start", countLocked.version, "game_start", {
+    participantId: countHostId,
+    gameKind: "legacy-game",
+    legacyGameKey: "count-up-game",
+    prompt: "目標30",
+  }), countHost.hostToken);
+  const countAfterHost = await countService.execute(command(countHost.room.code, "count-departure-host-input", countStarted.version, "legacy_input", { participantId: countHostId, input: "1,2,3" }), countHost.hostToken);
+  const countAfterAlice = await countService.execute(command(countHost.room.code, "count-departure-alice-input", countAfterHost.version, "legacy_input", { participantId: countAliceId, input: "1,2,3" }), countAlice.credentials!.reconnectToken);
+  const countAfterLeave = await countService.execute(command(countHost.room.code, "count-departure-leave", countAfterAlice.version, "leave", { participantId: countAliceId }), countAlice.credentials!.reconnectToken);
+  assert.equal(countAfterLeave.game?.kind, "legacy-game");
+  assert.equal(countAfterLeave.game?.currentTotal, 6);
+  assert.equal(countAfterLeave.game?.currentPlayerId, countBob.credentials!.participantId);
+});
+
 test("legacy rooms created before progression was stored remain playable after reconnect", async () => {
   const repository = new MemoryRoomRepository();
   const service = new RoomService(repository);
   const host = await service.createRoom("Host");
   const joined = await service.execute(command(host.room.code, "join-old-turn", 0, "join", { name: "Alice" }));
   const hostId = host.room.self!.id;
-  const started = await service.execute(command(host.room.code, "start-old-turn", joined.version, "game_start", { participantId: hostId, gameKind: "legacy-game", legacyGameKey: "yamanote", prompt: "駅名" }), host.hostToken);
+  const locked = await lockRoom(service, host.room.code, joined.version, hostId, host.hostToken, "lock-old-turn");
+  const started = await service.execute(command(host.room.code, "start-old-turn", locked.version, "game_start", { participantId: hostId, gameKind: "legacy-game", legacyGameKey: "yamanote", prompt: "駅名" }), host.hostToken);
   const oldRoom = await repository.get(host.room.code);
   assert.ok(oldRoom?.game && oldRoom.game.kind === "legacy-game");
   delete (oldRoom.game as { progression?: string }).progression;
@@ -432,7 +503,8 @@ test("priority legacy games resolve game-specific results after the shared revea
     const sessions = [{ id: host.room.self!.id, token: host.hostToken }];
     const joined = await service.execute(command(host.room.code, `join-${index}`, (await service.getProjection(host.room.code, null))!.version, "join", { name: `Player-${index}` }));
     sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
-    const started = await service.execute(command(host.room.code, `start-${index}`, joined.version, "game_start", { participantId: sessions[0].id, gameKind: "legacy-game", legacyGameKey: game.key, prompt: game.prompt }), sessions[0].token);
+    const locked = await lockRoom(service, host.room.code, joined.version, sessions[0].id, sessions[0].token, `lock-${index}`);
+    const started = await service.execute(command(host.room.code, `start-${index}`, locked.version, "game_start", { participantId: sessions[0].id, gameKind: "legacy-game", legacyGameKey: game.key, prompt: game.prompt }), sessions[0].token);
     let version = started.version;
     let finished = started;
     for (const [playerIndex, session] of sessions.entries()) {

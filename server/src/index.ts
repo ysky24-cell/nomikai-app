@@ -1,12 +1,14 @@
 import http from "node:http";
+import { randomUUID } from "node:crypto";
 import cors from "cors";
 import express from "express";
 import { Server } from "socket.io";
 import { createAdapter } from "@socket.io/redis-adapter";
-import { config } from "./config.js";
+import { config, createIdempotencyContext, type IdempotencyContext } from "./config.js";
 import {
   addParticipant,
   checkDatabase,
+  claimV2RoomEvents,
   claimParticipantTransfer,
   closeRoom,
   createParticipantTransferCode,
@@ -14,16 +16,36 @@ import {
   findRoomByCode,
   listRoomEvents,
   pool,
+  readDatabaseIdempotencyResult,
   registerParticipantSocketConnection,
   removeRoomParticipant,
+  markV2RoomEventProcessed,
+  retryV2RoomEvent,
   transferRoomHost,
   unregisterParticipantSocketConnection,
   updateRoomProgress,
   updateRoomState,
   verifyParticipantToken,
+  writeDatabaseIdempotencyResult,
 } from "./db.js";
-import { checkRedis, redis } from "./redis.js";
-import { MemoryRoomRepository, PostgresRoomRepository, RoomDomainError, RoomService, type RoomCommand } from "./domain/index.js";
+import {
+  cacheLegacyRoomState,
+  checkRedis,
+  readV2ActiveParticipantIds,
+  readRedisIdempotencyResult,
+  redis,
+  setV2ParticipantPresence,
+  writeRedisIdempotencyResult,
+} from "./redis.js";
+import {
+  MemoryRoomRepository,
+  PostgresRoomRepository,
+  RoomDomainError,
+  RoomService,
+  type RoomCommand,
+  type RoomCommandResult,
+  type RoomProjection,
+} from "./domain/index.js";
 import { log, requestCorrelationId } from "./logger.js";
 import { canPartyPackParticipantReveal, readPartyPackPromptMode, validateJohariHostTransition, validatePartyPackHostReveal } from "./party-pack-authorization.js";
 
@@ -97,8 +119,397 @@ function allowV2SocketRate(socket: { id: string; handshake: { address: string } 
   return current.count <= limit;
 }
 
-// Versioned domain API. The legacy `/rooms` endpoints remain intact while
-// this command/event boundary is adopted by new clients.
+type V2SocketAck = (payload: V2SocketAckPayload) => void;
+type V2SocketAckPayload =
+  | { ok: true; projection?: RoomProjection | RoomCommandResult }
+  | { ok: false; error: string };
+type V2SocketLike = {
+  id: string;
+  data: Record<string, unknown>;
+  join: (room: string) => Promise<unknown> | unknown;
+  leave: (room: string) => Promise<unknown> | unknown;
+  emit: (event: string, payload: unknown) => unknown;
+};
+
+// v2 is the canonical command/projection boundary. The legacy `/rooms`
+// endpoints and `room:*` events below are compatibility-only and remain
+// available for existing clients.
+const v2DetachedParticipants = new Map<string, Set<string>>();
+
+function v2ErrorCode(error: unknown) {
+  if (error instanceof RoomDomainError) return error.code;
+  if (error instanceof Error && error.message === "version_conflict") return "version_conflict";
+  if (error instanceof Error && error.message === "idempotency_conflict") return "command_id_reuse";
+  return "internal_error";
+}
+
+const sharedIdempotencyEnabled = config.v2Repository !== "memory" || config.socketIoInstances > 1;
+const sharedIdempotencyLockTtlSeconds = 30;
+const sharedIdempotencyWaitAttempts = 80;
+const releaseIdempotencyLockScript = `
+  if redis.call("get", KEYS[1]) == ARGV[1] then
+    return redis.call("del", KEYS[1])
+  end
+  return 0
+`;
+
+async function readSharedIdempotencyResult(context: IdempotencyContext) {
+  const cached = await readRedisIdempotencyResult(context);
+  if (cached !== null) return cached as RoomCommandResult;
+  const durable = await readDatabaseIdempotencyResult(context);
+  return durable === null ? null : durable as RoomCommandResult;
+}
+
+async function writeSharedIdempotencyResult(context: IdempotencyContext, result: RoomCommandResult) {
+  const writes = await Promise.allSettled([
+    writeRedisIdempotencyResult(context, result),
+    writeDatabaseIdempotencyResult(context, result),
+  ]);
+  if (writes.every((entry) => entry.status === "rejected")) {
+    log("error", "v2_idempotency_store_failed", {
+      roomCode: context.roomCode,
+      commandId: context.commandId,
+      actorId: context.actorId,
+    });
+  }
+}
+
+async function releaseSharedIdempotencyLock(lockKey: string, lockToken: string) {
+  await redis.eval(releaseIdempotencyLockScript, 1, lockKey, lockToken);
+}
+
+async function executeWithSharedIdempotency(
+  context: IdempotencyContext,
+  operation: () => Promise<RoomCommandResult>,
+) {
+  for (let attempt = 0; attempt < sharedIdempotencyWaitAttempts; attempt += 1) {
+    const cached = await readSharedIdempotencyResult(context);
+    if (cached) return structuredClone(cached);
+
+    const lockKey = `${context.key}:lock`;
+    const lockToken = randomUUID();
+    const acquired = await redis.set(lockKey, lockToken, "EX", sharedIdempotencyLockTtlSeconds, "NX");
+    if (acquired === "OK") {
+      try {
+        const afterLock = await readSharedIdempotencyResult(context);
+        if (afterLock) return structuredClone(afterLock);
+        const result = await operation();
+        await writeSharedIdempotencyResult(context, result);
+        return result;
+      } finally {
+        await releaseSharedIdempotencyLock(lockKey, lockToken).catch((error) => {
+          log("warn", "v2_idempotency_lock_release_failed", {
+            roomCode: context.roomCode,
+            commandId: context.commandId,
+            error: error instanceof Error ? error.message : "unknown_error",
+          });
+        });
+      }
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new RoomDomainError("idempotency_busy");
+}
+
+function acknowledgeV2(ack: V2SocketAck | undefined, payload: V2SocketAckPayload) {
+  if (!ack) return;
+  try {
+    ack(payload);
+  } catch {
+    // A client ACK callback must never turn a completed command into a server error.
+  }
+}
+
+async function handleV2SocketRequest(
+  socket: V2SocketLike,
+  ack: V2SocketAck | undefined,
+  action: () => Promise<V2SocketAckPayload & { ok: true }>,
+  successEvent?: "v2:subscribe:ack",
+) {
+  let timeoutHandle: NodeJS.Timeout | undefined;
+  try {
+    const timeout = new Promise<never>((_, reject) => {
+      timeoutHandle = setTimeout(() => reject(new RoomDomainError("socket_action_timeout")), 2_500);
+    });
+    const result = await Promise.race([action(), timeout]);
+    if (successEvent) socket.emit(successEvent, { ok: true });
+    acknowledgeV2(ack, result);
+  } catch (error) {
+    const payload = { error: v2ErrorCode(error) } as const;
+    socket.emit("v2:error", payload);
+    if (successEvent) socket.emit(successEvent, { ok: false, ...payload });
+    acknowledgeV2(ack, { ok: false, ...payload });
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle);
+  }
+}
+
+async function setV2PresenceOverride(roomCode: string, participantId: string, connected: boolean, sourceId?: string) {
+  const normalizedCode = roomCode.trim().toUpperCase();
+  if (!normalizedCode || !participantId) return;
+  if (connected) {
+    const detached = v2DetachedParticipants.get(normalizedCode);
+    detached?.delete(participantId);
+    if (detached && detached.size === 0) v2DetachedParticipants.delete(normalizedCode);
+  } else {
+    const detached = v2DetachedParticipants.get(normalizedCode) ?? new Set<string>();
+    detached.add(participantId);
+    v2DetachedParticipants.set(normalizedCode, detached);
+  }
+  try {
+    await setV2ParticipantPresence(
+      normalizedCode,
+      participantId,
+      connected,
+      connected ? sourceId?.trim() || "rest" : sourceId?.trim() || "",
+    );
+  } catch (error) {
+    // Redis is a shared presence optimization. The local map remains a safe
+    // fallback for this process, and presence must never fail a room command.
+    log("warn", "v2_presence_shared_state_failed", {
+      roomCode: normalizedCode,
+      participantId,
+      connected,
+      error: error instanceof Error ? error.message : "unknown_error",
+    });
+  }
+}
+
+async function readV2PresenceSets(roomCode: string, localActiveParticipantIds: ReadonlySet<string>) {
+  const normalizedCode = roomCode.trim().toUpperCase();
+  const detached = new Set(v2DetachedParticipants.get(normalizedCode) ?? []);
+  try {
+    const sharedActiveParticipantIds = await readV2ActiveParticipantIds(normalizedCode);
+    if (sharedActiveParticipantIds) {
+      return {
+        activeParticipantIds: new Set([...localActiveParticipantIds, ...sharedActiveParticipantIds]),
+        detachedParticipantIds: new Set<string>(),
+        sharedPresenceAuthoritative: true,
+      };
+    }
+  } catch (error) {
+    // REST and Socket.IO reads still have the process-local fallback when
+    // Redis is briefly unavailable.
+    log("warn", "v2_presence_shared_read_failed", {
+      roomCode: normalizedCode,
+      error: error instanceof Error ? error.message : "unknown_error",
+    });
+  }
+  return {
+    activeParticipantIds: new Set(localActiveParticipantIds),
+    detachedParticipantIds: detached,
+    sharedPresenceAuthoritative: false,
+  };
+}
+
+function v2PresenceProjection(
+  projection: RoomProjection,
+  activeParticipantIds: ReadonlySet<string>,
+  detachedParticipantIds: ReadonlySet<string>,
+  sharedPresenceAuthoritative = false,
+) {
+  return {
+    ...projection,
+    participants: projection.participants.map((participant) => ({
+      ...participant,
+      connected: sharedPresenceAuthoritative
+        ? activeParticipantIds.has(participant.id)
+        : activeParticipantIds.has(participant.id)
+        ? true
+        : detachedParticipantIds.has(participant.id)
+          ? false
+          : participant.connected,
+    })),
+  } satisfies RoomProjection;
+}
+
+function v2ParticipantPresenceProjection(projection: RoomProjection, participantId: string | null, connected: boolean) {
+  if (!participantId) return projection;
+  return {
+    ...projection,
+    participants: projection.participants.map((participant) => participant.id === participantId ? { ...participant, connected } : participant),
+  } satisfies RoomProjection;
+}
+
+async function markV2ParticipantDetachedIfUnused(roomCode: string, participantId: string, excludedSocketId?: string) {
+  try {
+    const sockets = await io.in(roomCode).fetchSockets();
+    const stillConnected = sockets.some((candidate) =>
+      candidate.id !== excludedSocketId &&
+      readOptionalString(candidate.data.v2RoomCode)?.toUpperCase() === roomCode &&
+      readOptionalString(candidate.data.v2ParticipantId) === participantId,
+    );
+    if (excludedSocketId) {
+      // Remove this transport's field even when another tab is still online;
+      // otherwise the disconnected field survives until the hash TTL.
+      await setV2ParticipantPresence(roomCode, participantId, false, excludedSocketId);
+    }
+    if (!stillConnected) await setV2PresenceOverride(roomCode, participantId, false, excludedSocketId);
+  } catch {
+    // Presence is best effort; never issue a domain command from a transport event.
+    await setV2PresenceOverride(roomCode, participantId, false, excludedSocketId);
+  }
+}
+
+async function bindV2Socket(socket: V2SocketLike, roomCode: string, participantId: string | null, token: string | undefined) {
+  const normalizedCode = roomCode.trim().toUpperCase();
+  const previousRoomCode = readOptionalString(socket.data.v2RoomCode)?.toUpperCase() ?? null;
+  const previousParticipantId = readOptionalString(socket.data.v2ParticipantId) ?? null;
+  if (previousRoomCode && (previousRoomCode !== normalizedCode || previousParticipantId !== participantId)) {
+    if (previousParticipantId) await markV2ParticipantDetachedIfUnused(previousRoomCode, previousParticipantId, socket.id);
+    if (previousRoomCode !== normalizedCode) await socket.leave(previousRoomCode);
+  }
+
+  await socket.join(normalizedCode);
+  socket.data.v2RoomCode = normalizedCode;
+  socket.data.v2ParticipantId = participantId ?? undefined;
+  socket.data.v2Token = token;
+  if (participantId) await setV2PresenceOverride(normalizedCode, participantId, true, socket.id);
+}
+
+async function detachV2ParticipantFromRoom(roomCode: string, participantId: string) {
+  const normalizedCode = roomCode.trim().toUpperCase();
+  try {
+    const sockets = await io.in(normalizedCode).fetchSockets();
+    await Promise.all(sockets
+      .filter((socket) =>
+        readOptionalString(socket.data.v2RoomCode)?.toUpperCase() === normalizedCode &&
+        readOptionalString(socket.data.v2ParticipantId) === participantId,
+      )
+      .map(async (socket) => {
+        await socket.leave(normalizedCode);
+        delete socket.data.v2RoomCode;
+        delete socket.data.v2ParticipantId;
+        delete socket.data.v2Token;
+      }));
+  } finally {
+    await setV2PresenceOverride(normalizedCode, participantId, false);
+  }
+}
+
+async function executeV2Command(command: RoomCommand, token: string | undefined): Promise<RoomCommandResult> {
+  // A user-requested leave is a domain state change: it marks the participant
+  // disconnected and removes only their own submitted state. A transport
+  // disconnect is handled separately by markV2ParticipantDisconnected and
+  // never bumps the game version.
+  if (command.kind === "reconnect") {
+    if (!command.participantId) throw new RoomDomainError("participant_not_found");
+    if (!token) throw new RoomDomainError("reconnect_token_invalid");
+    const projection = await domainRoomService.reconnect(command.roomCode, command.participantId, token);
+    await setV2PresenceOverride(command.roomCode, command.participantId, true, "rest");
+    return v2ParticipantPresenceProjection(projection, command.participantId, true);
+  }
+
+  if (!sharedIdempotencyEnabled) {
+    return domainRoomService.execute(command, token);
+  }
+
+  if (command.kind === "join") {
+    // Join has no authenticated participant yet. The client-generated nonce
+    // is a pre-auth capability used only to replay its own credential result;
+    // older clients without it deliberately bypass caching rather than
+    // sharing credentials under a bare command id.
+    const joinNonce = typeof command.joinNonce === "string" ? command.joinNonce.trim() : "";
+    if (joinNonce.length < 16) return domainRoomService.execute(command, token);
+    const context = createIdempotencyContext(command.roomCode, command.commandId, joinNonce, command);
+    if (!context) return domainRoomService.execute(command, token);
+    try {
+      return await executeWithSharedIdempotency(context, () => domainRoomService.execute(command, token));
+    } catch (error) {
+      if (error instanceof Error && error.message === "idempotency_conflict") {
+        throw new RoomDomainError("command_id_reuse");
+      }
+      throw error;
+    }
+  }
+
+  // Authenticate before looking up or creating the shared result. The actor
+  // is part of the stable key, so a different participant cannot replay a
+  // result merely by knowing a command id.
+  if (!command.participantId) throw new RoomDomainError("participant_not_found");
+  const authenticated = await domainRoomService.getProjection(command.roomCode, command.participantId, token);
+  if (!authenticated) throw new RoomDomainError("room_not_found");
+  if (typeof command.commandId !== "string" || !command.commandId.trim()) throw new RoomDomainError("command_id_required");
+  const context = createIdempotencyContext(command.roomCode, command.commandId, command.participantId, command);
+  if (!context) return domainRoomService.execute(command, token);
+
+  try {
+    return await executeWithSharedIdempotency(context, () => domainRoomService.execute(command, token));
+  } catch (error) {
+    if (error instanceof Error && error.message === "idempotency_conflict") {
+      throw new RoomDomainError("command_id_reuse");
+    }
+    throw error;
+  }
+}
+
+async function applyV2PresenceProjection(projection: RoomProjection) {
+  const normalizedCode = projection.code.trim().toUpperCase();
+  const sockets = (await io.in(normalizedCode).fetchSockets()).filter((socket) =>
+    readOptionalString(socket.data.v2RoomCode)?.toUpperCase() === normalizedCode,
+  );
+  const activeParticipantIds = new Set(
+    sockets
+      .map((socket) => readOptionalString(socket.data.v2ParticipantId))
+      .filter((participantId): participantId is string => Boolean(participantId)),
+  );
+  const presence = await readV2PresenceSets(normalizedCode, activeParticipantIds);
+  return v2PresenceProjection(
+    projection,
+    presence.activeParticipantIds,
+    presence.detachedParticipantIds,
+    presence.sharedPresenceAuthoritative,
+  );
+}
+
+async function emitV2RoomProjections(roomCode: string, options: { excludeSocketId?: string } = {}) {
+  const normalizedCode = roomCode.trim().toUpperCase();
+  try {
+    const publicProjection = await domainRoomService.getProjection(normalizedCode, null);
+    if (!publicProjection) {
+      v2DetachedParticipants.delete(normalizedCode);
+      return true;
+    }
+    const sockets = (await io.in(normalizedCode).fetchSockets()).filter((socket) =>
+      readOptionalString(socket.data.v2RoomCode)?.toUpperCase() === normalizedCode,
+    );
+    const activeParticipantIds = new Set(
+      sockets
+        .map((socket) => readOptionalString(socket.data.v2ParticipantId))
+        .filter((participantId): participantId is string => Boolean(participantId)),
+    );
+    const presence = await readV2PresenceSets(normalizedCode, activeParticipantIds);
+
+    await Promise.all(sockets.map(async (socket) => {
+      if (socket.id === options.excludeSocketId) return;
+      const participantId = readOptionalString(socket.data.v2ParticipantId) ?? null;
+      const token = readOptionalString(socket.data.v2Token);
+      try {
+        const projection = participantId
+          ? await domainRoomService.getProjection(normalizedCode, participantId, token)
+          : publicProjection;
+        if (!projection) return;
+        socket.emit(
+          "v2:projection",
+          v2PresenceProjection(
+            projection,
+            presence.activeParticipantIds,
+            presence.detachedParticipantIds,
+            presence.sharedPresenceAuthoritative,
+          ),
+        );
+      } catch (error) {
+        socket.emit("v2:error", { error: v2ErrorCode(error) });
+      }
+    }));
+    return true;
+  } catch (error) {
+    log("warn", "v2_projection_broadcast_failed", { roomCode: normalizedCode, error: v2ErrorCode(error) });
+    return false;
+  }
+}
+
 app.post("/v2/rooms", async (request, response) => {
   try {
     if (!allowV2Rate(request, "create", 20)) { response.status(429).json({ error: "rate_limited" }); return; }
@@ -106,7 +517,7 @@ app.post("/v2/rooms", async (request, response) => {
     if (!hostName) throw new RoomDomainError("nickname_required");
     response.status(201).json(await domainRoomService.createRoom(hostName));
   } catch (error) {
-    const code = error instanceof RoomDomainError ? error.code : error instanceof Error && error.message === "version_conflict" ? "version_conflict" : "internal_error";
+    const code = v2ErrorCode(error);
     response.status(code === "internal_error" ? 500 : 400).json({ error: code, correlationId: response.locals.correlationId });
   }
 });
@@ -119,9 +530,9 @@ app.get("/v2/rooms/:code", async (request, response) => {
       readOptionalString(request.header("x-room-token")),
     );
     if (!projection) { response.status(404).json({ error: "room_not_found" }); return; }
-    response.json(projection);
+    response.json(await applyV2PresenceProjection(projection));
   } catch (error) {
-    const code = error instanceof RoomDomainError ? error.code : error instanceof Error && error.message === "version_conflict" ? "version_conflict" : "internal_error";
+    const code = v2ErrorCode(error);
     const status = code === "internal_error" ? 500 : code === "version_conflict" ? 409 : code === "participant_not_found" ? 404 : 403;
     response.status(status).json({ error: code, correlationId: response.locals.correlationId });
   }
@@ -132,12 +543,27 @@ app.post("/v2/rooms/:code/commands", async (request, response) => {
     const roomCode = request.params.code.trim().toUpperCase();
     const scope = request.body?.kind === "join" || request.body?.kind === "reconnect" ? "join" : "command";
     if (!allowV2Rate(request, scope, scope === "join" ? 30 : 120, roomCode)) { response.status(429).json({ error: "rate_limited" }); return; }
-    const command = { ...(request.body ?? {}), roomCode: request.params.code } as RoomCommand;
-    const result = await domainRoomService.execute(command, readOptionalString(request.header("x-room-token")) ?? undefined);
-    response.json(result);
+    const command = { ...(request.body ?? {}), roomCode } as RoomCommand;
+    const result = await executeV2Command(command, readOptionalString(request.header("x-room-token")) ?? undefined);
+    const departedParticipantId = command.kind === "leave"
+      ? command.participantId
+      : command.kind === "kick"
+        ? command.targetParticipantId
+        : undefined;
+    if (departedParticipantId) {
+      await detachV2ParticipantFromRoom(roomCode, departedParticipantId);
+    } else if (command.kind === "reconnect" && command.participantId) {
+      await setV2PresenceOverride(roomCode, command.participantId, true, "rest");
+    }
+    const responseProjection = command.kind === "leave"
+      ? v2ParticipantPresenceProjection(result, command.participantId ?? null, false)
+      : result;
+    await emitV2RoomProjections(roomCode);
+    response.json(responseProjection);
   } catch (error) {
-    const code = error instanceof RoomDomainError ? error.code : error instanceof Error && error.message === "version_conflict" ? "version_conflict" : "internal_error";
-    response.status(code === "internal_error" ? 500 : 409).json({ error: code, correlationId: response.locals.correlationId });
+    const code = v2ErrorCode(error);
+    const status = code === "internal_error" ? 500 : code === "version_conflict" ? 409 : code === "room_not_found" || code === "participant_not_found" ? 404 : 400;
+    response.status(status).json({ error: code, correlationId: response.locals.correlationId });
   }
 });
 
@@ -598,64 +1024,66 @@ app.post("/rooms/:code/close", async (request, response, next) => {
 });
 
 io.on("connection", (socket) => {
-  // Versioned command/event boundary. This is intentionally kept separate
-  // from the legacy room events while clients migrate to the domain API.
-  socket.on("v2:command", async (payload: { command?: unknown; token?: unknown }) => {
-    if (!payload || typeof payload.command !== "object" || payload.command === null) {
-      socket.emit("v2:error", { error: "command_required" });
-      return;
-    }
-    try {
-      const command = payload.command as RoomCommand;
+  // Canonical v2 Socket.IO boundary. Legacy `room:*` events below are kept
+  // for compatibility and never receive v2 credentials or private fields.
+  socket.on("v2:command", async (payload: unknown, ack?: V2SocketAck) => {
+    await handleV2SocketRequest(socket, ack, async () => {
+      const body = asRecord(payload);
+      const commandValue = body?.command;
+      if (!commandValue || typeof commandValue !== "object" || Array.isArray(commandValue)) throw new RoomDomainError("command_required");
+      const command = commandValue as RoomCommand;
       const roomCode = readOptionalString(command.roomCode)?.toUpperCase();
-      if (!roomCode) {
-        socket.emit("v2:error", { error: "room_code_required" });
-        return;
+      if (!roomCode) throw new RoomDomainError("room_code_required");
+      if (!allowV2SocketRate(socket, roomCode, 120)) throw new RoomDomainError("rate_limited");
+
+      const token = readOptionalString(body.token);
+      const result = await executeV2Command({ ...command, roomCode }, token);
+      const participantId = result.self?.id ?? readOptionalString(command.participantId) ?? null;
+      if (command.kind === "leave") {
+        // Leave is an explicit participant action. Remove every tab/device
+        // for that participant, not only the socket that issued the command.
+        if (participantId) await detachV2ParticipantFromRoom(roomCode, participantId);
+        const leavingProjection = v2ParticipantPresenceProjection(result, participantId, false);
+        await emitV2RoomProjections(roomCode);
+        socket.emit("v2:projection", leavingProjection);
+        return { ok: true, projection: leavingProjection };
       }
-      if (!allowV2SocketRate(socket, roomCode, 120)) {
-        socket.emit("v2:error", { error: "rate_limited" });
-        return;
+
+      if (command.kind === "kick" && command.targetParticipantId) {
+        await detachV2ParticipantFromRoom(roomCode, command.targetParticipantId);
+        await emitV2RoomProjections(roomCode);
+        socket.emit("v2:projection", result);
+        return { ok: true, projection: result };
       }
-      const result = await domainRoomService.execute(
-        { ...command, roomCode },
-        readOptionalString(payload.token),
-      );
-      socket.join(roomCode);
-      socket.data.v2RoomCode = roomCode;
-      socket.data.v2ParticipantId = result.self?.id ?? undefined;
-      socket.data.v2Token = readOptionalString(payload.token) ?? result.credentials?.reconnectToken;
-      // Broadcast only the public projection. Credentials are returned to the
-      // issuing socket and are never sent to another participant.
-      const publicProjection = await domainRoomService.getProjection(roomCode, null);
-      if (publicProjection) io.to(roomCode).emit("v2:projection", publicProjection);
+
+      await bindV2Socket(socket, roomCode, participantId, token ?? result.credentials?.reconnectToken);
+      await emitV2RoomProjections(roomCode, { excludeSocketId: socket.id });
+      // Only the issuing socket receives a command result; credentials stay
+      // in this direct response and never enter the room broadcast.
       socket.emit("v2:projection", result);
-    } catch (error) {
-      const code = error instanceof RoomDomainError ? error.code : "internal_error";
-      socket.emit("v2:error", { error: code });
-    }
+      return { ok: true, projection: result };
+    });
   });
 
-  socket.on("v2:subscribe", async (payload: { roomCode?: unknown; participantId?: unknown; token?: unknown }) => {
-    const roomCode = readOptionalString(payload?.roomCode)?.toUpperCase();
-    if (!roomCode) {
-      socket.emit("v2:error", { error: "room_code_required" });
-      return;
-    }
-    if (!allowV2SocketRate(socket, roomCode, 120)) {
-      socket.emit("v2:error", { error: "rate_limited" });
-      return;
-    }
-    const participantId = readOptionalString(payload?.participantId) ?? null;
-    const projection = await domainRoomService.getProjection(roomCode, participantId, readOptionalString(payload?.token));
-    if (!projection) {
-      socket.emit("v2:error", { error: "room_not_found" });
-      return;
-    }
-    socket.join(roomCode);
-    socket.data.v2RoomCode = roomCode;
-    socket.data.v2ParticipantId = participantId ?? undefined;
-    socket.data.v2Token = readOptionalString(payload?.token);
-    socket.emit("v2:projection", projection);
+  socket.on("v2:subscribe", async (payload: unknown, ack?: V2SocketAck) => {
+    await handleV2SocketRequest(socket, ack, async () => {
+      const body = asRecord(payload);
+      const roomCode = readOptionalString(body?.roomCode)?.toUpperCase();
+      if (!roomCode) throw new RoomDomainError("room_code_required");
+      if (!allowV2SocketRate(socket, roomCode, 120)) throw new RoomDomainError("rate_limited");
+      const participantId = readOptionalString(body?.participantId) ?? null;
+      const token = readOptionalString(body?.token);
+      const projection = await domainRoomService.getProjection(roomCode, participantId, token);
+      if (!projection) throw new RoomDomainError("room_not_found");
+
+      await bindV2Socket(socket, roomCode, participantId, token);
+      await emitV2RoomProjections(roomCode, { excludeSocketId: socket.id });
+      const ownProjection = v2ParticipantPresenceProjection(projection, participantId, true);
+      socket.emit("v2:projection", ownProjection);
+      // Socket.IO ACK is intentionally explicit so subscribers can know that
+      // authentication and room membership succeeded without parsing events.
+      return { ok: true, projection: ownProjection };
+    }, "v2:subscribe:ack");
   });
 
   socket.on("room:join", async (payload: { roomCode?: string; participantId?: string; token?: string }) => {
@@ -808,51 +1236,121 @@ io.on("connection", (socket) => {
       return;
     }
 
-    await redis.set(`room:${room.code}:state`, JSON.stringify(room.state));
+    await cacheLegacyRoomState(room.code, room.state);
     await emitRoomSnapshot(room.code);
   });
 
   socket.on("disconnect", async () => {
+    const v2RoomCode = readOptionalString(socket.data.v2RoomCode)?.toUpperCase() ?? null;
     await markV2ParticipantDisconnected(socket);
     const roomCode = socket.data.roomCode as string | undefined;
 
-    await unregisterParticipantSocketConnection(socket.id);
+    try {
+      await unregisterParticipantSocketConnection(socket.id);
+    } catch (error) {
+      // Legacy presence cleanup must not prevent the canonical v2 presence
+      // projection from being refreshed after a physical disconnect.
+      log("warn", "legacy_presence_cleanup_failed", {
+        socketId: socket.id,
+        error: error instanceof Error ? error.message : "unknown_error",
+      });
+    }
 
     if (roomCode) {
       await emitRoomSnapshot(roomCode);
     }
+    if (v2RoomCode) {
+      await emitV2RoomProjections(v2RoomCode);
+    }
   });
 });
 
-const cleanupTimer = setInterval(() => {
-  if (domainRepository instanceof PostgresRoomRepository) {
-    void domainRepository.cleanupExpired().then((count) => { if (count > 0) log("info", "v2_rooms_expired", { count }); })
-      .catch(() => log("warn", "v2_cleanup_failed"));
+type ActiveRoomCodeRepository = typeof domainRepository & {
+  listActiveCodes?: (now?: number) => Promise<string[]>;
+};
+
+async function tickActiveV2Rooms() {
+  const repository = domainRepository as ActiveRoomCodeRepository;
+  if (!repository.listActiveCodes) return;
+  try {
+    const codes = await repository.listActiveCodes(Date.now());
+    await Promise.all(codes.map(async (code) => {
+      const before = await domainRoomService.getProjection(code, null);
+      const after = await domainRoomService.tick(code);
+      if (before && after && after.version !== before.version) {
+        await emitV2RoomProjections(code);
+      }
+    }));
+  } catch (error) {
+    log("warn", "v2_tick_failed", { error: error instanceof Error ? error.message : "unknown_error" });
   }
-}, config.v2CleanupIntervalMs);
+}
+
+async function drainV2Outbox() {
+  if (!(domainRepository instanceof PostgresRoomRepository)) return;
+  try {
+    const events = await claimV2RoomEvents(50);
+    for (const event of events) {
+      try {
+        if (!await emitV2RoomProjections(event.roomCode)) throw new Error("outbox_dispatch_failed");
+        await markV2RoomEventProcessed(event.id);
+      } catch (error) {
+        await retryV2RoomEvent(event.id, error instanceof Error ? error.message : "outbox_dispatch_failed");
+      }
+    }
+  } catch (error) {
+    log("warn", "v2_outbox_drain_failed", { error: error instanceof Error ? error.message : "unknown_error" });
+  }
+}
+
+async function runV2Cleanup() {
+  const repository = domainRepository as ActiveRoomCodeRepository;
+  if (repository.cleanupExpired) {
+    try {
+      const count = await repository.cleanupExpired(Date.now());
+      if (count > 0) log("info", "v2_rooms_expired", { count });
+    } catch (error) {
+      log("warn", "v2_cleanup_failed", { error: error instanceof Error ? error.message : "unknown_error" });
+    }
+  }
+  await drainV2Outbox();
+}
+
+async function refreshV2PresenceHeartbeats() {
+  try {
+    const sockets = await io.fetchSockets();
+    await Promise.all(sockets.map(async (socket) => {
+      const roomCode = readOptionalString(socket.data.v2RoomCode)?.toUpperCase();
+      const participantId = readOptionalString(socket.data.v2ParticipantId);
+      if (roomCode && participantId) {
+        await setV2PresenceOverride(roomCode, participantId, true, socket.id);
+      }
+    }));
+  } catch (error) {
+    log("warn", "v2_presence_heartbeat_failed", {
+      error: error instanceof Error ? error.message : "unknown_error",
+    });
+  }
+}
+
+const presenceHeartbeatTimer = setInterval(() => { void refreshV2PresenceHeartbeats(); }, Math.max(5_000, Math.floor(config.legacyPresenceHeartbeatTtlMs / 3)));
+presenceHeartbeatTimer.unref();
+const tickTimer = setInterval(() => { void tickActiveV2Rooms(); }, 1_000);
+tickTimer.unref();
+const outboxTimer = setInterval(() => { void drainV2Outbox(); }, 2_000);
+outboxTimer.unref();
+const cleanupTimer = setInterval(() => { void runV2Cleanup(); }, config.v2CleanupIntervalMs);
 cleanupTimer.unref();
 
-async function markV2ParticipantDisconnected(socket: { data: Record<string, unknown> }) {
-  const roomCode = typeof socket.data.v2RoomCode === "string" ? socket.data.v2RoomCode : null;
-  const participantId = typeof socket.data.v2ParticipantId === "string" ? socket.data.v2ParticipantId : null;
-  const token = typeof socket.data.v2Token === "string" ? socket.data.v2Token : null;
-  if (!roomCode || !participantId || !token) return;
-  try {
-    const projection = await domainRoomService.getProjection(roomCode, participantId, token);
-    if (!projection?.self) return;
-    await domainRoomService.execute(
-      {
-        roomCode,
-        commandId: `disconnect-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-        expectedVersion: projection.version,
-        kind: "leave",
-        participantId,
-      },
-      token,
-    );
-  } catch {
-    // A simultaneous reconnect or kick already resolved the disconnect.
-  }
+async function markV2ParticipantDisconnected(socket: { id: string; data: Record<string, unknown> }) {
+  const roomCode = readOptionalString(socket.data.v2RoomCode)?.toUpperCase() ?? null;
+  const participantId = readOptionalString(socket.data.v2ParticipantId) ?? null;
+  if (!roomCode || !participantId) return;
+  // Do not translate a transport disconnect into the domain `leave` command:
+  // the current domain implementation increments the optimistic-lock version
+  // for leave even though no game state changed. Presence is projected from
+  // Socket.IO membership and this short-lived override instead.
+  await markV2ParticipantDetachedIfUnused(roomCode, participantId, socket.id);
 }
 
 app.use((error: unknown, request: express.Request, response: express.Response, _next: express.NextFunction) => {
@@ -2787,10 +3285,6 @@ function sortJsonValue(value: unknown): unknown {
 }
 
 function sanitizeRoomSnapshotForParticipant(snapshot: RoomSnapshot, requester: RoomParticipant | null): RoomSnapshot {
-  if (requester?.role === "host") {
-    return snapshot;
-  }
-
   const nextSnapshot = cloneJson(snapshot) as RoomSnapshot;
   const state = asRecord(nextSnapshot.room.state);
   if (!state) {
@@ -2798,6 +3292,10 @@ function sanitizeRoomSnapshotForParticipant(snapshot: RoomSnapshot, requester: R
   }
 
   const currentGame = nextSnapshot.room.currentGame ?? readProgressState(state, null).gameKey;
+  if (!currentGame || !isSupportedRoomGameKey(currentGame)) {
+    nextSnapshot.room.state = sanitizeRoomProgressState(state, currentGame);
+    return nextSnapshot;
+  }
   if (currentGame === "werewolf-game") {
     maskWerewolfState(state, requester?.id ?? null);
   }
@@ -2813,9 +3311,24 @@ function sanitizeRoomSnapshotForParticipant(snapshot: RoomSnapshot, requester: R
   if (currentGame === "anonymous-box") {
     maskAnonymousQuestionState(state);
   }
+  if (currentGame === "turtle-soup") {
+    maskTurtleSoupState(state);
+  }
   maskParticipantMapState(state, currentGame, requester?.id ?? null);
 
   return nextSnapshot;
+}
+
+function sanitizeRoomProgressState(state: Record<string, unknown>, currentGame: string | null) {
+  const progress = readProgressState(state, currentGame);
+  return {
+    phase: progress.phase,
+    gameKey: progress.gameKey,
+    gameTitle: progress.gameTitle,
+    step: progress.step,
+    message: progress.message,
+    updatedBy: progress.updatedBy,
+  };
 }
 
 function maskWerewolfState(state: Record<string, unknown>, participantId: string | null) {
@@ -2854,11 +3367,10 @@ function maskNgWordState(state: Record<string, unknown>, participantId: string |
   if (!ngWord || ngWord.step === "result") return;
 
   ngWord.assignments = maskAssignments(ngWord.assignments, (assignment) => {
+    // NG words are intentionally visible to everyone except the person who
+    // must avoid saying their own word. Public projections hide every word.
     if (participantId && assignment.playerId !== participantId) return assignment;
-    return {
-      ...assignment,
-      word: "",
-    };
+    return { ...assignment, word: "" };
   });
 }
 
@@ -2905,6 +3417,15 @@ function maskAnonymousQuestionState(state: Record<string, unknown>) {
   });
 }
 
+function maskTurtleSoupState(state: Record<string, unknown>) {
+  const turtleSoup = asRecord(state.turtleSoup);
+  if (!turtleSoup || turtleSoup.step === "complete") return;
+  // The case id is enough for a client with the bundled catalog to recover
+  // the answer, so keep the facilitator's answer key out of participant views.
+  turtleSoup.caseId = null;
+  turtleSoup.deckCaseIds = [];
+}
+
 function maskParticipantMapState(state: Record<string, unknown>, gameKey: string | null, participantId: string | null) {
   const mapKeysByGame: Record<string, string[]> = {
     "two-choice": ["votes"],
@@ -2922,6 +3443,9 @@ function maskParticipantMapState(state: Record<string, unknown>, gameKey: string
     "emo-hint-game": ["guesses"],
     "person-hint-quiz": ["guesses"],
     "humming-intro-quiz": ["guesses"],
+    "word-wolf": ["votes"],
+    "werewolf-game": ["votes"],
+    "party-pack": ["votes", "guesses"],
   };
   const mapKeys = gameKey ? mapKeysByGame[gameKey] : undefined;
   if (!mapKeys) return;
@@ -2932,7 +3456,17 @@ function maskParticipantMapState(state: Record<string, unknown>, gameKey: string
       : {};
   };
 
-  const directBranchKey = gameKey === "two-choice" ? "twoChoice" : gameKey === "impression-ranking" ? "impression" : null;
+  const directBranchKey = gameKey === "two-choice"
+    ? "twoChoice"
+    : gameKey === "impression-ranking"
+      ? "impression"
+      : gameKey === "word-wolf"
+        ? "wordWolf"
+        : gameKey === "werewolf-game"
+          ? "werewolf"
+          : gameKey === "party-pack"
+            ? "partyPack"
+            : null;
   if (directBranchKey) {
     const branch = asRecord(state[directBranchKey]);
     if (!branch || branch.step === "result" || branch.step === "complete") return;

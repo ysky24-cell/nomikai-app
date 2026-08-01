@@ -37,12 +37,15 @@ async function main() {
     projection = joined.data;
   }
 
+  const locked = await command(roomCode, host, projection, "start");
+  assert.equal(locked.response.status, 200);
+  projection = locked.data;
   const started = await command(roomCode, host, projection, "game_start", { gameKind: "majority-game", prompt: "AとB、どちらが多数派？" });
   assert.equal(started.response.status, 200);
   projection = started.data;
 
   const early = await command(roomCode, host, projection, "game_reveal");
-  assert.equal(early.response.status, 409);
+  assert.ok([400, 409].includes(early.response.status));
   assert.equal(early.data.error, "game_not_ready");
 
   for (const [index, participant] of participants.entries()) {

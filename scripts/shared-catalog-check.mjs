@@ -42,6 +42,8 @@ for (const gameKey of legacyKeys) {
     players.push({ id: joined.credentials.participantId, token: joined.credentials.reconnectToken });
   }
   const prompt = gameKey === "count-up-game" ? "目標12" : `${gameKey} acceptance`;
+  const locked = await command(created.room, host.token, { commandId: `${gameKey}-lock`, expectedVersion: version, kind: "start", participantId: host.id });
+  version = locked.version;
   const started = await command(created.room, host.token, { commandId: `${gameKey}-start`, expectedVersion: version, kind: "game_start", participantId: host.id, gameKind: "legacy-game", legacyGameKey: gameKey, mode: "shared-input", prompt });
   version = started.version;
   const early = await fetch(`${api}/v2/rooms/${created.room.code}/commands`, { method: "POST", headers: { "content-type": "application/json", "x-room-token": host.token }, body: JSON.stringify({ commandId: `${gameKey}-early`, expectedVersion: version, kind: "game_reveal", participantId: host.id }) });

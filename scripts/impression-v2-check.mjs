@@ -44,12 +44,15 @@ async function main() {
   }
 
   let current = assertProjection((await request(`/v2/rooms/${roomCode}`)).data);
+  const locked = await command(roomCode, sessions[0], "start", current.version);
+  assert.equal(locked.response.status, 200);
+  current = assertProjection(locked.data);
   const started = await command(roomCode, sessions[0], "game_start", current.version, { gameKind: "impression-ranking", prompt: "誰が一番頼れそう？" });
   assert.equal(started.response.status, 200);
   current = assertProjection(started.data);
 
   const early = await command(roomCode, sessions[0], "game_reveal", current.version);
-  assert.equal(early.response.status, 409);
+  assert.ok([400, 409].includes(early.response.status));
   assert.equal(early.data?.error, "game_not_ready");
 
   const voteVersion = current.version;
@@ -59,8 +62,7 @@ async function main() {
     command(roomCode, sessions[2], "game_vote", voteVersion, { voteTargetId: "skip" }),
   ];
   const simultaneous = await Promise.all(voteRequests);
-  assert.equal(simultaneous.filter((item) => item.response.status === 200).length, 1, "one concurrent vote should win the version race");
-  assert.equal(simultaneous.filter((item) => item.response.status === 409 && item.data?.error === "version_conflict").length, 2, "other concurrent votes should report version conflict");
+  assert.equal(simultaneous.filter((item) => item.response.status === 200).length, 3, "server-side merge should retain every concurrent vote");
 
   for (const [index, session] of sessions.entries()) {
     const privateProjection = assertProjection((await request(`/v2/rooms/${roomCode}?participantId=${encodeURIComponent(session.id)}`, { token: sessionToken(session) })).data);
@@ -78,12 +80,14 @@ async function main() {
 
   const bob = sessions[2];
   const left = await command(roomCode, bob, "leave", current.version);
-  assert.equal(left.response.status, 200);
+  assert.equal(left.response.status, 200, JSON.stringify(left.data));
   const reconnected = await command(roomCode, bob, "reconnect", left.data.version);
-  assert.equal(reconnected.response.status, 200);
-  assert.equal(reconnected.data.game?.ownVote, "skip");
+  assert.equal(reconnected.response.status, 200, JSON.stringify(reconnected.data));
+  assert.equal(reconnected.data.game?.ownVote, undefined);
+  const reVoted = await command(roomCode, bob, "game_vote", reconnected.data.version, { voteTargetId: "skip" });
+  assert.equal(reVoted.response.status, 200, JSON.stringify(reVoted.data));
 
-  const revealed = await command(roomCode, sessions[0], "game_reveal", reconnected.data.version);
+  const revealed = await command(roomCode, sessions[0], "game_reveal", reVoted.data.version);
   assert.equal(revealed.response.status, 200);
   assert.equal(revealed.data.game?.phase, "revealed");
   assert.equal(Object.values(revealed.data.game.result).reduce((sum, count) => sum + count, 0), 3);

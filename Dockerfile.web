@@ -1,4 +1,4 @@
-FROM node:22-alpine
+FROM node:22-alpine AS development
 
 WORKDIR /app
 
@@ -9,3 +9,29 @@ COPY . .
 
 EXPOSE 5173
 CMD ["npm", "run", "dev", "--", "--host", "0.0.0.0"]
+
+FROM development AS build
+
+ARG VITE_API_URL
+ARG VITE_ROOM_MODE=required
+ENV VITE_API_URL=$VITE_API_URL
+ENV VITE_ROOM_MODE=$VITE_ROOM_MODE
+
+RUN node --input-type=module -e 'const raw = process.env.VITE_API_URL?.trim(); if (!raw) throw new Error("VITE_API_URL_required"); const url = new URL(raw); const host = url.hostname.replace(/^\[|\]$/g, "").toLowerCase(); if (!["http:", "https:"].includes(url.protocol) || !url.hostname || url.username || url.password || url.pathname !== "/" || url.search || url.hash || ["localhost", "127.0.0.1", "0.0.0.0", "::1", "::"].includes(host)) throw new Error("invalid_production_vite_api_url");' \
+  && npm run build \
+  && find dist -type f -exec sed -i 's#http://localhost:3000#https://disabled.invalid#g' {} + \
+  && ! grep -R -F "http://localhost:3000" dist
+
+FROM nginx:1.27-alpine AS production
+
+RUN apk add --no-cache libcap \
+  && setcap 'cap_net_bind_service=+ep' /usr/sbin/nginx \
+  && mkdir -p /var/cache/nginx /var/run \
+  && chown -R nginx:nginx /var/cache/nginx /var/run
+
+COPY --from=build --chown=nginx:nginx /app/dist /usr/share/nginx/html/nomikai-app
+RUN chown -R nginx:nginx /usr/share/nginx/html
+
+USER nginx
+
+EXPOSE 80

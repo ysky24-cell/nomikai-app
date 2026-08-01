@@ -22,6 +22,13 @@ test("第一印象ランキングは正式版ゲームとして同期ルーム�
   await expect(page).not.toHaveURL(/#\/games\/impression-ranking/);
 });
 
+test("v2のブリッジ対象ゲームは簡易同期版として表示される", async ({ page }) => {
+  await page.goto("/?sync=v2");
+  const card = page.locator("article.game-card").filter({ hasText: "山手線ゲーム" });
+  await expect(card.getByText("簡易同期版（ブリッジ）", { exact: true })).toHaveCount(1);
+  await expect(card.getByText("正式同期版", { exact: true })).toHaveCount(0);
+});
+
 test("定番ゲームパックはv2選択時に全ゲーム同期へ切り替えて案内する", async ({ page }) => {
   await page.goto("/?sync=v2");
   const card = page.locator("article.game-card").filter({ hasText: "定番ゲームパック" });

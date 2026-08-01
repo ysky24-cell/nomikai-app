@@ -15,7 +15,30 @@ jobs:
   quality:
     name: Lint, typecheck, tests, build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: nomikai
+          POSTGRES_PASSWORD: nomikai
+          POSTGRES_DB: nomikai
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nomikai -d nomikai"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,6 +47,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            server/package-lock.json
       - name: Install dependencies
         run: npm ci
       - name: Lint
@@ -34,6 +60,59 @@ jobs:
         run: npm test -- --reporter=dot
       - name: Production build
         run: npm run build
+
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+
+      - name: Server typecheck
+        working-directory: server
+        run: npm run typecheck
+
+      - name: Server tests
+        working-directory: server
+        run: npm test
+
+      - name: Server persistence integration checks
+        working-directory: server
+        env:
+          DATABASE_URL: postgres://nomikai:nomikai@localhost:5432/nomikai
+          REDIS_URL: redis://localhost:6379
+          CLIENT_ORIGIN: http://localhost:5173
+          RUN_PERSISTENCE_INTEGRATION: "1"
+        run: npm run test:integration
+
+      - name: Server production build
+        working-directory: server
+        run: npm run build
+
+      - name: Start API for v2 HTTP regression checks
+        env:
+          DATABASE_URL: postgres://nomikai:nomikai@127.0.0.1:5432/nomikai
+          REDIS_URL: redis://127.0.0.1:6379
+          CLIENT_ORIGIN: http://127.0.0.1:5173
+          V2_REPOSITORY: postgres
+        run: |
+          nohup node server/dist/index.js >/tmp/nomikai-api.log 2>&1 &
+          echo $! >/tmp/nomikai-api.pid
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:3000/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/nomikai-api.log
+          exit 1
+
+      - name: v2 HTTP regression checks
+        env:
+          NOMIKAI_SHARED_KEYS: yamanote,party-pack,truth-lie-game,count-up-game,reverse-word-game
+        run: |
+          npm run room:impression:check -- http://127.0.0.1:3000
+          npm run room:shared-majority:check -- http://127.0.0.1:3000
+          npm run room:shared-catalog:check -- http://127.0.0.1:3000
+          npm run room:kick:check -- http://127.0.0.1:3000
+          npm run room:leave:check -- http://127.0.0.1:3000
 
   e2e:
     name: Browser smoke test

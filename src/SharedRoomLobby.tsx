@@ -13,7 +13,11 @@ import {
 } from "lucide-react";
 import { io, type Socket } from "socket.io-client";
 import { QRCodeSVG } from "qrcode.react";
-import { NEW_SYNC_ROOM_GAME_KEYS } from "./syncRoomCatalog";
+import { normalWordWolfTopics } from "./data/wordWolfTopics";
+import {
+  isNativeSyncRoomGameKey,
+  NEW_SYNC_ROOM_GAME_KEYS,
+} from "./syncRoomCatalog";
 import { getSyncGameDefinition } from "./syncGameDefinitions";
 
 type SharedParticipant = {
@@ -27,7 +31,7 @@ type SharedGame =
       kind: "two-choice";
       prompt: string;
       deadlineAt: number | null;
-      phase: "answering" | "revealed";
+      phase: string;
       answeredCount: number;
       participantCount: number;
       ownAnswer?: "A" | "B" | "pass";
@@ -36,7 +40,7 @@ type SharedGame =
   | {
       kind: "impression-ranking";
       prompt: string;
-      phase: "voting" | "revealed";
+      phase: string;
       voteCount: number;
       participantCount: number;
       ownVote?: string;
@@ -45,7 +49,7 @@ type SharedGame =
   | {
       kind: "majority-game";
       prompt: string;
-      phase: "voting" | "revealed";
+      phase: string;
       voteCount: number;
       participantCount: number;
       ownVote?: string;
@@ -67,7 +71,7 @@ type SharedGame =
     }
   | {
       kind: "word-wolf";
-      phase: "discussion" | "voting" | "revealed";
+      phase: string;
       phaseDeadlineAt: number | null;
       participantCount: number;
       voteCount: number;
@@ -78,7 +82,7 @@ type SharedGame =
     }
   | {
       kind: "werewolf";
-      phase: "night" | "day" | "voting" | "revote" | "finished";
+      phase: string;
       phaseDeadlineAt: number | null;
       aliveIds: string[];
       ownRole?: "werewolf" | "seer" | "guard" | "villager";
@@ -94,7 +98,7 @@ type SharedGame =
       prompt: string;
       mode: string;
       progression: "simultaneous" | "turn" | "count-up";
-      phase: "playing" | "finished";
+      phase: string;
       inputCount: number;
       participantCount: number;
       remainingCount: number;
@@ -111,7 +115,7 @@ type SharedGame =
     };
 type SharedProjection = {
   code: string;
-  status: "waiting" | "playing" | "closed";
+  status: "waiting" | "locked" | "playing" | "finished" | "closed";
   version: number;
   participants: SharedParticipant[];
   self: { id: string; role: "host" | "player" } | null;
@@ -142,17 +146,25 @@ type CommandKind =
   | "legacy_input";
 
 const SHARED_SESSION_KEY = "nomikai:shared-room-session:v1";
-const NATIVE_SYNC_GAME_KEYS = new Set([
-  "two-choice",
-  "impression-ranking",
-  "majority-game",
-  "anonymous-box",
-  "word-wolf",
-  "werewolf-game",
-]);
 const LEGACY_SYNC_GAME_KEYS = NEW_SYNC_ROOM_GAME_KEYS.filter(
-  (key) => !NATIVE_SYNC_GAME_KEYS.has(key),
+  (key) => !isNativeSyncRoomGameKey(key),
 );
+const SHARED_GAME_MINIMUMS = {
+  "two-choice": 2,
+  "anonymous-box": 2,
+  "impression-ranking": 3,
+  "majority-game": 3,
+  "word-wolf": 4,
+  werewolf: 4,
+} as const;
+
+function minimumPlayersForGame(gameKey: string) {
+  return SHARED_GAME_MINIMUMS[gameKey as keyof typeof SHARED_GAME_MINIMUMS] ?? 2;
+}
+
+function canStartWerewolf(participantCount: number) {
+  return participantCount === 4 || participantCount >= 6;
+}
 
 function readSession(): SharedSession | null {
   try {
@@ -213,7 +225,12 @@ function ownProjection(
 }
 
 function roomError(error: unknown) {
-  const code = error instanceof Error ? error.message : "request_failed";
+  const code =
+    typeof error === "string"
+      ? error
+      : error instanceof Error
+        ? error.message
+        : "request_failed";
   const labels: Record<string, string> = {
     nickname_required: "ニックネームを入力してください。",
     nickname_taken:
@@ -222,6 +239,8 @@ function roomError(error: unknown) {
     room_full: "このルームは満員です。",
     room_not_joinable: "このルームは参加受付を締め切っています。",
     room_closed: "このルームは終了しています。",
+    werewolf_player_count_invalid:
+      "人狼は4人、または6人以上で開始できます（5人構成は対象外です）。",
     participant_not_found:
       "参加者情報が見つかりません。もう一度参加してください。",
     token_invalid: "権限を確認できませんでした。復帰コードを確認してください。",
@@ -229,12 +248,91 @@ function roomError(error: unknown) {
       "復帰情報が期限切れです。もう一度参加してください。",
     version_conflict: "ルームが更新されました。最新状態を取得しています。",
     rate_limited: "操作が多すぎます。少し待ってから試してください。",
+    participant_required: "参加者情報が見つかりません。もう一度参加してください。",
+    participant_auth_required:
+      "参加者の認証に失敗しました。ルームコードから再参加してください。",
+    subscribe_failed:
+      "同期ルームの購読に失敗しました。参加者情報とAPI設定を確認してください。",
+    command_required: "同期コマンドを送信できませんでした。",
+    room_code_required: "ルームコードを確認してください。",
+    internal_error: "同期サーバーでエラーが発生しました。",
+    socket_action_timeout:
+      "同期サーバーの応答がタイムアウトしました。接続状態を確認してください。",
   };
   return (
     labels[code] ??
     "ルームに接続できませんでした。サーバーの状態を確認してください。"
   );
 }
+
+function normalizeRoomStatus(status: unknown, phase?: unknown): SharedProjection["status"] {
+  const value = typeof status === "string" ? status.trim().toLowerCase() : "";
+  const phaseValue = typeof phase === "string" ? phase.trim().toLowerCase() : "";
+  if (value === "closed") {
+    return "closed";
+  }
+  if (["finished", "complete", "completed", "ended"].includes(value)) {
+    return "finished";
+  }
+  if (value === "locked" || value === "locking") {
+    return "locked";
+  }
+  if (!value) {
+    if (phaseValue === "closed") return "closed";
+    if (["finished", "complete", "completed", "ended"].includes(phaseValue)) {
+      return "finished";
+    }
+    if (phaseValue === "locked" || phaseValue === "locking") return "locked";
+  }
+  if (
+    ["playing", "active", "started", "in_progress"].includes(value) ||
+    (!value && ["playing", "active", "started", "in_progress"].includes(phaseValue))
+  ) {
+    return "playing";
+  }
+  return "waiting";
+}
+
+function normalizeProjection(value: SharedProjection): SharedProjection {
+  const candidate = value as SharedProjection & { phase?: string };
+  return {
+    ...value,
+    status: normalizeRoomStatus(candidate.status, candidate.phase),
+    game: normalizeGamePhase(value.game),
+  };
+}
+
+function normalizeGamePhase(game: SharedGame | undefined): SharedGame | undefined {
+  if (!game || !("phase" in game)) return game;
+  const phase = typeof game.phase === "string" ? game.phase.toLowerCase() : "";
+  if (["complete", "completed", "finished", "closed", "ended"].includes(phase)) {
+    return {
+      ...game,
+      phase: game.kind === "werewolf" || game.kind === "legacy-game" ? "finished" : "revealed",
+    } as SharedGame;
+  }
+  if (phase === "active" || phase === "playing") {
+    if (game.kind === "two-choice") return { ...game, phase: "answering" };
+    if (
+      game.kind === "impression-ranking" ||
+      game.kind === "majority-game" ||
+      game.kind === "word-wolf"
+    ) {
+      return { ...game, phase: "voting" };
+    }
+  }
+  return game;
+}
+
+type RestCommandPayload = {
+  roomCode: string;
+  commandId: string;
+  expectedVersion: number;
+  kind: CommandKind | "join";
+  participantId?: string;
+  joinNonce?: string;
+  [key: string]: unknown;
+};
 
 export function SharedRoomLobby({
   apiUrl,
@@ -266,7 +364,7 @@ export function SharedRoomLobby({
     invitedCode ? "join" : "create",
   );
   const [connection, setConnection] = useState<
-    "idle" | "connecting" | "online" | "offline"
+    "idle" | "connecting" | "subscribing" | "online" | "offline"
   >("idle");
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState("");
@@ -281,6 +379,21 @@ export function SharedRoomLobby({
     LEGACY_SYNC_GAME_KEYS[0] ?? "yamanote",
   );
   const socketRef = useRef<Socket | null>(null);
+  const socketSubscribedRef = useRef(false);
+  const restCommandsRef = useRef(new Map<string, { command: RestCommandPayload; token: string }>());
+  const lastWordWolfTopicIdRef = useRef<string | null>(null);
+
+  function selectWordWolfTopic() {
+    const candidates =
+      normalWordWolfTopics.length > 1 && lastWordWolfTopicIdRef.current
+        ? normalWordWolfTopics.filter(
+            (topic) => topic.id !== lastWordWolfTopicIdRef.current,
+          )
+        : normalWordWolfTopics;
+    const selected = candidates[Math.floor(Math.random() * candidates.length)];
+    if (selected) lastWordWolfTopicIdRef.current = selected.id;
+    return selected ?? { majorityWord: "話題A", minorityWord: "話題B" };
+  }
 
   useEffect(() => {
     onPresenceChange?.(Boolean(session));
@@ -340,12 +453,37 @@ export function SharedRoomLobby({
     [apiUrl],
   );
 
+  const flushRestCommands = useCallback(() => {
+    const socket = socketRef.current;
+    if (!socket || !socketSubscribedRef.current || socket.connected === false) {
+      return;
+    }
+    for (const { command: queuedCommand, token } of restCommandsRef.current.values()) {
+      socket.emit("v2:command", { command: queuedCommand, token });
+    }
+    restCommandsRef.current.clear();
+  }, []);
+
+  const queueRestCommand = useCallback(
+    (command: RestCommandPayload, token: string) => {
+      restCommandsRef.current.set(command.commandId, { command, token });
+      if (restCommandsRef.current.size > 20) {
+        const oldest = restCommandsRef.current.keys().next().value;
+        if (oldest) restCommandsRef.current.delete(oldest);
+      }
+      flushRestCommands();
+    },
+    [flushRestCommands],
+  );
+
   const refresh = useCallback(
     async (nextSession = session) => {
       if (!nextSession) return;
-      let result = await request<SharedProjection>(
-        `/v2/rooms/${encodeURIComponent(nextSession.roomCode)}?participantId=${encodeURIComponent(nextSession.participantId)}`,
-        { token: nextSession.reconnectToken },
+      let result = normalizeProjection(
+        await request<SharedProjection>(
+          `/v2/rooms/${encodeURIComponent(nextSession.roomCode)}?participantId=${encodeURIComponent(nextSession.participantId)}`,
+          { token: nextSession.reconnectToken },
+        ),
       );
       const own = result.participants.find(
         (item) => item.id === nextSession.participantId,
@@ -359,25 +497,36 @@ export function SharedRoomLobby({
       if (!own.connected) {
         const token = nextSession.reconnectToken;
         if (token) {
-          result = await request<SharedProjection>(
-            `/v2/rooms/${encodeURIComponent(nextSession.roomCode)}/commands`,
-            {
-              method: "POST",
-              token,
-              body: {
-                commandId: commandId(),
-                expectedVersion: result.version,
-                kind: "reconnect",
-                participantId: nextSession.participantId,
+          const reconnectCommand: RestCommandPayload = {
+            roomCode: nextSession.roomCode,
+            commandId: commandId(),
+            expectedVersion: result.version,
+            kind: "reconnect",
+            participantId: nextSession.participantId,
+          };
+          result = normalizeProjection(
+            await request<SharedProjection>(
+              `/v2/rooms/${encodeURIComponent(nextSession.roomCode)}/commands`,
+              {
+                method: "POST",
+                token,
+                body: reconnectCommand,
               },
-            },
+            ),
           );
+          restCommandsRef.current.set(reconnectCommand.commandId, {
+            command: reconnectCommand,
+            token,
+          });
         }
       }
-      setProjection(ownProjection(result, nextSession, navigator.onLine));
+      setProjection(
+        ownProjection(result, nextSession, socketSubscribedRef.current),
+      );
+      flushRestCommands();
       return result;
     },
-    [request, session],
+    [flushRestCommands, request, session],
   );
 
   useEffect(() => {
@@ -392,27 +541,23 @@ export function SharedRoomLobby({
   }, [refresh]);
 
   useEffect(() => {
-    if (!session) return;
-    const timer = window.setTimeout(() => setConnection("connecting"), 0);
+    if (!session) {
+      socketSubscribedRef.current = false;
+      return;
+    }
+
     const socket = io(apiUrl, { transports: ["websocket", "polling"] });
     socketRef.current = socket;
-    socket.on("connect", () => {
-      setConnection("online");
-      socket.emit("v2:subscribe", {
-        roomCode: session.roomCode,
-        participantId: session.participantId,
-        token:
-          session.role === "host" ? session.hostToken : session.reconnectToken,
-      });
-      void refresh(session).catch((caught) => setError(roomError(caught)));
-    });
-    socket.on("v2:projection", (next: SharedProjection) => {
-      if (
-        !next.participants.some((item) => item.id === session.participantId)
-      ) {
+    socketSubscribedRef.current = false;
+
+    const handleProjection = (raw: SharedProjection) => {
+      const next = normalizeProjection(raw);
+      socketSubscribedRef.current = true;
+      if (!next.participants.some((item) => item.id === session.participantId)) {
         clearSession();
         setSession(null);
         setProjection(null);
+        setConnection("offline");
         setError("この端末はルームから退出させられました。");
         return;
       }
@@ -455,15 +600,104 @@ export function SharedRoomLobby({
         void refresh(session).catch((caught) => setError(roomError(caught)));
       setConnection("online");
       setError("");
-    });
-    socket.on("disconnect", () => setConnection("offline"));
-    socket.on("connect_error", () => setConnection("offline"));
+      flushRestCommands();
+    };
+
+    const handleSubscribeAck = (payload?: unknown) => {
+      if (payload && typeof payload === "object" && "error" in payload) {
+        const code = (payload as { error?: unknown }).error;
+        setConnection("offline");
+        setError(roomError(typeof code === "string" ? code : "subscribe_failed"));
+        return;
+      }
+      if (
+        payload &&
+        typeof payload === "object" &&
+        "ok" in payload &&
+        (payload as { ok?: unknown }).ok === false
+      ) {
+        setConnection("offline");
+        setError(roomError("subscribe_failed"));
+        return;
+      }
+      if (
+        payload &&
+        typeof payload === "object" &&
+        "projection" in payload &&
+        (payload as { projection?: unknown }).projection
+      ) {
+        handleProjection(
+          (payload as { projection: SharedProjection }).projection,
+        );
+        return;
+      }
+      socketSubscribedRef.current = true;
+      setConnection("online");
+      setError("");
+      flushRestCommands();
+    };
+
+    const handleV2Error = (payload?: unknown) => {
+      const code =
+        typeof payload === "string"
+          ? payload
+          : payload && typeof payload === "object" && "error" in payload
+            ? (payload as { error?: unknown }).error
+            : "subscribe_failed";
+      socketSubscribedRef.current = false;
+      setConnection("offline");
+      setError(roomError(typeof code === "string" ? code : "subscribe_failed"));
+    };
+
+    const handleConnect = () => {
+      socketSubscribedRef.current = false;
+      setConnection("subscribing");
+      socket.emit(
+        "v2:subscribe",
+        {
+          roomCode: session.roomCode,
+          participantId: session.participantId,
+          token:
+            session.role === "host" ? session.hostToken : session.reconnectToken,
+        },
+        handleSubscribeAck,
+      );
+      void refresh(session).catch((caught) => {
+        setConnection("offline");
+        setError(roomError(caught));
+      });
+    };
+
+    const handleDisconnect = () => {
+      socketSubscribedRef.current = false;
+      setConnection("offline");
+    };
+    const handleConnectError = () => {
+      socketSubscribedRef.current = false;
+      setConnection("offline");
+      setError("同期サーバーに接続できません。Docker版のAPI URLを確認してください。");
+    };
+
+    socket.on("connect", handleConnect);
+    socket.on("v2:projection", handleProjection);
+    socket.on("v2:subscribe:ack", handleSubscribeAck);
+    socket.on("v2:subscribed", handleSubscribeAck);
+    socket.on("v2:error", handleV2Error);
+    socket.on("disconnect", handleDisconnect);
+    socket.on("connect_error", handleConnectError);
     return () => {
-      window.clearTimeout(timer);
+      socket.off?.("connect", handleConnect);
+      socket.off?.("v2:projection", handleProjection);
+      socket.off?.("v2:subscribe:ack", handleSubscribeAck);
+      socket.off?.("v2:subscribed", handleSubscribeAck);
+      socket.off?.("v2:error", handleV2Error);
+      socket.off?.("disconnect", handleDisconnect);
+      socket.off?.("connect_error", handleConnectError);
+      socketSubscribedRef.current = false;
       socket.disconnect();
       if (socketRef.current === socket) socketRef.current = null;
     };
-  }, [apiUrl, refresh, session]);
+  }, [apiUrl, flushRestCommands, refresh, session]);
 
   useEffect(() => {
     const sync = () => {
@@ -524,7 +758,7 @@ export function SharedRoomLobby({
       };
       writeSession(next);
       setSession(next);
-      setProjection(ownProjection(result.room, next, false));
+      setProjection(ownProjection(normalizeProjection(result.room), next, false));
       setRoomCode(next.roomCode);
       setNotice("ルームを作成しました。参加用リンクを共有してください。");
     } catch (caught) {
@@ -551,18 +785,21 @@ export function SharedRoomLobby({
       const current = await request<SharedProjection>(
         `/v2/rooms/${encodeURIComponent(code)}`,
       );
+      const joinCommand: RestCommandPayload = {
+        roomCode: code,
+        commandId: commandId(),
+        joinNonce: commandId(),
+        expectedVersion: current.version,
+        kind: "join",
+        name,
+      };
       const result = await request<
         SharedProjection & {
           credentials?: { participantId: string; reconnectToken: string };
         }
       >(`/v2/rooms/${encodeURIComponent(code)}/commands`, {
         method: "POST",
-        body: {
-          commandId: commandId(),
-          expectedVersion: current.version,
-          kind: "join",
-          name,
-        },
+        body: joinCommand,
       });
       if (!result.credentials) throw new Error("participant_required");
       const next: SharedSession = {
@@ -574,7 +811,8 @@ export function SharedRoomLobby({
       };
       writeSession(next);
       setSession(next);
-      setProjection(ownProjection(result, next, false));
+      setProjection(ownProjection(normalizeProjection(result), next, false));
+      queueRestCommand(joinCommand, "");
       setRoomCode(code);
       setNotice("ルームに参加しました。ホストの開始を待っています。");
     } catch (caught) {
@@ -587,36 +825,48 @@ export function SharedRoomLobby({
   async function command(
     kind: CommandKind,
     extra: Record<string, unknown> = {},
-  ) {
-    if (!session || !projection) return;
+    baseProjection: SharedProjection | null = projection,
+  ): Promise<SharedProjection | null> {
+    if (!session || !baseProjection) return null;
     const token =
       session.role === "host" ? session.hostToken : session.reconnectToken;
-    if (!token) return;
+    if (!token) return null;
     setBusy(true);
     setError("");
     try {
+      const commandPayload: RestCommandPayload = {
+        roomCode: session.roomCode,
+        commandId: commandId(),
+        expectedVersion: baseProjection.version,
+        kind,
+        participantId: session.participantId,
+        ...extra,
+      };
       const result = await request<SharedProjection>(
         `/v2/rooms/${encodeURIComponent(session.roomCode)}/commands`,
         {
           method: "POST",
           token,
-          body: {
-            commandId: commandId(),
-            expectedVersion: projection.version,
-            kind,
-            participantId: session.participantId,
-            ...extra,
-          },
+          body: commandPayload,
         },
       );
-      setProjection(ownProjection(result, session, connection === "online"));
+      const normalized = normalizeProjection(result);
+      setProjection(
+        ownProjection(
+          normalized,
+          session,
+          kind === "leave" ? false : socketSubscribedRef.current,
+        ),
+      );
+      if (kind !== "leave") queueRestCommand(commandPayload, token);
       setNotice(
         kind === "close"
           ? "参加受付を締め切りました。"
           : kind === "start"
-            ? "ゲームを開始しました。"
+            ? "ゲームの開始準備をしました。"
             : "ルームを更新しました。",
       );
+      return normalized;
     } catch (caught) {
       if (caught instanceof Error && caught.message === "version_conflict") {
         try {
@@ -631,43 +881,85 @@ export function SharedRoomLobby({
             ].includes(kind) &&
             latest
           ) {
+            const retryCommand: RestCommandPayload = {
+              roomCode: session.roomCode,
+              commandId: commandId(),
+              expectedVersion: latest.version,
+              kind,
+              participantId: session.participantId,
+              ...extra,
+            };
             const retried = await request<SharedProjection>(
               `/v2/rooms/${encodeURIComponent(session.roomCode)}/commands`,
               {
                 method: "POST",
                 token,
-                body: {
-                  commandId: commandId(),
-                  expectedVersion: latest.version,
-                  kind,
-                  participantId: session.participantId,
-                  ...extra,
-                },
+                body: retryCommand,
               },
             );
+            const normalized = normalizeProjection(retried);
             setProjection(
-              ownProjection(retried, session, connection === "online"),
+              ownProjection(
+                normalized,
+                session,
+                socketSubscribedRef.current,
+              ),
             );
+            queueRestCommand(retryCommand, token);
             setError("");
-            return;
+            return normalized;
           }
         } catch {
           /* error shown below */
         }
       }
       setError(roomError(caught));
+      return null;
     } finally {
       setBusy(false);
     }
   }
 
-  function leaveLocal() {
+  async function startGame(extra: Record<string, unknown>) {
+    const current = projection;
+    if (!current) return;
+    let readyProjection = current;
+    if (current.status === "waiting") {
+      const lockedProjection = await command("start", {}, current);
+      if (!lockedProjection) return;
+      readyProjection = lockedProjection;
+    } else if (current.status !== "locked") {
+      return;
+    }
+    await command("game_start", extra, readyProjection);
+  }
+
+  async function prepareRematch() {
+    if (projection?.status !== "finished") return;
+    await command("start");
+  }
+
+  function leaveLocal(
+    message = "この端末のルーム情報を消去しました。ルーム自体は残っています。",
+  ) {
     socketRef.current?.disconnect();
+    socketSubscribedRef.current = false;
+    restCommandsRef.current.clear();
     clearSession();
     setSession(null);
     setProjection(null);
     setConnection("idle");
-    setNotice("この端末のルーム情報を消去しました。ルーム自体は残っています。");
+    setNotice(message);
+  }
+
+  async function leaveRoom() {
+    if (!session || !projection) {
+      leaveLocal();
+      return;
+    }
+    const leftProjection = await command("leave");
+    if (!leftProjection) return;
+    leaveLocal("ルームから退出しました。");
   }
 
   const inviteUrl = useMemo(() => {
@@ -691,6 +983,9 @@ export function SharedRoomLobby({
   const isHost = session?.role === "host";
   const participantCount = projection?.participants.length ?? 0;
   const activeGame = projection?.game;
+  const roomReadyForGame =
+    projection?.status === "waiting" || projection?.status === "locked";
+  const roomClosed = projection?.status === "closed";
   const legacyGame = activeGame?.kind === "legacy-game" ? activeGame : null;
   const selectedLegacyDefinition = getSyncGameDefinition(legacyGameKey);
   const activeLegacyDefinition = legacyGame
@@ -720,9 +1015,12 @@ export function SharedRoomLobby({
     >
       <div className="shared-room-heading">
         <div>
-          <p className="eyebrow">複数端末モード</p>
+          <p className="eyebrow">v2同期ルーム（ゲーム別に正式/簡易）</p>
           <h2>みんなのスマホで遊ぶ</h2>
           <p>代表者がルームを作り、参加者は自分のスマホから参加できます。</p>
+          <p className="soft-note">
+            従来の簡易同期版とは別のv2ルームです。参加・開始・投票・結果はSocket.IOの投影で同期します。
+          </p>
         </div>
         {activeGame?.kind === "legacy-game" && (
           <p className="soft-note">
@@ -872,15 +1170,21 @@ export function SharedRoomLobby({
               {connection === "online"
                 ? "接続中"
                 : connection === "connecting"
-                  ? "接続中…"
-                  : "オフライン・再接続待ち"}
+                  ? "接続準備中…"
+                  : connection === "subscribing"
+                    ? "同期購読を確認中…"
+                    : "オフライン・再接続待ち"}
             </span>
             <span>
               {projection.status === "waiting"
                 ? "開始待ち"
-                : projection.status === "playing"
-                  ? "ゲーム中"
-                  : "参加受付終了"}
+                : projection.status === "locked"
+                  ? "開始準備中（参加受付終了）"
+                  : projection.status === "playing"
+                    ? "ゲーム中"
+                    : projection.status === "finished"
+                      ? "ゲーム完了（再戦準備可）"
+                      : "ルーム終了（参加受付終了）"}
             </span>
             <button
               className="ghost-icon-button"
@@ -923,7 +1227,7 @@ export function SharedRoomLobby({
               </div>
             ))}
           </div>
-          {!isHost && projection.status === "waiting" && (
+          {!isHost && roomReadyForGame && (
             <p className="shared-room-waiting-note">
               <span>
                 <Check size={16} />
@@ -932,7 +1236,7 @@ export function SharedRoomLobby({
               ホストが開始するまで、この画面を開いたままにしてください。
             </p>
           )}
-          {isHost && projection.status === "waiting" && (
+          {isHost && roomReadyForGame && (
             <div className="shared-room-host-actions">
               <label>
                 設問
@@ -944,9 +1248,13 @@ export function SharedRoomLobby({
               <button
                 className="primary-button"
                 type="button"
-                disabled={busy || !hostPrompt.trim()}
+                disabled={
+                  busy ||
+                  participantCount < minimumPlayersForGame("two-choice") ||
+                  !hostPrompt.trim()
+                }
                 onClick={() =>
-                  void command("game_start", {
+                  void startGame({
                     gameKind: "two-choice",
                     prompt: hostPrompt.trim(),
                     deadlineAt: Date.now() + 60_000,
@@ -954,46 +1262,53 @@ export function SharedRoomLobby({
                 }
               >
                 <Play size={18} />
-                二択トークを開始（60秒）
+                二択トークを開始（2人以上・60秒）
               </button>
               <button
                 className="secondary-button"
                 type="button"
-                disabled={busy}
+                disabled={
+                  busy || participantCount < minimumPlayersForGame("anonymous-box")
+                }
                 onClick={() =>
-                  void command("game_start", {
+                  void startGame({
                     gameKind: "anonymous-box",
                     prompt: hostPrompt.trim() || "匿名で質問を投稿",
                   })
                 }
               >
                 <Play size={18} />
-                匿名質問箱を開始
+                匿名質問箱を開始（2人以上）
               </button>
               <button
                 className="secondary-button"
                 type="button"
-                disabled={busy}
-                onClick={() =>
-                  void command("game_start", {
+                disabled={
+                  busy || participantCount < minimumPlayersForGame("word-wolf")
+                }
+                onClick={() => {
+                  const topic = selectWordWolfTopic();
+                  void startGame({
                     gameKind: "word-wolf",
                     prompt: hostPrompt.trim() || "お題を話そう",
-                    majorityTopic: "海",
-                    minorityTopic: "山",
-                    minorityCount: 1,
+                    majorityTopic: topic.majorityWord,
+                    minorityTopic: topic.minorityWord,
+                    minorityCount: Math.max(1, Math.floor(participantCount / 5)),
                     deadlineAt: Date.now() + 60_000,
-                  })
-                }
+                  });
+                }}
               >
                 <Play size={18} />
-                ワードウルフを開始
+                ワードウルフを開始（4人以上）
               </button>
               <button
                 className="secondary-button"
                 type="button"
-                disabled={busy}
+                disabled={
+                  busy || !canStartWerewolf(participantCount)
+                }
                 onClick={() =>
-                  void command("game_start", {
+                  void startGame({
                     gameKind: "werewolf",
                     prompt: hostPrompt.trim() || "夜の議論",
                     deadlineAt: Date.now() + 60_000,
@@ -1001,7 +1316,7 @@ export function SharedRoomLobby({
                 }
               >
                 <Play size={18} />
-                人狼を開始
+                人狼を開始（4人、または6人以上）
               </button>
               <button
                 className="danger-button"
@@ -1014,15 +1329,17 @@ export function SharedRoomLobby({
               </button>
             </div>
           )}
-          {isHost && projection.status === "waiting" && (
+          {isHost && roomReadyForGame && (
             <button
               className="secondary-button"
               type="button"
               disabled={
-                busy || projection.participants.length < 3 || !hostPrompt.trim()
+                busy ||
+                participantCount < minimumPlayersForGame("impression-ranking") ||
+                !hostPrompt.trim()
               }
               onClick={() =>
-                void command("game_start", {
+                void startGame({
                   gameKind: "impression-ranking",
                   prompt: hostPrompt.trim() || "一番当てはまりそうな人は？",
                 })
@@ -1032,15 +1349,17 @@ export function SharedRoomLobby({
               第一印象ランキングを開始（3人以上）
             </button>
           )}
-          {isHost && projection.status === "waiting" && (
+          {isHost && roomReadyForGame && (
             <button
               className="secondary-button"
               type="button"
               disabled={
-                busy || projection.participants.length < 3 || !hostPrompt.trim()
+                busy ||
+                participantCount < minimumPlayersForGame("majority-game") ||
+                !hostPrompt.trim()
               }
               onClick={() =>
-                void command("game_start", {
+                void startGame({
                   gameKind: "majority-game",
                   prompt: hostPrompt.trim() || "AとB、どちらが多数派？",
                 })
@@ -1050,7 +1369,7 @@ export function SharedRoomLobby({
               マジョリティゲームを開始（3人以上）
             </button>
           )}
-          {isHost && projection.status === "waiting" && (
+          {isHost && roomReadyForGame && (
             <div className="shared-room-host-actions">
               <label>
                 ゲームを選ぶ
@@ -1082,12 +1401,17 @@ export function SharedRoomLobby({
               <p className="soft-note">
                 お題例：{selectedLegacyDefinition.examplePrompt}
               </p>
+              <p className="soft-note">
+                最低参加人数：{minimumPlayersForGame(legacyGameKey)}人（現在 {participantCount}人）
+              </p>
               <button
                 className="secondary-button"
                 type="button"
-                disabled={busy}
+                disabled={
+                  busy || participantCount < minimumPlayersForGame(legacyGameKey)
+                }
                 onClick={() =>
-                  void command("game_start", {
+                  void startGame({
                     gameKind: "legacy-game",
                     legacyGameKey,
                     mode: selectedLegacyDefinition.progression,
@@ -1108,6 +1432,20 @@ export function SharedRoomLobby({
               ホストがゲームを開始しました。このルームは全員で同期できます。
             </p>
           )}
+          {roomClosed ? (
+            <div className="shared-room-game-card shared-room-result" role="status">
+              <h3>ルーム終了</h3>
+              <p>このルームは完全終了しました。参加受付とゲーム操作はできません。</p>
+              <button
+                type="button"
+                className="primary-button"
+                onClick={() => leaveLocal()}
+              >
+                新しいルームを作る
+              </button>
+            </div>
+          ) : (
+            <>
           {activeGame?.kind === "two-choice" && (
             <div className="shared-room-game-card">
               <h3>二択トーク</h3>
@@ -1680,12 +2018,33 @@ export function SharedRoomLobby({
               )}
             </div>
           )}
+          {projection.status === "finished" && (
+            <div className="shared-room-host-actions">
+              {isHost ? (
+                <button
+                  type="button"
+                  className="primary-button"
+                  disabled={busy}
+                  onClick={() => void prepareRematch()}
+                >
+                  このルームで再戦準備
+                </button>
+              ) : (
+                <p className="shared-room-waiting-note">
+                  ホストがこのルームで再戦準備をするまでお待ちください。
+                </p>
+              )}
+            </div>
+          )}
+            </>
+          )}
           <button
             type="button"
             className="secondary-button shared-room-leave"
-            onClick={leaveLocal}
+            disabled={busy}
+            onClick={() => void leaveRoom()}
           >
-            この端末の接続を外す
+            ルームから退出する
           </button>
         </div>
       )}

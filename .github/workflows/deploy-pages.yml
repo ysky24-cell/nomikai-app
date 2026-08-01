@@ -19,6 +19,9 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      VITE_ROOM_MODE: disabled
+      VITE_API_URL: https://disabled.invalid
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,6 +37,16 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Remove localhost API fallback from artifact
+        run: find dist -type f -exec sed -i 's#http://localhost:3000#https://disabled.invalid#g' {} +
+
+      - name: Reject localhost API fallback
+        run: |
+          if grep -R -F "http://localhost:3000" dist; then
+            echo "Production bundle contains the localhost API fallback"
+            exit 1
+          fi
 
       - name: Configure Pages
         uses: actions/configure-pages@v5

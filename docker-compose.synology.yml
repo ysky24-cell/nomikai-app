@@ -3,11 +3,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.web
-    command: sh -c "npm run build && npm run preview -- --host 0.0.0.0 --port 5173"
-    environment:
-      VITE_API_URL: "${VITE_API_URL:?Set VITE_API_URL to the browser-visible API URL, for example http://192.168.1.10:3000}"
+      args:
+        VITE_API_URL: "${VITE_API_URL:?Set VITE_API_URL to the browser-visible API URL, for example http://192.168.1.10:3000}"
+        VITE_ROOM_MODE: required
     ports:
-      - "${WEB_PORT:-5173}:5173"
+      - "${WEB_PORT:-5173}:80"
     depends_on:
       api:
         condition: service_healthy
@@ -17,12 +17,14 @@ services:
     build:
       context: ./server
       dockerfile: Dockerfile
-    command: sh -c "npm run build && npm start"
+    command: sh -c "npm run migrate && npm start"
     environment:
+      NODE_ENV: production
       PORT: 3000
-      DATABASE_URL: "postgres://${POSTGRES_USER:-nomikai}:${POSTGRES_PASSWORD:-nomikai}@db:5432/${POSTGRES_DB:-nomikai}"
+      DATABASE_URL: "postgres://${POSTGRES_USER:-nomikai}:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-nomikai}"
       REDIS_URL: redis://redis:6379
       CLIENT_ORIGIN: "${CLIENT_ORIGIN:?Set CLIENT_ORIGIN to the browser origin, for example http://192.168.1.10:5173}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}"
     ports:
       - "${API_PORT:-3000}:3000"
     depends_on:
@@ -42,7 +44,7 @@ services:
     image: postgres:17-alpine
     environment:
       POSTGRES_USER: "${POSTGRES_USER:-nomikai}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:-nomikai}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}"
       POSTGRES_DB: "${POSTGRES_DB:-nomikai}"
     volumes:
       - postgres_data:/var/lib/postgresql/data
