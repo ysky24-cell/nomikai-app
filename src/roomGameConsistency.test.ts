@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { isWerewolfPlayerCountSupported } from "./App";
 import { urlCandidateGameByKey } from "./data/urlCandidateGames";
 import { getSyncGameDefinition } from "./syncGameDefinitions";
+import { isNativeSyncRoomGameKey, isNewSyncRoomGameKey } from "./syncRoomCatalog";
 
 describe("room game contracts", () => {
   it("keeps reverse-word-game turn progression across the room definition", () => {
@@ -21,5 +22,11 @@ describe("room game contracts", () => {
     expect(definition.maxPlayers).toBe(12);
     expect(definition.people).toContain("4人");
     expect(definition.setupSteps[0]).toContain("5人構成は対象外");
+  });
+
+  it("routes Johari through the dedicated native v2 catalog", () => {
+    expect(isNewSyncRoomGameKey("johari-window")).toBe(true);
+    expect(isNativeSyncRoomGameKey("johari-window")).toBe(true);
+    expect(getSyncGameDefinition("johari-window").rule).toContain("提出内容は結果まで非公開");
   });
 });

@@ -16,6 +16,7 @@
     "room:impression:check": "node scripts/impression-v2-check.mjs",
     "room:party-pack:check": "node scripts/party-pack-room-check.mjs",
     "room:johari:check": "node scripts/johari-room-check.mjs",
+    "room:johari:v2:check": "node scripts/johari-v2-check.mjs",
     "room:majority:check": "node scripts/majority-room-check.mjs",
     "room:large-majority:check": "node scripts/majority-room-check.mjs",
     "room:shared-majority:check": "node scripts/shared-majority-check.mjs",

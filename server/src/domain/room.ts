@@ -15,6 +15,13 @@ export type RoomParticipant = {
 
 export type TwoChoiceAnswer = "A" | "B" | "pass";
 export type AnonymousEntryStatus = "unshown" | "displayed" | "answered" | "skipped";
+export type JohariPane = {
+  open: string[];
+  hidden: string[];
+  blind: string[];
+  unknown: string[];
+};
+export type JohariResult = Record<string, JohariPane>;
 type TwoChoiceGameState = {
   kind: "two-choice";
   startedVersion?: number;
@@ -36,6 +43,18 @@ type MajorityGameState = {
   prompt: string;
   phase: "voting" | "revealed";
   votes: Record<string, string>;
+};
+type JohariGameState = {
+  kind: "johari-window";
+  startedVersion?: number;
+  prompt: string;
+  phase: "self" | "peer" | "result";
+  deckWordIds: string[];
+  selfSelections: Record<string, string[]>;
+  selfSubmitted: Record<string, boolean>;
+  peerSelections: Record<string, Record<string, string[]>>;
+  peerSubmitted: Record<string, Record<string, boolean>>;
+  results?: JohariResult;
 };
 type AnonymousEntry = { id: string; text: string; authorId: string; status: AnonymousEntryStatus };
 type AnonymousGameState = {
@@ -89,7 +108,7 @@ export type LegacyGameResult = {
   summary: string;
   scores: Record<string, number>;
 };
-export type RoomGameState = TwoChoiceGameState | ImpressionGameState | MajorityGameState | AnonymousGameState | WordWolfGameState | WerewolfGameState | LegacyGameState;
+export type RoomGameState = TwoChoiceGameState | ImpressionGameState | MajorityGameState | JohariGameState | AnonymousGameState | WordWolfGameState | WerewolfGameState | LegacyGameState;
 
 export type RoomRecord = {
   id: string;
@@ -125,6 +144,7 @@ export type PublicRoomGame =
   | { kind: "two-choice"; prompt: string; deadlineAt: number | null; phase: "answering" | "revealed"; answeredCount: number; participantCount: number; ownAnswer?: TwoChoiceAnswer; result?: { A: number; B: number; pass: number } }
   | { kind: "impression-ranking"; prompt: string; phase: "voting" | "revealed"; voteCount: number; participantCount: number; ownVote?: string; result?: Record<string, number> }
   | { kind: "majority-game"; prompt: string; phase: "voting" | "revealed"; voteCount: number; participantCount: number; ownVote?: string; result?: Record<string, number> }
+  | { kind: "johari-window"; prompt: string; phase: "self" | "peer" | "result"; deckWordIds: string[]; participantCount: number; selfSubmittedCount: number; selfParticipantCount: number; peerSubmittedCount: number; peerRequiredCount: number; ownSelfSelection?: string[]; ownSelfSubmitted?: boolean; ownPeerSelections?: Record<string, string[]>; ownPeerSubmitted?: Record<string, boolean>; result?: JohariResult }
   | { kind: "anonymous-box"; prompt: string; entries: Array<{ id: string; text: string; status: AnonymousEntryStatus }>; ownEntry?: { id: string; text: string; status: AnonymousEntryStatus } }
   | { kind: "word-wolf"; phase: "discussion" | "voting" | "revealed"; phaseDeadlineAt: number | null; participantCount: number; voteCount: number; ownTopic?: string; ownVote?: string; winner?: "majority" | "minority" | "draw"; voteResults?: Record<string, number> }
   | { kind: "werewolf"; phase: "night" | "day" | "voting" | "revote" | "finished"; phaseDeadlineAt: number | null; aliveIds: string[]; ownRole?: WerewolfRole; teammates?: string[]; ownSeerResults?: { targetId: string; role: WerewolfRole }[]; ownVote?: string; tiedTargetIds?: string[]; winner?: "werewolf" | "villager" }
@@ -134,17 +154,21 @@ export type RoomCommand = {
   roomCode: string;
   commandId: string;
   expectedVersion: number;
-  kind: "join" | "reconnect" | "leave" | "kick" | "start" | "close" | "reset" | "game_reset" | "game_start" | "game_answer" | "game_reveal" | "anonymous_submit" | "anonymous_moderate" | "game_vote" | "game_phase" | "werewolf_action" | "legacy_input";
+  kind: "join" | "reconnect" | "leave" | "kick" | "start" | "close" | "reset" | "game_reset" | "game_start" | "game_answer" | "game_reveal" | "johari_self_submit" | "johari_peer_submit" | "anonymous_submit" | "anonymous_moderate" | "game_vote" | "game_phase" | "werewolf_action" | "legacy_input";
   participantId?: string;
   joinNonce?: string;
   targetParticipantId?: string;
   name?: string;
-  gameKind?: "two-choice" | "impression-ranking" | "majority-game" | "anonymous-box" | "word-wolf" | "werewolf" | "legacy-game";
+  gameKind?: "two-choice" | "impression-ranking" | "majority-game" | "johari-window" | "anonymous-box" | "word-wolf" | "werewolf" | "legacy-game";
   legacyGameKey?: string;
   mode?: string;
   prompt?: string;
   deadlineAt?: number | null;
   choice?: TwoChoiceAnswer;
+  johariDeckWordIds?: string[];
+  deckWordIds?: string[];
+  selectedWordIds?: string[];
+  submit?: boolean;
   text?: string;
   targetEntryId?: string;
   moderationStatus?: AnonymousEntryStatus;
@@ -273,10 +297,18 @@ const nativeMinimumPlayers: Record<Exclude<RoomCommand["gameKind"], "legacy-game
   "two-choice": 2,
   "impression-ranking": 3,
   "majority-game": 3,
+  "johari-window": 3,
   "anonymous-box": 2,
   "word-wolf": 4,
   werewolf: 4,
 };
+
+const defaultJohariDeckWordIds = [
+  "warm-01", "warm-02", "warm-03", "warm-04", "warm-05",
+  "social-01", "social-02", "social-03", "social-04", "social-05",
+  "steady-01", "steady-02", "steady-03", "steady-04", "steady-05",
+  "creative-01", "creative-02", "creative-03", "creative-04", "creative-05",
+];
 
 const commandResultTtlMs = 10 * 60 * 1000;
 const maxCommandResults = 4_096;
@@ -325,6 +357,7 @@ function isTerminalGame(game: RoomGameState | undefined) {
   if (!game) return false;
   if (game.kind === "two-choice") return game.phase === "revealed";
   if (game.kind === "impression-ranking" || game.kind === "majority-game") return game.phase === "revealed";
+  if (game.kind === "johari-window") return game.phase === "result";
   if (game.kind === "word-wolf") return game.phase === "revealed";
   if (game.kind === "werewolf") return game.phase === "finished";
   if (game.kind === "legacy-game") return game.phase === "finished";
@@ -338,6 +371,94 @@ function markGameFinished(room: RoomRecord) {
 function normalizeRoomStatus(room: RoomRecord) {
   // A few early v2 snapshots used the legacy status name.
   if ((room.status as string) === "complete") room.status = "finished";
+}
+
+function normalizeJohariWordIds(value: unknown) {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 300) return null;
+  const ids = value.map((item) => typeof item === "string" ? item.trim() : "");
+  if (ids.some((id) => !id) || new Set(ids).size !== ids.length) return null;
+  return ids;
+}
+
+function readJohariDeckWordIds(command: RoomCommand) {
+  const supplied = command.johariDeckWordIds ?? command.deckWordIds;
+  return supplied === undefined ? [...defaultJohariDeckWordIds] : normalizeJohariWordIds(supplied);
+}
+
+function normalizeJohariSelection(value: unknown, deckWordIds: readonly string[]) {
+  if (!Array.isArray(value) || value.length > deckWordIds.length) return null;
+  const selection = value.map((item) => typeof item === "string" ? item.trim() : "");
+  if (selection.some((id) => !id) || new Set(selection).size !== selection.length) return null;
+  const allowed = new Set(deckWordIds);
+  if (selection.some((id) => !allowed.has(id))) return null;
+  return selection;
+}
+
+function johariPeerRequiredCount(participantIds: readonly string[]) {
+  return participantIds.length * Math.max(0, participantIds.length - 1);
+}
+
+function johariPeerSubmittedCount(game: JohariGameState, participantIds: readonly string[]) {
+  const active = new Set(participantIds);
+  return participantIds.reduce((total, targetId) => {
+    const submitted = game.peerSubmitted[targetId] ?? {};
+    return total + participantIds.filter((peerId) => peerId !== targetId && active.has(peerId) && submitted[peerId] === true).length;
+  }, 0);
+}
+
+function johariSelfReady(game: JohariGameState, participantIds: readonly string[]) {
+  return participantIds.length > 0 && participantIds.every((participantId) => game.selfSubmitted[participantId] === true);
+}
+
+function johariPeerReady(game: JohariGameState, participantIds: readonly string[]) {
+  return participantIds.length > 0 && participantIds.every((targetId) => {
+    const submitted = game.peerSubmitted[targetId] ?? {};
+    return participantIds.filter((peerId) => peerId !== targetId).every((peerId) => submitted[peerId] === true);
+  });
+}
+
+function resolveJohariResult(game: JohariGameState, participants: readonly RoomParticipant[]): JohariResult {
+  const participantIds = participants.map((participant) => participant.id);
+  return Object.fromEntries(participantIds.map((targetId) => {
+    const own = new Set(game.selfSelections[targetId] ?? []);
+    const selectedByOthers = new Set<string>();
+    const targetPeerSelections = game.peerSelections[targetId] ?? {};
+    const targetPeerSubmitted = game.peerSubmitted[targetId] ?? {};
+    participantIds.forEach((peerId) => {
+      if (peerId === targetId || targetPeerSubmitted[peerId] !== true) return;
+      for (const wordId of targetPeerSelections[peerId] ?? []) selectedByOthers.add(wordId);
+    });
+    const open: string[] = [];
+    const hidden: string[] = [];
+    const blind: string[] = [];
+    const unknown: string[] = [];
+    for (const wordId of game.deckWordIds) {
+      if (own.has(wordId) && selectedByOthers.has(wordId)) open.push(wordId);
+      else if (own.has(wordId)) hidden.push(wordId);
+      else if (selectedByOthers.has(wordId)) blind.push(wordId);
+      else unknown.push(wordId);
+    }
+    return [targetId, { open, hidden, blind, unknown } satisfies JohariPane];
+  }));
+}
+
+function maybeAdvanceJohari(room: RoomRecord) {
+  if (room.game?.kind !== "johari-window") return false;
+  const game = room.game;
+  const participants = activeParticipants(room);
+  const participantIds = participants.map((participant) => participant.id);
+  let changed = false;
+  if (game.phase === "self" && johariSelfReady(game, participantIds)) {
+    game.phase = "peer";
+    changed = true;
+  }
+  if (game.phase === "peer" && johariPeerReady(game, participantIds)) {
+    game.phase = "result";
+    game.results = resolveJohariResult(game, participants);
+    markGameFinished(room);
+    changed = true;
+  }
+  return changed;
 }
 
 function reconcileLegacyTurnState(game: LegacyGameState, participantId: string, activeBefore: readonly RoomParticipant[]) {
@@ -382,6 +503,12 @@ function removeParticipantFromGameState(
   if (preserveTargetReferences) {
     if (game.kind === "two-choice") delete game.answers[participantId];
     else if (game.kind === "impression-ranking" || game.kind === "majority-game") delete game.votes[participantId];
+    else if (game.kind === "johari-window") {
+      delete game.selfSelections[participantId];
+      delete game.selfSubmitted[participantId];
+      for (const targetId of Object.keys(game.peerSelections)) delete game.peerSelections[targetId]?.[participantId];
+      for (const targetId of Object.keys(game.peerSubmitted)) delete game.peerSubmitted[targetId]?.[participantId];
+    }
     else if (game.kind === "anonymous-box") game.entries = game.entries.filter((entry) => entry.authorId !== participantId);
     else if (game.kind === "word-wolf") delete game.votes[participantId];
     else if (game.kind === "werewolf") delete game.votes[participantId];
@@ -399,6 +526,13 @@ function removeParticipantFromGameState(
     for (const [voterId, targetId] of Object.entries(game.votes)) if (targetId === participantId) delete game.votes[voterId];
   } else if (game.kind === "majority-game") {
     delete game.votes[participantId];
+  } else if (game.kind === "johari-window") {
+    delete game.selfSelections[participantId];
+    delete game.selfSubmitted[participantId];
+    delete game.peerSelections[participantId];
+    delete game.peerSubmitted[participantId];
+    for (const targetId of Object.keys(game.peerSelections)) delete game.peerSelections[targetId]?.[participantId];
+    for (const targetId of Object.keys(game.peerSubmitted)) delete game.peerSubmitted[targetId]?.[participantId];
   } else if (game.kind === "anonymous-box") {
     game.entries = game.entries.filter((entry) => entry.authorId !== participantId);
   } else if (game.kind === "word-wolf") {
@@ -444,6 +578,18 @@ function canMergeStaleCommand(room: RoomRecord, command: RoomCommand) {
       && game.phase === "answering"
       && !Object.prototype.hasOwnProperty.call(game.answers, actorId);
   }
+  if (command.kind === "johari_self_submit") {
+    return game.kind === "johari-window"
+      && game.phase === "self"
+      && (command.submit === false || game.selfSubmitted[actorId] !== true);
+  }
+  if (command.kind === "johari_peer_submit") {
+    return game.kind === "johari-window"
+      && game.phase === "peer"
+      && typeof command.targetParticipantId === "string"
+      && command.targetParticipantId !== actorId
+      && !game.peerSubmitted[command.targetParticipantId]?.[actorId];
+  }
   if (command.kind === "anonymous_submit") return game.kind === "anonymous-box" && room.status === "playing";
   if (command.kind === "game_vote") {
     if (game.kind === "impression-ranking" || game.kind === "majority-game" || game.kind === "word-wolf") {
@@ -462,7 +608,7 @@ function canMergeStaleCommand(room: RoomRecord, command: RoomCommand) {
 function isMergeableCommand(command: unknown) {
   if (!command || typeof command !== "object") return false;
   const kind = (command as { kind?: unknown }).kind;
-  return kind === "join" || kind === "game_answer" || kind === "game_vote" || kind === "anonymous_submit" || kind === "werewolf_action" || kind === "legacy_input";
+  return kind === "join" || kind === "game_answer" || kind === "johari_self_submit" || kind === "johari_peer_submit" || kind === "game_vote" || kind === "anonymous_submit" || kind === "werewolf_action" || kind === "legacy_input";
 }
 
 function token(size = 24) {
@@ -756,7 +902,7 @@ export class RoomService {
     if (!roomCode) throw new RoomDomainError("room_code_required");
     if (typeof command.commandId !== "string" || !command.commandId.trim()) throw new RoomDomainError("command_id_required");
     if (!Number.isInteger(command.expectedVersion) || command.expectedVersion < 0) throw new RoomDomainError("expected_version_invalid");
-    if (!("join reconnect leave kick start close reset game_reset game_start game_answer game_reveal anonymous_submit anonymous_moderate game_vote game_phase werewolf_action legacy_input" as const).split(" ").includes(command.kind)) throw new RoomDomainError("command_kind_invalid");
+    if (!("join reconnect leave kick start close reset game_reset game_start game_answer game_reveal johari_self_submit johari_peer_submit anonymous_submit anonymous_moderate game_vote game_phase werewolf_action legacy_input" as const).split(" ").includes(command.kind)) throw new RoomDomainError("command_kind_invalid");
     command = { ...command, roomCode, commandId: command.commandId.trim() };
     const suppliedToken = typeof tokenValue === "string" ? tokenValue : undefined;
     const room = await this.repository.get(command.roomCode) ?? null;
@@ -820,7 +966,7 @@ export class RoomService {
     }
     if (room.version !== command.expectedVersion && !canMergeStaleCommand(room, command)) throw new RoomDomainError("version_conflict");
     if (room.status === "closed" && command.kind !== "close") throw new RoomDomainError(command.kind === "join" ? "room_not_joinable" : "room_closed");
-    if (room.status === "finished" && ["game_answer", "game_reveal", "anonymous_submit", "anonymous_moderate", "game_vote", "game_phase", "werewolf_action", "legacy_input"].includes(command.kind)) throw new RoomDomainError("game_finished");
+    if (room.status === "finished" && ["game_answer", "game_reveal", "johari_self_submit", "johari_peer_submit", "anonymous_submit", "anonymous_moderate", "game_vote", "game_phase", "werewolf_action", "legacy_input"].includes(command.kind)) throw new RoomDomainError("game_finished");
     let issuedReconnectToken: string | undefined;
     let createdParticipantId: string | undefined;
     const presenceChanges: RoomPresenceChange[] = [];
@@ -841,6 +987,7 @@ export class RoomService {
       presenceChanges.push({ participantId: actor!.id, connected: false });
       if (room.status === "playing" && room.game && !isTerminalGame(room.game)) {
         removeParticipantFromGameState(room, actor!.id, true, activeBeforeDeparture);
+        maybeAdvanceJohari(room);
       }
     } else if (command.kind === "kick") {
       if (actor!.role !== "host") throw new RoomDomainError("host_required");
@@ -851,6 +998,7 @@ export class RoomService {
       removeParticipantFromGameState(room, target.id, false, activeParticipants(room));
       presenceChanges.push({ participantId: target.id, connected: false });
       room.participants = room.participants.filter((item) => item.id !== command.targetParticipantId);
+      maybeAdvanceJohari(room);
     } else if (command.kind === "start") {
       if (actor!.role !== "host") throw new RoomDomainError("host_required");
       if (room.status === "waiting") room.status = "locked";
@@ -873,7 +1021,7 @@ export class RoomService {
       presenceChanges.push({ participantId: actor!.id, connected: true });
     } else if (command.kind === "game_start") {
       if (actor!.role !== "host") throw new RoomDomainError("host_required");
-      if (command.gameKind !== "two-choice" && command.gameKind !== "impression-ranking" && command.gameKind !== "majority-game" && command.gameKind !== "anonymous-box" && command.gameKind !== "word-wolf" && command.gameKind !== "werewolf" && command.gameKind !== "legacy-game") throw new RoomDomainError("game_kind_invalid");
+      if (command.gameKind !== "two-choice" && command.gameKind !== "impression-ranking" && command.gameKind !== "majority-game" && command.gameKind !== "johari-window" && command.gameKind !== "anonymous-box" && command.gameKind !== "word-wolf" && command.gameKind !== "werewolf" && command.gameKind !== "legacy-game") throw new RoomDomainError("game_kind_invalid");
       if (room.status === "playing" && room.game && !isTerminalGame(room.game)) throw new RoomDomainError("game_in_progress");
       if (room.status !== "locked") throw new RoomDomainError("room_not_locked");
       const prompt = typeof command.prompt === "string" ? command.prompt.trim() : "";
@@ -891,6 +1039,20 @@ export class RoomService {
         room.game = { kind: "impression-ranking", startedVersion, prompt, phase: "voting", votes: {} };
       } else if (command.gameKind === "majority-game") {
         room.game = { kind: "majority-game", startedVersion, prompt, phase: "voting", votes: {} };
+      } else if (command.gameKind === "johari-window") {
+        const deckWordIds = readJohariDeckWordIds(command);
+        if (!deckWordIds) throw new RoomDomainError("johari_deck_invalid");
+        room.game = {
+          kind: "johari-window",
+          startedVersion,
+          prompt,
+          phase: "self",
+          deckWordIds,
+          selfSelections: {},
+          selfSubmitted: {},
+          peerSelections: {},
+          peerSubmitted: {},
+        };
       } else if (command.gameKind === "anonymous-box") {
         room.game = { kind: "anonymous-box", startedVersion, prompt, entries: [] };
       } else if (command.gameKind === "word-wolf") {
@@ -922,6 +1084,27 @@ export class RoomService {
       if (room.game.phase === "revealed" || (room.game.deadlineAt !== null && room.game.deadlineAt <= this.now())) throw new RoomDomainError("answer_deadline_passed");
       if (command.choice !== "A" && command.choice !== "B" && command.choice !== "pass") throw new RoomDomainError("choice_invalid");
       room.game.answers[actor!.id] = command.choice;
+    } else if (command.kind === "johari_self_submit") {
+      if (!room.game || room.game.kind !== "johari-window" || room.game.phase !== "self") throw new RoomDomainError("game_not_ready");
+      if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
+      if (room.game.selfSubmitted[actor!.id] === true) throw new RoomDomainError("johari_submission_locked");
+      const selectedWordIds = normalizeJohariSelection(command.selectedWordIds ?? room.game.selfSelections[actor!.id] ?? [], room.game.deckWordIds);
+      if (!selectedWordIds) throw new RoomDomainError("johari_selection_invalid");
+      room.game.selfSelections[actor!.id] = selectedWordIds;
+      if (command.submit !== false) room.game.selfSubmitted[actor!.id] = true;
+      maybeAdvanceJohari(room);
+    } else if (command.kind === "johari_peer_submit") {
+      if (!room.game || room.game.kind !== "johari-window" || room.game.phase !== "peer") throw new RoomDomainError("game_not_ready");
+      if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
+      const targetParticipantId = typeof command.targetParticipantId === "string" ? command.targetParticipantId : "";
+      if (!targetParticipantId || targetParticipantId === actor!.id || !activeParticipants(room).some((item) => item.id === targetParticipantId)) throw new RoomDomainError("johari_target_invalid");
+      if (room.game.peerSubmitted[targetParticipantId]?.[actor!.id] === true) throw new RoomDomainError("johari_submission_locked");
+      const existingSelection = room.game.peerSelections[targetParticipantId]?.[actor!.id] ?? [];
+      const selectedWordIds = normalizeJohariSelection(command.selectedWordIds ?? existingSelection, room.game.deckWordIds);
+      if (!selectedWordIds) throw new RoomDomainError("johari_selection_invalid");
+      (room.game.peerSelections[targetParticipantId] ??= {})[actor!.id] = selectedWordIds;
+      if (command.submit !== false) (room.game.peerSubmitted[targetParticipantId] ??= {})[actor!.id] = true;
+      maybeAdvanceJohari(room);
     } else if (command.kind === "game_reveal") {
       if (actor!.role !== "host") throw new RoomDomainError("host_required");
       if (!room.game) throw new RoomDomainError("game_not_active");
@@ -1156,6 +1339,35 @@ export class RoomService {
         participantCount: activeParticipants(room).length,
         ...(participantId && game.votes[participantId] ? { ownVote: game.votes[participantId] } : {}),
         ...(game.phase === "revealed" ? { result: Object.values(game.votes).reduce<Record<string, number>>((acc, target) => { acc[target] = (acc[target] ?? 0) + 1; return acc; }, {}) } : {}),
+      };
+    } else if (room.game?.kind === "johari-window") {
+      const game = room.game;
+      const participants = activeParticipants(room);
+      const participantIds = participants.map((participant) => participant.id);
+      const ownParticipant = participantId ? participantIds.includes(participantId) : false;
+      const ownPeerSelections = ownParticipant
+        ? Object.fromEntries(participantIds.filter((targetId) => targetId !== participantId).map((targetId) => [targetId, [...(game.peerSelections[targetId]?.[participantId!] ?? [])]]))
+        : undefined;
+      const ownPeerSubmitted = ownParticipant
+        ? Object.fromEntries(participantIds.filter((targetId) => targetId !== participantId).map((targetId) => [targetId, game.peerSubmitted[targetId]?.[participantId!] === true]))
+        : undefined;
+      projection.game = {
+        kind: "johari-window",
+        prompt: game.prompt,
+        phase: game.phase,
+        deckWordIds: [...game.deckWordIds],
+        participantCount: participantIds.length,
+        selfSubmittedCount: participantIds.filter((id) => game.selfSubmitted[id] === true).length,
+        selfParticipantCount: participantIds.length,
+        peerSubmittedCount: johariPeerSubmittedCount(game, participantIds),
+        peerRequiredCount: johariPeerRequiredCount(participantIds),
+        ...(ownParticipant && game.phase !== "result" ? {
+          ...(Object.prototype.hasOwnProperty.call(game.selfSelections, participantId!) ? { ownSelfSelection: [...game.selfSelections[participantId!]] } : {}),
+          ownSelfSubmitted: game.selfSubmitted[participantId!] === true,
+          ownPeerSelections,
+          ownPeerSubmitted,
+        } : {}),
+        ...(game.phase === "result" ? { result: game.results ?? resolveJohariResult(game, participants) } : {}),
       };
     } else if (room.game?.kind === "anonymous-box") {
       const game = room.game;

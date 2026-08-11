@@ -14,7 +14,7 @@ const definitions: readonly SyncGameDefinition[] = [
   { key: "yamanote", title: "山手線ゲーム", rule: "順番に、お題に合う言葉を1つずつ答えます。全員が1回ずつ答えると1ラウンド完了です。", examplePrompt: "東京の駅名", inputLabel: "あなたの言葉", inputPlaceholder: "例：新宿", progression: "turn" },
   { key: "ng-word", title: "NGワードゲーム", rule: "順番に会話の一言を入力します。言ってはいけない言葉を避けながら全員で1巡します。", examplePrompt: "今日あったうれしいこと", inputLabel: "あなたの一言", inputPlaceholder: "例：ランチがおいしかった", progression: "turn" },
   { key: "party-pack", title: "定番ゲームパック", rule: "カードのお題に沿って、順番に答えます。", examplePrompt: "最近ハマっていること", inputLabel: "あなたの回答", inputPlaceholder: "例：朝の散歩", progression: "turn" },
-  { key: "johari-window", title: "ジョハリの窓", rule: "お題にもっとも当てはまる人を、全員同時に選びます。", examplePrompt: "一番相談しやすい人", inputLabel: "選んだ人と理由", inputPlaceholder: "例：やすこ｜話をよく聞いてくれる", progression: "simultaneous" },
+  { key: "johari-window", title: "ジョハリの窓", rule: "まず自分の特徴を選び、次に他の全員への印象を同時に選びます。提出内容は結果まで非公開です。", examplePrompt: "自分と周りから見た特徴", inputLabel: "特徴ワード", inputPlaceholder: "自分の特徴と、他の参加者への印象を選択", progression: "simultaneous" },
   { key: "turtle-soup", title: "ウミガメのスープ", rule: "順番に、はい・いいえで答えられる質問を1つずつ出します。", examplePrompt: "なぜ彼は傘を持たずに外出した？", inputLabel: "あなたの質問", inputPlaceholder: "例：その日は晴れていましたか？", progression: "turn" },
   { key: "truth-lie-game", title: "2つの真実と1つの嘘", rule: "全員が同時に、嘘だと思う番号を選びます。", examplePrompt: "1〜3のうち嘘はどれ？", inputLabel: "嘘だと思う番号", inputPlaceholder: "1 / 2 / 3", progression: "simultaneous" },
   { key: "count-up-game", title: "カウントアップゲーム", rule: "順番に1〜3個の数字を進めます。目標数に到達した人が負けです。", examplePrompt: "目標 30", inputLabel: "進める数字", inputPlaceholder: "例：1,2", progression: "count-up" },

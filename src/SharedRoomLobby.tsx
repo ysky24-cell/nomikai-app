@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import { io, type Socket } from "socket.io-client";
 import { QRCodeSVG } from "qrcode.react";
+import { johariWords } from "./data/johariWords";
 import { normalWordWolfTopics } from "./data/wordWolfTopics";
 import {
   isNativeSyncRoomGameKey,
@@ -54,6 +55,22 @@ type SharedGame =
       participantCount: number;
       ownVote?: string;
       result?: Record<string, number>;
+    }
+  | {
+      kind: "johari-window";
+      prompt: string;
+      phase: "self" | "peer" | "result" | string;
+      deckWordIds: string[];
+      participantCount: number;
+      selfSubmittedCount: number;
+      selfParticipantCount: number;
+      peerSubmittedCount: number;
+      peerRequiredCount: number;
+      ownSelfSelection?: string[];
+      ownSelfSubmitted?: boolean;
+      ownPeerSelections?: Record<string, string[]>;
+      ownPeerSubmitted?: Record<string, boolean>;
+      result?: Record<string, { open: string[]; hidden: string[]; blind: string[]; unknown: string[] }>;
     }
   | {
       kind: "anonymous-box";
@@ -138,6 +155,8 @@ type CommandKind =
   | "game_start"
   | "game_answer"
   | "game_reveal"
+  | "johari_self_submit"
+  | "johari_peer_submit"
   | "anonymous_submit"
   | "anonymous_moderate"
   | "game_vote"
@@ -154,6 +173,7 @@ const SHARED_GAME_MINIMUMS = {
   "anonymous-box": 2,
   "impression-ranking": 3,
   "majority-game": 3,
+  "johari-window": 3,
   "word-wolf": 4,
   werewolf: 4,
 } as const;
@@ -247,6 +267,10 @@ function roomError(error: unknown) {
     reconnect_token_invalid:
       "復帰情報が期限切れです。もう一度参加してください。",
     version_conflict: "ルームが更新されました。最新状態を取得しています。",
+    johari_deck_invalid: "ジョハリの窓の特徴ワードを準備できませんでした。もう一度開始してください。",
+    johari_selection_invalid: "選択できる特徴ワードを確認してください。",
+    johari_target_invalid: "評価対象を確認してください。",
+    johari_submission_locked: "この入力はすでに提出済みです。",
     rate_limited: "操作が多すぎます。少し待ってから試してください。",
     participant_required: "参加者情報が見つかりません。もう一度参加してください。",
     participant_auth_required:
@@ -308,7 +332,7 @@ function normalizeGamePhase(game: SharedGame | undefined): SharedGame | undefine
   if (["complete", "completed", "finished", "closed", "ended"].includes(phase)) {
     return {
       ...game,
-      phase: game.kind === "werewolf" || game.kind === "legacy-game" ? "finished" : "revealed",
+      phase: game.kind === "werewolf" || game.kind === "legacy-game" ? "finished" : game.kind === "johari-window" ? "result" : "revealed",
     } as SharedGame;
   }
   if (phase === "active" || phase === "playing") {
@@ -371,6 +395,8 @@ export function SharedRoomLobby({
   const [error, setError] = useState("");
   const [anonymousText, setAnonymousText] = useState("");
   const [legacyInput, setLegacyInput] = useState("");
+  const [johariSelfDraft, setJohariSelfDraft] = useState<string[]>([]);
+  const [johariPeerDrafts, setJohariPeerDrafts] = useState<Record<string, string[]>>({});
   const [hostPrompt, setHostPrompt] = useState("今夜、どちらを選ぶ？");
   const [legacyPrompt, setLegacyPrompt] = useState(
     () => getSyncGameDefinition(LEGACY_SYNC_GAME_KEYS[0] ?? "yamanote").examplePrompt,
@@ -733,6 +759,17 @@ export function SharedRoomLobby({
     }
   }, [projection?.game, refresh]);
 
+  useEffect(() => {
+    const game = projection?.game;
+    if (game?.kind !== "johari-window") {
+      setJohariSelfDraft([]);
+      setJohariPeerDrafts({});
+      return;
+    }
+    setJohariSelfDraft([...(game.ownSelfSelection ?? [])]);
+    setJohariPeerDrafts({ ...(game.ownPeerSelections ?? {}) });
+  }, [projection?.game]);
+
   async function createRoom() {
     const name = hostName.trim();
     if (!name) {
@@ -987,6 +1024,12 @@ export function SharedRoomLobby({
     projection?.status === "waiting" || projection?.status === "locked";
   const roomClosed = projection?.status === "closed";
   const legacyGame = activeGame?.kind === "legacy-game" ? activeGame : null;
+  const johariGame = activeGame?.kind === "johari-window" ? activeGame : null;
+  const johariDeckWords = johariGame
+    ? johariGame.deckWordIds
+      .map((id) => johariWords.find((word) => word.id === id))
+      .filter((word): word is (typeof johariWords)[number] => Boolean(word))
+    : [];
   const selectedLegacyDefinition = getSyncGameDefinition(legacyGameKey);
   const activeLegacyDefinition = legacyGame
     ? getSyncGameDefinition(legacyGame.gameKey)
@@ -996,6 +1039,35 @@ export function SharedRoomLobby({
     const definition = getSyncGameDefinition(key);
     setLegacyGameKey(key);
     setLegacyPrompt(definition.examplePrompt);
+  }
+
+  function toggleJohariSelfWord(wordId: string) {
+    if (!johariGame || johariGame.phase !== "self" || johariGame.ownSelfSubmitted) return;
+    const next = johariSelfDraft.includes(wordId)
+      ? johariSelfDraft.filter((id) => id !== wordId)
+      : [...johariSelfDraft, wordId];
+    setJohariSelfDraft(next);
+    void command("johari_self_submit", { selectedWordIds: next, submit: false });
+  }
+
+  function submitJohariSelf() {
+    if (!johariGame || johariGame.phase !== "self" || johariGame.ownSelfSubmitted) return;
+    void command("johari_self_submit", { selectedWordIds: johariSelfDraft, submit: true });
+  }
+
+  function toggleJohariPeerWord(targetId: string, wordId: string) {
+    if (!johariGame || johariGame.phase !== "peer" || johariGame.ownPeerSubmitted?.[targetId]) return;
+    const current = johariPeerDrafts[targetId] ?? [];
+    const next = current.includes(wordId)
+      ? current.filter((id) => id !== wordId)
+      : [...current, wordId];
+    setJohariPeerDrafts((drafts) => ({ ...drafts, [targetId]: next }));
+    void command("johari_peer_submit", { targetParticipantId: targetId, selectedWordIds: next, submit: false });
+  }
+
+  function submitJohariPeer(targetId: string) {
+    if (!johariGame || johariGame.phase !== "peer" || johariGame.ownPeerSubmitted?.[targetId]) return;
+    void command("johari_peer_submit", { targetParticipantId: targetId, selectedWordIds: johariPeerDrafts[targetId] ?? [], submit: true });
   }
 
   async function copy(value: string, message: string) {
@@ -1330,6 +1402,30 @@ export function SharedRoomLobby({
             </div>
           )}
           {isHost && roomReadyForGame && (
+            <div className="shared-room-host-actions">
+              <p className="soft-note">
+                <strong>ジョハリの窓</strong>：ホストも通常の参加者として、まず自分の特徴、次に他の全員への印象を選びます。提出内容は結果まで非公開で、最後の提出後に自動で結果が開きます。別の参加操作は不要です。
+              </p>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={
+                  busy || participantCount < minimumPlayersForGame("johari-window")
+                }
+                onClick={() =>
+                  void startGame({
+                    gameKind: "johari-window",
+                    prompt: hostPrompt.trim() || "自分と周りから見た特徴",
+                    johariDeckWordIds: johariWords.slice(0, 20).map((word) => word.id),
+                  })
+                }
+              >
+                <Play size={18} />
+                ジョハリの窓を開始（3人以上）
+              </button>
+            </div>
+          )}
+          {isHost && roomReadyForGame && (
             <button
               className="secondary-button"
               type="button"
@@ -1508,6 +1604,105 @@ export function SharedRoomLobby({
                     {activeGame.result?.B ?? 0} / パス{" "}
                     {activeGame.result?.pass ?? 0}
                   </span>
+                </div>
+              )}
+            </div>
+          )}
+          {activeGame?.kind === "johari-window" && (
+            <div className="shared-room-game-card">
+              <h3>ジョハリの窓</h3>
+              <p>{activeGame.prompt}</p>
+              <p className="soft-note">
+                ホストも参加者の一人です。選択内容は結果が開くまで、本人以外には表示されません。
+              </p>
+              {activeGame.phase === "self" && (
+                <>
+                  <p>
+                    自分の特徴を選択中：提出済み {activeGame.selfSubmittedCount}/
+                    {activeGame.selfParticipantCount}人
+                  </p>
+                  <div className="shared-room-choice-actions">
+                    {johariDeckWords.map((word) => (
+                      <button
+                        type="button"
+                        className={johariSelfDraft.includes(word.id) ? "primary-button" : "secondary-button"}
+                        key={word.id}
+                        disabled={busy || Boolean(activeGame.ownSelfSubmitted)}
+                        onClick={() => toggleJohariSelfWord(word.id)}
+                      >
+                        {word.label}
+                      </button>
+                    ))}
+                  </div>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={busy || Boolean(activeGame.ownSelfSubmitted)}
+                    onClick={submitJohariSelf}
+                  >
+                    {activeGame.ownSelfSubmitted ? "自分の特徴を提出済み" : "自分の特徴を提出"}
+                  </button>
+                </>
+              )}
+              {activeGame.phase === "peer" && (
+                <>
+                  <p>
+                    他の参加者への印象：提出済み {activeGame.peerSubmittedCount}/
+                    {activeGame.peerRequiredCount}件
+                  </p>
+                  <p className="soft-note">
+                    他の参加者を順番待ちにせず、それぞれのカードへ自由に入力できます。
+                  </p>
+                  {projection.participants
+                    .filter((item) => item.connected && item.id !== session.participantId)
+                    .map((target) => {
+                      const selected = johariPeerDrafts[target.id] ?? activeGame.ownPeerSelections?.[target.id] ?? [];
+                      const submitted = activeGame.ownPeerSubmitted?.[target.id] === true;
+                      return (
+                        <div className="shared-room-anonymous-entry" key={target.id}>
+                          <strong>{target.name}さんへの印象</strong>
+                          <div className="shared-room-choice-actions">
+                            {johariDeckWords.map((word) => (
+                              <button
+                                type="button"
+                                className={selected.includes(word.id) ? "primary-button" : "secondary-button"}
+                                key={word.id}
+                                disabled={busy || submitted}
+                                onClick={() => toggleJohariPeerWord(target.id, word.id)}
+                              >
+                                {word.label}
+                              </button>
+                            ))}
+                          </div>
+                          <button
+                            type="button"
+                            className="secondary-button"
+                            disabled={busy || submitted}
+                            onClick={() => submitJohariPeer(target.id)}
+                          >
+                            {submitted ? "この人への入力を提出済み" : "この人への入力を提出"}
+                          </button>
+                        </div>
+                      );
+                    })}
+                </>
+              )}
+              {activeGame.phase === "result" && (
+                <div className="shared-room-result">
+                  <strong>4つの窓</strong>
+                  {Object.entries(activeGame.result ?? {}).map(([participantId, panes]) => {
+                    const participant = projection.participants.find((item) => item.id === participantId);
+                    const labels = (ids: string[]) => ids.map((id) => johariWords.find((word) => word.id === id)?.label ?? id);
+                    return (
+                      <div className="shared-room-anonymous-entry" key={participantId}>
+                        <h4>{participant?.name ?? participantId}さん</h4>
+                        <span>開放の窓：{labels(panes.open).join("、") || "なし"}</span>
+                        <span>秘密の窓：{labels(panes.hidden).join("、") || "なし"}</span>
+                        <span>盲点の窓：{labels(panes.blind).join("、") || "なし"}</span>
+                        <span>未知の窓：{labels(panes.unknown).join("、") || "なし"}</span>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

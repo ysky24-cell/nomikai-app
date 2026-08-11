@@ -226,6 +226,137 @@ test("majority room accepts simultaneous private votes and reveals the full resu
   assert.deepEqual(playerProjection?.game?.kind === "majority-game" ? playerProjection.game.result : null, { A: 2, B: 1 });
 });
 
+test("Johari v2 keeps host participation private, auto-advances both stages, and resets cleanly", async () => {
+  const repository = new MemoryRoomRepository();
+  const service = new RoomService(repository);
+  const host = await service.createRoom("Host");
+  const sessions: Array<{ id: string; token: string }> = [{ id: host.room.self!.id, token: host.hostToken }];
+  for (const name of ["Alice", "Bob"]) {
+    const current = await service.getProjection(host.room.code, null);
+    const joined = await service.execute(command(host.room.code, `johari-join-${name}`, current!.version, "join", { name }));
+    sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
+  }
+
+  const hostId = sessions[0]!.id;
+  const alice = sessions[1]!;
+  const bob = sessions[2]!;
+  const locked = await lockRoom(service, host.room.code, 2, hostId, host.hostToken, "johari-lock");
+  const started = await service.execute(command(host.room.code, "johari-start", locked.version, "game_start", {
+    participantId: hostId,
+    gameKind: "johari-window",
+    prompt: "自分と周りから見た特徴",
+    johariDeckWordIds: ["w1", "w2", "w3", "w4"],
+  }), host.hostToken);
+  assert.equal(started.game?.kind, "johari-window");
+  assert.equal(started.game.phase, "self");
+  assert.equal(started.game.selfParticipantCount, 3);
+
+  const aliceDraft = await service.execute(command(host.room.code, "johari-alice-draft", started.version, "johari_self_submit", {
+    participantId: alice.id,
+    selectedWordIds: ["w2"],
+    submit: false,
+  }), alice.token);
+  assert.equal(aliceDraft.game?.kind, "johari-window");
+  assert.deepEqual(aliceDraft.game.ownSelfSelection, ["w2"]);
+  assert.equal(aliceDraft.game.ownSelfSubmitted, false);
+
+  const publicSelf = await service.getProjection(host.room.code, null);
+  assert.equal(publicSelf?.game?.kind, "johari-window");
+  assert.equal("ownSelfSelection" in publicSelf!.game, false);
+  assert.equal("ownPeerSelections" in publicSelf!.game, false);
+  assert.equal("result" in publicSelf!.game, false);
+
+  await repository.setParticipantConnected(host.room.code, alice.id, false);
+  const reconnectedAlice = await service.reconnect(host.room.code, alice.id, alice.token);
+  assert.equal(reconnectedAlice.game?.kind, "johari-window");
+  assert.deepEqual(reconnectedAlice.game.ownSelfSelection, ["w2"]);
+  assert.equal((await service.getProjection(host.room.code, hostId, host.hostToken))?.game?.kind, "johari-window");
+  const hostViewBeforeSelf = await service.getProjection(host.room.code, hostId, host.hostToken);
+  assert.equal(hostViewBeforeSelf?.game?.kind === "johari-window" ? hostViewBeforeSelf.game.ownSelfSelection : undefined, undefined);
+
+  const selfResults = await Promise.all([
+    service.execute(command(host.room.code, "johari-host-self", started.version, "johari_self_submit", { participantId: hostId, selectedWordIds: ["w1", "w2"] }), host.hostToken),
+    service.execute(command(host.room.code, "johari-alice-self", started.version, "johari_self_submit", { participantId: alice.id, selectedWordIds: ["w2"] }), alice.token),
+    service.execute(command(host.room.code, "johari-bob-self", started.version, "johari_self_submit", { participantId: bob.id, selectedWordIds: ["w3"] }), bob.token),
+  ]);
+  const peerStage = selfResults.find((result) => result.game?.kind === "johari-window" && result.game.phase === "peer") ?? selfResults.at(-1)!;
+  assert.equal(peerStage.game?.kind, "johari-window");
+  assert.equal(peerStage.game.phase, "peer");
+  assert.equal(peerStage.game.selfSubmittedCount, 3);
+  assert.equal(peerStage.game.peerSubmittedCount, 0);
+
+  await assert.rejects(
+    service.execute(command(host.room.code, "johari-self-too-late", peerStage.version, "johari_self_submit", { participantId: hostId, selectedWordIds: ["w4"] }), host.hostToken),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "game_not_ready",
+  );
+
+  const hostPeerDraft = await service.execute(command(host.room.code, "johari-host-peer-draft", peerStage.version, "johari_peer_submit", {
+    participantId: hostId,
+    targetParticipantId: alice.id,
+    selectedWordIds: ["w1"],
+    submit: false,
+  }), host.hostToken);
+  assert.equal(hostPeerDraft.game?.kind, "johari-window");
+  assert.equal(hostPeerDraft.game.peerSubmittedCount, 0);
+  assert.deepEqual(hostPeerDraft.game.ownPeerSelections?.[alice.id], ["w1"]);
+  const publicPeer = await service.getProjection(host.room.code, null);
+  assert.equal(publicPeer?.game?.kind, "johari-window");
+  assert.equal("ownPeerSelections" in publicPeer!.game, false);
+  const alicePeerView = await service.getProjection(host.room.code, alice.id, alice.token);
+  assert.equal(alicePeerView?.game?.kind, "johari-window");
+  assert.deepEqual(alicePeerView.game.ownPeerSelections?.[hostId], []);
+
+  const hostPeerSubmit = await service.execute(command(host.room.code, "johari-host-peer", peerStage.version, "johari_peer_submit", {
+    participantId: hostId,
+    targetParticipantId: alice.id,
+    selectedWordIds: ["w2"],
+  }), host.hostToken);
+  assert.equal(hostPeerSubmit.game?.kind, "johari-window");
+  assert.equal(hostPeerSubmit.game.phase, "peer");
+  assert.equal(hostPeerSubmit.game.peerSubmittedCount, 1);
+  assert.equal("result" in hostPeerSubmit.game, false);
+
+  const remainingPeerSubmissions = [
+    [hostId, host.hostToken, "johari-host-bob", bob.id, ["w3"]],
+    [alice.id, alice.token, "johari-alice-host", hostId, ["w1", "w3"]],
+    [alice.id, alice.token, "johari-alice-bob", bob.id, ["w1"]],
+    [bob.id, bob.token, "johari-bob-host", hostId, ["w2"]],
+    [bob.id, bob.token, "johari-bob-alice", alice.id, ["w2", "w4"]],
+  ] as const;
+  const resultCommands = await Promise.all(remainingPeerSubmissions.map(([participantId, token, id, targetParticipantId, selectedWordIds]) =>
+    service.execute(command(host.room.code, id, peerStage.version, "johari_peer_submit", { participantId, targetParticipantId, selectedWordIds: [...selectedWordIds] }), token),
+  ));
+  const finished = resultCommands.find((result) => result.game?.kind === "johari-window" && result.game.phase === "result") ?? resultCommands.at(-1)!;
+  assert.equal(finished.game?.kind, "johari-window");
+  assert.equal(finished.game.phase, "result");
+  assert.equal(finished.status, "finished");
+  assert.deepEqual(finished.game.result?.[hostId], { open: ["w1", "w2"], hidden: [], blind: ["w3"], unknown: ["w4"] });
+  assert.deepEqual(finished.game.result?.[alice.id], { open: ["w2"], hidden: [], blind: ["w4"], unknown: ["w1", "w3"] });
+  assert.deepEqual(finished.game.result?.[bob.id], { open: ["w3"], hidden: [], blind: ["w1"], unknown: ["w2", "w4"] });
+
+  const publicResult = await service.getProjection(host.room.code, null);
+  assert.equal(publicResult?.game?.kind, "johari-window");
+  assert.equal(Object.keys(publicResult!.game.result ?? {}).length, 3);
+  assert.equal("ownSelfSelection" in publicResult!.game, false);
+  assert.equal("ownPeerSelections" in publicResult!.game, false);
+  const playerResult = await service.getProjection(host.room.code, alice.id, alice.token);
+  assert.deepEqual(playerResult?.game?.kind === "johari-window" ? playerResult.game.result : null, finished.game.result);
+
+  const reset = await service.execute(command(host.room.code, "johari-reset", finished.version, "reset", { participantId: hostId }), host.hostToken);
+  assert.equal(reset.status, "waiting");
+  assert.equal(reset.game, undefined);
+  const relocked = await lockRoom(service, host.room.code, reset.version, hostId, host.hostToken, "johari-relock");
+  const rematch = await service.execute(command(host.room.code, "johari-rematch", relocked.version, "game_start", {
+    participantId: hostId,
+    gameKind: "johari-window",
+    prompt: "もう一度",
+    johariDeckWordIds: ["w1", "w2"],
+  }), host.hostToken);
+  assert.equal(rematch.game?.kind, "johari-window");
+  assert.equal(rematch.game.phase, "self");
+  assert.equal(rematch.game.selfSubmittedCount, 0);
+});
+
 test("anonymous submissions never expose author identity and follow moderation states", async () => {
   const service = new RoomService(new MemoryRoomRepository());
   const host = await service.createRoom("Host");
