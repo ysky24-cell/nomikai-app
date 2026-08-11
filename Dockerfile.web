@@ -26,6 +26,7 @@ FROM nginx:1.27-alpine AS production
 
 RUN apk add --no-cache libcap \
   && setcap 'cap_net_bind_service=+ep' /usr/sbin/nginx \
+  && sed -i 's#^pid.*#pid /tmp/nginx.pid;#' /etc/nginx/nginx.conf \
   && mkdir -p /var/cache/nginx /var/run \
   && chown -R nginx:nginx /var/cache/nginx /var/run
 
