@@ -384,6 +384,99 @@ type SharedGame =
       };
     }
   | {
+      kind: "count-up-game";
+      prompt: string;
+      phase: "playing" | "revealed" | string;
+      target: number;
+      currentValue: number;
+      playerOrder: string[];
+      currentPlayerId: string | null;
+      turnCount: number;
+      ownTurn: boolean;
+      result?: { target: number; finalValue: number; loserId: string | null; winnerIds: string[]; turnHistory: Array<{ id: string; playerId: string; increment: number; total: number }>; scores: Record<string, number> };
+    }
+  | {
+      kind: "dud-card-game";
+      prompt: string;
+      phase: "picking" | "revealed" | string;
+      cardIds: string[];
+      pickCount: number;
+      participantCount: number;
+      ownPick?: string;
+      result?: { cardIds: string[]; dudCardId: string; picks: Record<string, string>; dudPickerId: string | null; safeNeutral: true; scores: Record<string, number> };
+    }
+  | {
+      kind: "drinking-sugoroku" | "life-event-sugoroku";
+      prompt: string;
+      phase: "playing" | "revealed" | string;
+      boardLength: number;
+      positions: Record<string, number>;
+      playerOrder: string[];
+      currentPlayerId: string | null;
+      turnCount: number;
+      safeNotice: string;
+      ownPosition: number;
+      result?: { kind: "drinking-sugoroku" | "life-event-sugoroku"; boardLength: number; positions: Record<string, number>; turnHistory: Array<{ id: string; participantId: string; from: number; to: number; step: number; event: string }>; winnerId: string | null; scores: Record<string, number>; safeNotice: string };
+    }
+  | {
+      kind: "territory-game";
+      prompt: string;
+      phase: "playing" | "revealed" | string;
+      boardSize: number;
+      cellIds: string[];
+      cells: Record<string, string | null>;
+      playerOrder: string[];
+      currentPlayerId: string | null;
+      claimCount: number;
+      ownTurn: boolean;
+      result?: { boardSize: number; cells: Record<string, string | null>; claimHistory: Array<{ id: string; participantId: string; cellId: string }>; winnerIds: string[]; scores: Record<string, number> };
+    }
+  | {
+      kind: "resource-negotiation-game";
+      prompt: string;
+      phase: "negotiating" | "revealed" | string;
+      resourceNames: string[];
+      goalResource: string;
+      goalAmount: number;
+      offers: Array<{ id: string; creatorId: string; recipientId: string; give: Record<string, number>; want: Record<string, number>; status: string; order: number }>;
+      offerCount: number;
+      ownInventory?: Record<string, number>;
+      ownOfferIds: string[];
+      winnerId: string | null;
+      result?: { inventories: Record<string, Record<string, number>>; offers: Array<{ id: string; creatorId: string; recipientId: string; give: Record<string, number>; want: Record<string, number>; status: string; order: number }>; winnerId: string | null; goalResource: string; goalAmount: number; scores: Record<string, number> };
+    }
+  | {
+      kind: "arm-wrestling-tournament";
+      prompt: string;
+      phase: "playing" | "revealed" | string;
+      refereeId: string;
+      currentMatch: { id: string; round: number; leftId: string; rightId: string | null; winnerId?: string; status: string } | null;
+      matches: Array<{ id: string; round: number; leftId: string; rightId: string | null; winnerId?: string; status: string }>;
+      ownRole: "referee" | "competitor";
+      safetyNotice: string;
+      result?: { refereeId: string; matches: Array<{ id: string; round: number; leftId: string; rightId: string | null; winnerId?: string; status: string }>; winnerId: string | null; scores: Record<string, number>; safetyNotice: string };
+    }
+  | {
+      kind: "safe-random-draw";
+      prompt: string;
+      phase: "picking" | "revealed" | string;
+      cardIds: string[];
+      pickCount: number;
+      participantCount: number;
+      ownPick?: string;
+      result?: { cardIds: string[]; picks: Record<string, string>; outcomes: Record<string, string>; selectedOutcomes: Record<string, { cardId: string; outcome: string }>; safeNeutral: true; scores: Record<string, number> };
+    }
+  | {
+      kind: "large-majority-game";
+      prompt: string;
+      phase: "voting" | "revealed" | string;
+      options: string[];
+      voteCount: number;
+      participantCount: number;
+      ownVote?: string;
+      result?: { options: string[]; votes: Record<string, string>; counts: Record<string, number>; winningOptions: string[]; scores: Record<string, number> };
+    }
+  | {
       kind: "werewolf";
       phase: string;
       phaseDeadlineAt: number | null;
@@ -483,7 +576,19 @@ type CommandKind =
   | "person_hint_hint"
   | "person_hint_guess"
   | "humming_intro_prepare"
-  | "humming_intro_guess";
+  | "humming_intro_guess"
+  | "count_up_increment"
+  | "dud_card_pick"
+  | "drinking_sugoroku_roll"
+  | "life_event_sugoroku_roll"
+  | "territory_claim"
+  | "resource_offer_create"
+  | "resource_offer_accept"
+  | "resource_offer_reject"
+  | "resource_offer_cancel"
+  | "arm_wrestling_record"
+  | "safe_random_pick"
+  | "large_majority_vote";
 
 const SHARED_SESSION_KEY = "nomikai:shared-room-session:v1";
 const LEGACY_SYNC_GAME_KEYS = NEW_SYNC_ROOM_GAME_KEYS.filter(
@@ -513,6 +618,15 @@ const SHARED_GAME_MINIMUMS = {
   "emo-hint-game": 3,
   "person-hint-quiz": 3,
   "humming-intro-quiz": 3,
+  "count-up-game": 2,
+  "dud-card-game": 2,
+  "drinking-sugoroku": 2,
+  "territory-game": 2,
+  "resource-negotiation-game": 3,
+  "life-event-sugoroku": 2,
+  "arm-wrestling-tournament": 2,
+  "safe-random-draw": 2,
+  "large-majority-game": 10,
   werewolf: 4,
 } as const;
 
@@ -657,6 +771,26 @@ function roomError(error: unknown) {
     claim_invalid: "札を取る回答を入力してください。",
     guess_already_submitted: "予想はすでに提出済みです。",
     humming_target_invalid: "曲名を確認してください。",
+    count_up_target_invalid: "Count-up target is invalid.",
+    count_up_increment_invalid: "Choose an increment from 1 to 3.",
+    count_up_overflow: "That increment would pass the target.",
+    pick_already_submitted: "You have already picked.",
+    card_pick_invalid: "Choose one of the available cards.",
+    card_already_picked: "That card has already been picked.",
+    sugoroku_board_invalid: "The sugoroku board length is invalid.",
+    territory_board_invalid: "The territory board size is invalid.",
+    territory_cell_invalid: "Choose a valid empty cell.",
+    territory_cell_taken: "That territory cell is already claimed.",
+    trade_recipient_invalid: "Choose another connected participant.",
+    trade_offer_invalid: "The offer is invalid or cannot be afforded.",
+    trade_offer_not_found: "That trade offer is no longer available.",
+    trade_recipient_required: "Only the offer recipient can do that.",
+    trade_creator_required: "Only the offer creator can do that.",
+    referee_required: "Only the referee can record a match.",
+    match_not_ready: "There is no match waiting for a result.",
+    match_winner_invalid: "Choose one competitor in the current match.",
+    majority_options_invalid: "Use between two and five unique options.",
+    majority_vote_invalid: "Choose one of the listed options.",
     rate_limited: "操作が多すぎます。少し待ってから試してください。",
     participant_required: "参加者情報が見つかりません。もう一度参加してください。",
     participant_auth_required:
@@ -798,6 +932,9 @@ export function SharedRoomLobby({
   const [karutaResponse, setKarutaResponse] = useState("");
   const [hummingIntroTarget, setHummingIntroTarget] = useState("");
   const [hummingIntroGuess, setHummingIntroGuess] = useState("");
+  const [resourceOfferRecipient, setResourceOfferRecipient] = useState("");
+  const [resourceOfferGive, setResourceOfferGive] = useState("token:1");
+  const [resourceOfferWant, setResourceOfferWant] = useState("idea:1");
   const [turtleQuestion, setTurtleQuestion] = useState("");
   const [yamanoteInput, setYamanoteInput] = useState("");
   const [partyPackInput, setPartyPackInput] = useState("");
@@ -1038,6 +1175,10 @@ export function SharedRoomLobby({
          (next.game?.kind === "drawing-quiz" && (next.game.ownRole === "artist" ? !next.game.ownTarget : !next.game.ownGuess)) ||
          (next.game?.kind === "funny-line-karuta" && !next.game.ownClaim) ||
          (next.game?.kind === "humming-intro-quiz" && (next.game.ownRole === "singer" ? !next.game.ownTarget : !next.game.ownGuess)) ||
+         (next.game?.kind === "dud-card-game" && !next.game.ownPick) ||
+         (next.game?.kind === "safe-random-draw" && !next.game.ownPick) ||
+         (next.game?.kind === "large-majority-game" && !next.game.ownVote) ||
+         (next.game?.kind === "resource-negotiation-game" && !next.game.ownInventory) ||
          (next.game?.kind === "legacy-game" && !next.game.ownInput);
       if (needsPrivateRefresh)
         void refresh(session).catch((caught) => setError(roomError(caught)));
@@ -1351,6 +1492,13 @@ export function SharedRoomLobby({
               "drawing_quiz_guess",
               "funny_line_karuta_claim",
               "humming_intro_guess",
+              "dud_card_pick",
+              "safe_random_pick",
+              "large_majority_vote",
+              "resource_offer_create",
+              "resource_offer_accept",
+              "resource_offer_reject",
+              "resource_offer_cancel",
             ].includes(kind) &&
             latest
           ) {
@@ -1478,6 +1626,15 @@ export function SharedRoomLobby({
   const emoHintGame = activeGame?.kind === "emo-hint-game" ? activeGame : null;
   const personHintGame = activeGame?.kind === "person-hint-quiz" ? activeGame : null;
   const hummingIntroGame = activeGame?.kind === "humming-intro-quiz" ? activeGame : null;
+  const countUpGame = activeGame?.kind === "count-up-game" ? activeGame : null;
+  const dudCardGame = activeGame?.kind === "dud-card-game" ? activeGame : null;
+  const drinkingSugorokuGame = activeGame?.kind === "drinking-sugoroku" ? activeGame : null;
+  const lifeEventSugorokuGame = activeGame?.kind === "life-event-sugoroku" ? activeGame : null;
+  const territoryGame = activeGame?.kind === "territory-game" ? activeGame : null;
+  const resourceNegotiationGame = activeGame?.kind === "resource-negotiation-game" ? activeGame : null;
+  const armWrestlingGame = activeGame?.kind === "arm-wrestling-tournament" ? activeGame : null;
+  const safeRandomDrawGame = activeGame?.kind === "safe-random-draw" ? activeGame : null;
+  const largeMajorityGame = activeGame?.kind === "large-majority-game" ? activeGame : null;
   const nativeHintQuizGame = songAssociationGame ?? emoHintGame ?? personHintGame;
   const nativeHintQuizLabel = nativeHintQuizGame?.kind === "song-association-quiz"
     ? "Song association quiz"
@@ -1966,6 +2123,33 @@ export function SharedRoomLobby({
               >
                 <Play size={18} />
                 Humming intro quiz (3+)
+              </button>
+              <button className="secondary-button" type="button" disabled={busy || participantCount < minimumPlayersForGame("count-up-game") || !hostPrompt.trim()} onClick={() => void startGame({ gameKind: "count-up-game", prompt: hostPrompt.trim() || "Reach 30", countUpTarget: 30 })}>
+                <Play size={18} /> Count-up game (2+)
+              </button>
+              <button className="secondary-button" type="button" disabled={busy || participantCount < minimumPlayersForGame("dud-card-game") || !hostPrompt.trim()} onClick={() => void startGame({ gameKind: "dud-card-game", prompt: hostPrompt.trim() || "Pick one safe card" })}>
+                <Play size={18} /> Dud card (2+)
+              </button>
+              <button className="secondary-button" type="button" disabled={busy || participantCount < minimumPlayersForGame("drinking-sugoroku") || !hostPrompt.trim()} onClick={() => void startGame({ gameKind: "drinking-sugoroku", prompt: hostPrompt.trim() || "Safe party route" })}>
+                <Play size={18} /> Safe sugoroku (2+)
+              </button>
+              <button className="secondary-button" type="button" disabled={busy || participantCount < minimumPlayersForGame("territory-game") || !hostPrompt.trim()} onClick={() => void startGame({ gameKind: "territory-game", prompt: hostPrompt.trim() || "Claim a territory" })}>
+                <Play size={18} /> Territory game (2+)
+              </button>
+              <button className="secondary-button" type="button" disabled={busy || participantCount < minimumPlayersForGame("resource-negotiation-game") || !hostPrompt.trim()} onClick={() => void startGame({ gameKind: "resource-negotiation-game", prompt: hostPrompt.trim() || "Trade toward three ideas" })}>
+                <Play size={18} /> Resource negotiation (3+)
+              </button>
+              <button className="secondary-button" type="button" disabled={busy || participantCount < minimumPlayersForGame("life-event-sugoroku") || !hostPrompt.trim()} onClick={() => void startGame({ gameKind: "life-event-sugoroku", prompt: hostPrompt.trim() || "Life-event route" })}>
+                <Play size={18} /> Life-event sugoroku (2+)
+              </button>
+              <button className="secondary-button" type="button" disabled={busy || participantCount < minimumPlayersForGame("arm-wrestling-tournament") || !hostPrompt.trim()} onClick={() => void startGame({ gameKind: "arm-wrestling-tournament", prompt: hostPrompt.trim() || "Friendly bracket" })}>
+                <Play size={18} /> Arm-wrestling bracket (2+)
+              </button>
+              <button className="secondary-button" type="button" disabled={busy || participantCount < minimumPlayersForGame("safe-random-draw") || !hostPrompt.trim()} onClick={() => void startGame({ gameKind: "safe-random-draw", prompt: hostPrompt.trim() || "Choose a safe draw" })}>
+                <Play size={18} /> Safe random draw (2+)
+              </button>
+              <button className="secondary-button" type="button" disabled={busy || participantCount < minimumPlayersForGame("large-majority-game") || !hostPrompt.trim()} onClick={() => void startGame({ gameKind: "large-majority-game", prompt: hostPrompt.trim() || "Which option will be most popular?", largeMajorityOptions: ["A", "B", "C"] })}>
+                <Play size={18} /> Large majority (10+)
               </button>
               <button
                 className="primary-button"
@@ -3359,6 +3543,88 @@ export function SharedRoomLobby({
                   {hummingIntroGame.result.leaderboard.map((entry) => <span key={entry.participantId}>{entry.rank}. {projection.participants.find((item) => item.id === entry.participantId)?.name ?? entry.participantId}: {entry.correct ? "correct" : "wrong"} / {entry.score} point</span>)}
                 </div>
               )}
+            </div>
+          )}
+          {countUpGame && (
+            <div className="shared-room-game-card">
+              <h3>Count-up game</h3>
+              <p>{countUpGame.prompt}</p>
+              <p className="soft-note">Server target: {countUpGame.target} / current: {countUpGame.currentValue}. Current player: {projection.participants.find((item) => item.id === countUpGame.currentPlayerId)?.name ?? "-"}</p>
+              {countUpGame.phase === "playing" && countUpGame.ownTurn && <div className="shared-room-choice-actions">{[1, 2, 3].map((increment) => <button key={increment} type="button" className="primary-button" disabled={busy || countUpGame.currentValue + increment > countUpGame.target} onClick={() => void command("count_up_increment", { countUpIncrement: increment })}>+{increment}</button>)}</div>}
+              {countUpGame.phase === "playing" && !countUpGame.ownTurn && <p className="soft-note">Wait for the current player. Turn history: {countUpGame.turnCount}</p>}
+              {countUpGame.phase === "playing" && isHost && <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("game_reveal")}>Close round</button>}
+              {countUpGame.phase === "revealed" && countUpGame.result && <div className="shared-room-result"><strong>Target {countUpGame.result.target} / final {countUpGame.result.finalValue}</strong><p>Loser: {projection.participants.find((item) => item.id === countUpGame.result?.loserId)?.name ?? "No loser"}</p>{Object.entries(countUpGame.result.scores).map(([participantId, score]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}: {score} point</span>)}</div>}
+            </div>
+          )}
+          {dudCardGame && (
+            <div className="shared-room-game-card">
+              <h3>Dud card</h3>
+              <p>{dudCardGame.prompt}</p>
+              {dudCardGame.phase === "picking" && <div className="shared-room-choice-actions">{dudCardGame.cardIds.map((cardId) => <button key={cardId} type="button" className={dudCardGame.ownPick === cardId ? "primary-button" : "secondary-button"} disabled={busy || Boolean(dudCardGame.ownPick)} onClick={() => void command("dud_card_pick", { dudCardPick: cardId })}>{cardId}</button>)}</div>}
+              {dudCardGame.phase === "picking" && <p className="soft-note">Private picks received: {dudCardGame.pickCount}/{dudCardGame.participantCount}. The dud stays hidden.</p>}
+              {dudCardGame.phase === "picking" && isHost && <button type="button" className="secondary-button" disabled={busy || dudCardGame.pickCount < dudCardGame.participantCount} onClick={() => void command("game_reveal")}>Reveal safe result</button>}
+              {dudCardGame.phase === "revealed" && dudCardGame.result && <div className="shared-room-result"><strong>Neutral reveal: dud card {dudCardGame.result.dudCardId}</strong>{Object.entries(dudCardGame.result.picks).map(([participantId, cardId]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}: {cardId} / {dudCardGame.result?.scores[participantId] ?? 0} point</span>)}</div>}
+            </div>
+          )}
+          {(drinkingSugorokuGame || lifeEventSugorokuGame) && (() => { const game = drinkingSugorokuGame ?? lifeEventSugorokuGame!; const rollCommand: CommandKind = game.kind === "drinking-sugoroku" ? "drinking_sugoroku_roll" : "life_event_sugoroku_roll"; return (
+            <div className="shared-room-game-card">
+              <h3>{game.kind === "drinking-sugoroku" ? "Safe sugoroku" : "Life-event sugoroku"}</h3>
+              <p>{game.prompt}</p>
+              <p className="soft-note">{game.safeNotice}</p>
+              <p>Current player: {projection.participants.find((item) => item.id === game.currentPlayerId)?.name ?? "-"} / board {game.boardLength} / turn {game.turnCount}</p>
+              <div className="shared-room-anonymous-list">{Object.entries(game.positions).map(([participantId, position]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}: {position}/{game.boardLength}</span>)}</div>
+              {game.phase === "playing" && game.currentPlayerId === session.participantId && <button type="button" className="primary-button" disabled={busy} onClick={() => void command(rollCommand)}>Roll a safe step</button>}
+              {game.phase === "playing" && isHost && <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("game_reveal")}>Close route</button>}
+              {game.phase === "revealed" && game.result && <div className="shared-room-result"><strong>Winner: {projection.participants.find((item) => item.id === game.result?.winnerId)?.name ?? "No winner"}</strong><p>{game.result.safeNotice}</p></div>}
+            </div>
+          ); })()}
+          {territoryGame && (
+            <div className="shared-room-game-card">
+              <h3>Territory game</h3>
+              <p>{territoryGame.prompt}</p>
+              <p className="soft-note">Current player: {projection.participants.find((item) => item.id === territoryGame.currentPlayerId)?.name ?? "-"} / claims {territoryGame.claimCount}</p>
+              <div className="shared-room-choice-actions">{territoryGame.cellIds.map((cellId) => { const ownerId = territoryGame.cells[cellId]; return <button key={cellId} type="button" className={ownerId === session.participantId ? "primary-button" : "secondary-button"} disabled={busy || Boolean(ownerId) || !territoryGame.ownTurn || territoryGame.phase !== "playing"} onClick={() => void command("territory_claim", { territoryCell: cellId })}>{cellId}{ownerId ? ` · ${projection.participants.find((item) => item.id === ownerId)?.name ?? "claimed"}` : ""}</button>; })}</div>
+              {territoryGame.phase === "revealed" && territoryGame.result && <div className="shared-room-result"><strong>Winner(s): {territoryGame.result.winnerIds.map((id) => projection.participants.find((item) => item.id === id)?.name ?? id).join(", ") || "Tie / no claims"}</strong>{Object.entries(territoryGame.result.scores).map(([participantId, score]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}: {score} cells</span>)}</div>}
+            </div>
+          )}
+          {resourceNegotiationGame && (
+            <div className="shared-room-game-card">
+              <h3>Resource negotiation</h3>
+              <p>{resourceNegotiationGame.prompt}</p>
+              <p className="soft-note">Goal: {resourceNegotiationGame.goalAmount} {resourceNegotiationGame.goalResource}. Your inventory: {resourceNegotiationGame.ownInventory ? Object.entries(resourceNegotiationGame.ownInventory).map(([name, amount]) => `${name} ${amount}`).join(" / ") : "private"}</p>
+              {resourceNegotiationGame.phase === "negotiating" && <div className="shared-room-form"><label>Recipient<select value={resourceOfferRecipient} onChange={(event) => setResourceOfferRecipient(event.currentTarget.value)}><option value="">Choose participant</option>{projection.participants.filter((item) => item.id !== session.participantId && item.connected).map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>Give<input value={resourceOfferGive} onChange={(event) => setResourceOfferGive(event.currentTarget.value)} placeholder="token:1" /></label><label>Want<input value={resourceOfferWant} onChange={(event) => setResourceOfferWant(event.currentTarget.value)} placeholder="idea:1" /></label><button type="button" className="primary-button" disabled={busy || !resourceOfferRecipient || !resourceOfferGive.trim() || !resourceOfferWant.trim()} onClick={() => void command("resource_offer_create", { resourceOfferRecipientId: resourceOfferRecipient, resourceOfferGive: resourceOfferGive.trim(), resourceOfferWant: resourceOfferWant.trim() })}>Create offer</button></div>}
+              <div className="shared-room-anonymous-list">{resourceNegotiationGame.offers.map((offer) => <div key={offer.id}><span>{projection.participants.find((item) => item.id === offer.creatorId)?.name ?? offer.creatorId} → {projection.participants.find((item) => item.id === offer.recipientId)?.name ?? offer.recipientId}: {Object.entries(offer.give).filter(([, amount]) => amount > 0).map(([name, amount]) => `${name}:${amount}`).join(",")} for {Object.entries(offer.want).filter(([, amount]) => amount > 0).map(([name, amount]) => `${name}:${amount}`).join(",")} ({offer.status})</span>{resourceNegotiationGame.phase === "negotiating" && offer.status === "pending" && offer.recipientId === session.participantId && <><button type="button" className="secondary-button" disabled={busy} onClick={() => void command("resource_offer_accept", { resourceOfferId: offer.id })}>Accept</button><button type="button" className="secondary-button" disabled={busy} onClick={() => void command("resource_offer_reject", { resourceOfferId: offer.id })}>Reject</button></>}{resourceNegotiationGame.phase === "negotiating" && offer.status === "pending" && offer.creatorId === session.participantId && <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("resource_offer_cancel", { resourceOfferId: offer.id })}>Cancel</button>}</div>)}</div>
+              {resourceNegotiationGame.phase === "revealed" && resourceNegotiationGame.result && <div className="shared-room-result"><strong>Winner: {projection.participants.find((item) => item.id === resourceNegotiationGame.result?.winnerId)?.name ?? "No winner"}</strong>{Object.entries(resourceNegotiationGame.result.scores).map(([participantId, score]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}: {score} point</span>)}</div>}
+            </div>
+          )}
+          {armWrestlingGame && (
+            <div className="shared-room-game-card">
+              <h3>Arm-wrestling tournament</h3>
+              <p>{armWrestlingGame.prompt}</p>
+              <p className="soft-note">{armWrestlingGame.safetyNotice} Referee: {projection.participants.find((item) => item.id === armWrestlingGame.refereeId)?.name ?? armWrestlingGame.refereeId}</p>
+              {armWrestlingGame.currentMatch && <p>Round {armWrestlingGame.currentMatch.round}: {projection.participants.find((item) => item.id === armWrestlingGame.currentMatch?.leftId)?.name ?? armWrestlingGame.currentMatch.leftId} vs {projection.participants.find((item) => item.id === armWrestlingGame.currentMatch?.rightId)?.name ?? armWrestlingGame.currentMatch.rightId ?? "bye"}</p>}
+              {armWrestlingGame.currentMatch && armWrestlingGame.ownRole === "referee" && <div className="shared-room-choice-actions">{[armWrestlingGame.currentMatch.leftId, armWrestlingGame.currentMatch.rightId].filter((id): id is string => Boolean(id)).map((winnerId) => <button key={winnerId} type="button" className="primary-button" disabled={busy} onClick={() => void command("arm_wrestling_record", { armWrestlingWinnerId: winnerId })}>Record {projection.participants.find((item) => item.id === winnerId)?.name ?? winnerId}</button>)}</div>}
+              {armWrestlingGame.phase === "revealed" && armWrestlingGame.result && <div className="shared-room-result"><strong>Champion: {projection.participants.find((item) => item.id === armWrestlingGame.result?.winnerId)?.name ?? "No champion"}</strong></div>}
+            </div>
+          )}
+          {safeRandomDrawGame && (
+            <div className="shared-room-game-card">
+              <h3>Safe random draw</h3>
+              <p>{safeRandomDrawGame.prompt}</p>
+              {safeRandomDrawGame.phase === "picking" && <div className="shared-room-choice-actions">{safeRandomDrawGame.cardIds.map((cardId) => <button key={cardId} type="button" className={safeRandomDrawGame.ownPick === cardId ? "primary-button" : "secondary-button"} disabled={busy || Boolean(safeRandomDrawGame.ownPick)} onClick={() => void command("safe_random_pick", { safeRandomPick: cardId })}>{cardId}</button>)}</div>}
+              {safeRandomDrawGame.phase === "picking" && <p className="soft-note">Private picks received: {safeRandomDrawGame.pickCount}/{safeRandomDrawGame.participantCount}. Outcomes are neutral and hidden.</p>}
+              {safeRandomDrawGame.phase === "picking" && isHost && <button type="button" className="secondary-button" disabled={busy || safeRandomDrawGame.pickCount < safeRandomDrawGame.participantCount} onClick={() => void command("game_reveal")}>Reveal safe outcomes</button>}
+              {safeRandomDrawGame.phase === "revealed" && safeRandomDrawGame.result && <div className="shared-room-result"><strong>Safe neutral result</strong>{Object.entries(safeRandomDrawGame.result.selectedOutcomes).map(([participantId, selected]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}: {selected.outcome} / {safeRandomDrawGame.result?.scores[participantId] ?? 0} point</span>)}</div>}
+            </div>
+          )}
+          {largeMajorityGame && (
+            <div className="shared-room-game-card">
+              <h3>Large majority</h3>
+              <p>{largeMajorityGame.prompt}</p>
+              {largeMajorityGame.phase === "voting" && <div className="shared-room-choice-actions">{largeMajorityGame.options.map((option) => <button key={option} type="button" className={largeMajorityGame.ownVote === option ? "primary-button" : "secondary-button"} disabled={busy || Boolean(largeMajorityGame.ownVote)} onClick={() => void command("large_majority_vote", { largeMajorityVote: option })}>{option}</button>)}</div>}
+              {largeMajorityGame.phase === "voting" && <p className="soft-note">Private votes received: {largeMajorityGame.voteCount}/{largeMajorityGame.participantCount}. The tally stays hidden.</p>}
+              {largeMajorityGame.phase === "voting" && isHost && <button type="button" className="secondary-button" disabled={busy || largeMajorityGame.voteCount < largeMajorityGame.participantCount} onClick={() => void command("game_reveal")}>Reveal tally</button>}
+              {largeMajorityGame.phase === "revealed" && largeMajorityGame.result && <div className="shared-room-result"><strong>Winning option(s): {largeMajorityGame.result.winningOptions.join(", ")}</strong>{Object.entries(largeMajorityGame.result.counts).map(([option, count]) => <span key={option}>{option}: {count} votes</span>)}</div>}
             </div>
           )}
           {legacyGame?.kind === "legacy-game" && activeLegacyDefinition && (

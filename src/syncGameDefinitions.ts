@@ -44,7 +44,19 @@ const definitions: readonly SyncGameDefinition[] = [
   { key: "acting-game", title: "ひとこと演技ゲーム", rule: "サーバーが演者と感情を選び、演者だけに秘密の感情を表示します。ほかの参加者は非公開で予想し、結果公開時に得点を確定します。", examplePrompt: "『大丈夫です』を演じる", inputLabel: "演技から予想した感情", inputPlaceholder: "例：うれしい", progression: "simultaneous" },
 ];
 
-export const syncGameDefinitionByKey = Object.fromEntries(definitions.map((definition) => [definition.key, definition])) as Record<string, SyncGameDefinition>;
+const nativeFinalDefinitions: readonly SyncGameDefinition[] = [
+  { key: "count-up-game", title: "Count-up game", rule: "The server owns the target, current number, turn, and history. The current player adds 1–3; overflow is rejected and reaching the target ends the round deterministically.", examplePrompt: "Reach 30", inputLabel: "Increment", inputPlaceholder: "1, 2, or 3", progression: "count-up" },
+  { key: "dud-card-game", title: "Dud card", rule: "The server shuffles a safe neutral card set. Everyone privately picks one card, duplicate picks are rejected atomically, and the dud is revealed only after the gate.", examplePrompt: "Pick one card", inputLabel: "Card", inputPlaceholder: "Choose a card", progression: "simultaneous" },
+  { key: "drinking-sugoroku", title: "Safe sugoroku", rule: "The server owns positions, turns, and a random step. The name is only a theme: no alcohol is required, and water, rest, or pass are always safe choices.", examplePrompt: "A relaxed party route", inputLabel: "Roll", inputPlaceholder: "Server rolls", progression: "turn" },
+  { key: "territory-game", title: "Territory game", rule: "The server owns the board and current turn. Players claim an empty cell atomically; the board closes with a deterministic score and tie result.", examplePrompt: "Claim a cell", inputLabel: "Cell", inputPlaceholder: "A1, B2, or C3", progression: "turn" },
+  { key: "resource-negotiation-game", title: "Resource negotiation", rule: "Inventories and offers live on the server. Only the offer creator or recipient can act, and an accepted trade is applied atomically toward a deterministic goal.", examplePrompt: "Trade toward three ideas", inputLabel: "Offer", inputPlaceholder: "token:1 / idea:1", progression: "simultaneous" },
+  { key: "life-event-sugoroku", title: "Life-event sugoroku", rule: "The server owns positions, turns, safe random steps, and optional events. Events never coerce participation; rest and pass remain valid.", examplePrompt: "A life-event route", inputLabel: "Roll", inputPlaceholder: "Server rolls", progression: "turn" },
+  { key: "arm-wrestling-tournament", title: "Arm-wrestling tournament", rule: "The server owns the bracket and advances only after the referee records a match winner. Safety comes first: no physical force is required or encouraged.", examplePrompt: "Friendly bracket", inputLabel: "Match winner", inputPlaceholder: "Referee records the result", progression: "turn" },
+  { key: "safe-random-draw", title: "Safe random draw", rule: "The server shuffles neutral outcomes and assigns them privately to atomic picks. Results are hidden until the reveal gate and contain no punitive alcohol outcome.", examplePrompt: "Choose a safe draw", inputLabel: "Card", inputPlaceholder: "Choose a card", progression: "simultaneous" },
+  { key: "large-majority-game", title: "Large majority", rule: "Everyone votes privately at the same time. The server hides the tally until all active participants submit, then calculates deterministic winners and scores.", examplePrompt: "Which option will be most popular?", inputLabel: "Vote", inputPlaceholder: "Choose an option", progression: "simultaneous" },
+];
+
+export const syncGameDefinitionByKey = Object.fromEntries([...definitions, ...nativeFinalDefinitions].map((definition) => [definition.key, definition])) as Record<string, SyncGameDefinition>;
 
 export function getSyncGameDefinition(key: string): SyncGameDefinition {
   return syncGameDefinitionByKey[key] ?? {

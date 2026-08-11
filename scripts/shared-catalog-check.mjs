@@ -9,6 +9,7 @@ const native = new Set([
   "yamanote", "ng-word", "turtle-soup", "party-pack", "johari-window",
   "truth-lie-game", "reverse-word-game", "fast-typing-game", "memory-drawing-game", "value-meter-game", "acting-game", "loanword-ban-game",
   "song-association-quiz", "drawing-quiz", "funny-line-karuta", "emo-hint-game", "person-hint-quiz", "humming-intro-quiz",
+  "count-up-game", "dud-card-game", "drinking-sugoroku", "territory-game", "resource-negotiation-game", "life-event-sugoroku", "arm-wrestling-tournament", "safe-random-draw", "large-majority-game",
 ]);
 const requestedKeys = (process.argv[3] || process.env.NOMIKAI_SHARED_KEYS || "").split(",").map((key) => key.trim()).filter(Boolean);
 const legacyKeys = keys.filter((key) => !native.has(key) && (requestedKeys.length === 0 || requestedKeys.includes(key)));
@@ -29,7 +30,7 @@ async function command(room, token, body) {
 }
 
 const checks = [];
-for (const key of ["truth-lie-game", "reverse-word-game", "fast-typing-game", "memory-drawing-game", "value-meter-game", "acting-game", "loanword-ban-game", "song-association-quiz", "drawing-quiz", "funny-line-karuta", "emo-hint-game", "person-hint-quiz", "humming-intro-quiz"]) {
+for (const key of ["truth-lie-game", "reverse-word-game", "fast-typing-game", "memory-drawing-game", "value-meter-game", "acting-game", "loanword-ban-game", "song-association-quiz", "drawing-quiz", "funny-line-karuta", "emo-hint-game", "person-hint-quiz", "humming-intro-quiz", "count-up-game", "dud-card-game", "drinking-sugoroku", "territory-game", "resource-negotiation-game", "life-event-sugoroku", "arm-wrestling-tournament", "safe-random-draw", "large-majority-game"]) {
   assert.ok(native.has(key), `${key}: missing native catalog classification`);
   assert.equal(legacyKeys.includes(key), false, `${key}: still routed through generic legacy selector`);
 }

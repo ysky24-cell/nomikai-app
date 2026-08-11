@@ -67,4 +67,33 @@ describe("room game contracts", () => {
     expect(isNativeSyncRoomGameKey("weird-karuta-game")).toBe(false);
     expect(isNewSyncRoomGameKey("weird-karuta-game")).toBe(false);
   });
+
+  it("routes the final nine games through canonical native v2 contracts", () => {
+    const finalKeys = [
+      "count-up-game",
+      "dud-card-game",
+      "drinking-sugoroku",
+      "territory-game",
+      "resource-negotiation-game",
+      "life-event-sugoroku",
+      "arm-wrestling-tournament",
+      "safe-random-draw",
+      "large-majority-game",
+    ] as const;
+
+    for (const key of finalKeys) {
+      expect(isNewSyncRoomGameKey(key)).toBe(true);
+      expect(isNativeSyncRoomGameKey(key)).toBe(true);
+      expect(getSyncGameDefinition(key).key).toBe(key);
+    }
+
+    expect(getSyncGameDefinition("count-up-game").progression).toBe("count-up");
+    expect(getSyncGameDefinition("drinking-sugoroku").rule).toContain("no alcohol");
+    expect(getSyncGameDefinition("arm-wrestling-tournament").rule).toContain("no physical force");
+    expect(getSyncGameDefinition("resource-negotiation-game").rule).toContain("atomically");
+    for (const legacyAlias of ["hazard-card-game", "party-sugoroku", "territory-board-game"] as const) {
+      expect(isNewSyncRoomGameKey(legacyAlias)).toBe(false);
+      expect(isNativeSyncRoomGameKey(legacyAlias)).toBe(false);
+    }
+  });
 });

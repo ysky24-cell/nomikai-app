@@ -953,6 +953,146 @@ test("native party pack supports private simultaneous answers, turn progression,
   if (rematchResult.game?.kind === "party-pack") assert.equal(rematchResult.game.result?.answer, "らくさ");
 });
 
+async function startFinalNativeGame(
+  gameKind: Exclude<RoomCommand["gameKind"], "legacy-game" | undefined>,
+  names: string[],
+  extra: Partial<RoomCommand> = {},
+) {
+  const setup = await createRoomWithPlayers(names);
+  const locked = await lockRoom(setup.service, setup.host.room.code, setup.version, setup.sessions[0]!.id, setup.sessions[0]!.token, `${gameKind}-lock`);
+  const started = await setup.service.execute(command(setup.host.room.code, `${gameKind}-start`, locked.version, "game_start", { participantId: setup.sessions[0]!.id, gameKind, prompt: `${gameKind} prompt`, ...extra }), setup.sessions[0]!.token);
+  return { ...setup, locked, started, version: started.version };
+}
+
+test("final native v2 games keep server ownership, privacy, gates, and safe lifecycle", async () => {
+  const count = await startFinalNativeGame("count-up-game", ["Bob"], { countUpTarget: 3 });
+  const host = count.sessions[0]!;
+  const bob = count.sessions[1]!;
+  await assert.rejects(count.service.execute(command(count.host.room.code, "count-wrong-turn", count.version, "count_up_increment", { participantId: bob.id, countUpIncrement: 1 }), bob.token), (error: unknown) => error instanceof RoomDomainError && error.code === "not_your_turn");
+  const hostOne = await count.service.execute(command(count.host.room.code, "count-one", count.version, "count_up_increment", { participantId: host.id, countUpIncrement: 1 }), host.token);
+  const bobLeft = await count.service.execute(command(count.host.room.code, "count-leave", hostOne.version, "leave", { participantId: bob.id }), bob.token);
+  assert.equal(bobLeft.game?.kind, "count-up-game");
+  if (!bobLeft.game || bobLeft.game.kind !== "count-up-game") throw new Error("count-up departure projection missing");
+  assert.equal(bobLeft.game.currentPlayerId, host.id);
+  const countFinished = await count.service.execute(command(count.host.room.code, "count-last", bobLeft.version, "count_up_increment", { participantId: host.id, countUpIncrement: 2 }), host.token);
+  assert.equal(countFinished.status, "finished");
+  assert.equal(countFinished.game?.kind, "count-up-game");
+  if (!countFinished.game || countFinished.game.kind !== "count-up-game" || !countFinished.game.result) throw new Error("count-up result missing");
+  assert.equal(countFinished.game.result.loserId, host.id);
+  const countReset = await count.service.execute(command(count.host.room.code, "count-reset", countFinished.version, "reset", { participantId: host.id }), host.token);
+  assert.equal(countReset.status, "waiting");
+
+  const dud = await startFinalNativeGame("dud-card-game", ["Alice", "Bob"]);
+  const dudHost = dud.sessions[0]!;
+  const dudPublic = dud.started.game;
+  if (!dudPublic || dudPublic.kind !== "dud-card-game") throw new Error("dud start projection missing");
+  assert.equal("result" in dudPublic, false);
+  const dudPicks = dud.sessions.map((session, index) => dud.service.execute(command(dud.host.room.code, `dud-pick-${index}`, dud.version, "dud_card_pick", { participantId: session.id, dudCardPick: dudPublic.cardIds[index] }), session.token));
+  const dudResults = await Promise.all(dudPicks);
+  const dudResult = await dud.service.getProjection(dud.host.room.code, dudHost.id, dudHost.token);
+  assert.equal(dudResults.length, dud.sessions.length);
+  assert.equal(dudResult?.status, "finished");
+  if (!dudResult?.game || dudResult.game.kind !== "dud-card-game" || !dudResult.game.result) throw new Error("dud result missing");
+  assert.equal(dudResult.game.result.safeNeutral, true);
+  assert.equal(Object.keys(dudResult.game.result.picks).length, dud.sessions.length);
+
+  const safe = await startFinalNativeGame("safe-random-draw", ["Alice"]);
+  if (!safe.started.game || safe.started.game.kind !== "safe-random-draw") throw new Error("safe draw start projection missing");
+  const safeCards = safe.started.game.cardIds;
+  const safeFirst = await safe.service.execute(command(safe.host.room.code, "safe-first", safe.version, "safe_random_pick", { participantId: safe.sessions[0]!.id, safeRandomPick: safeCards[0] }), safe.sessions[0]!.token);
+  const safePrivate = await safe.service.getProjection(safe.host.room.code, safe.sessions[0]!.id, safe.sessions[0]!.token);
+  const safeOther = await safe.service.getProjection(safe.host.room.code, safe.sessions[1]!.id, safe.sessions[1]!.token);
+  assert.equal(safePrivate?.game?.kind, "safe-random-draw");
+  if (!safePrivate?.game || safePrivate.game.kind !== "safe-random-draw" || !safeOther?.game || safeOther.game.kind !== "safe-random-draw") throw new Error("safe draw projection missing");
+  assert.equal(safePrivate.game.ownPick, safeCards[0]);
+  assert.equal(safeOther.game.ownPick, undefined);
+  const safeDone = await safe.service.execute(command(safe.host.room.code, "safe-second", safeFirst.version, "safe_random_pick", { participantId: safe.sessions[1]!.id, safeRandomPick: safeCards[1] }), safe.sessions[1]!.token);
+  assert.equal(safeDone.status, "finished");
+  if (!safeDone.game || safeDone.game.kind !== "safe-random-draw" || !safeDone.game.result) throw new Error("safe draw result missing");
+  assert.equal(safeDone.game.result.safeNeutral, true);
+  assert.equal(Object.keys(safeDone.game.result.outcomes).length, safeCards.length);
+
+  const territory = await startFinalNativeGame("territory-game", ["Alice"], { territoryBoardSize: 2 });
+  const territoryHost = territory.sessions[0]!;
+  const territoryBob = territory.sessions[1]!;
+  let territoryVersion = territory.version;
+  const territoryClaims: Array<[string, string, string]> = [[territoryHost.id, territoryHost.token, "A1"], [territoryBob.id, territoryBob.token, "A2"], [territoryHost.id, territoryHost.token, "B1"], [territoryBob.id, territoryBob.token, "B2"]];
+  for (const [participantId, participantToken, cell] of territoryClaims) {
+    const result = await territory.service.execute(command(territory.host.room.code, `territory-${cell}`, territoryVersion, "territory_claim", { participantId, territoryCell: cell }), participantToken);
+    territoryVersion = result.version;
+  }
+  const territoryResult = await territory.service.getProjection(territory.host.room.code, territoryHost.id, territoryHost.token);
+  assert.equal(territoryResult?.status, "finished");
+  if (!territoryResult?.game || territoryResult.game.kind !== "territory-game" || !territoryResult.game.result) throw new Error("territory result missing");
+  assert.deepEqual(territoryResult.game.result.winnerIds.sort(), [territoryHost.id, territoryBob.id].sort());
+
+  const resource = await startFinalNativeGame("resource-negotiation-game", ["Alice", "Bob"]);
+  const resourceHost = resource.sessions[0]!;
+  const resourceBob = resource.sessions[1]!;
+  const offerOne = await resource.service.execute(command(resource.host.room.code, "trade-one", resource.version, "resource_offer_create", { participantId: resourceHost.id, resourceOfferRecipientId: resourceBob.id, resourceOfferGive: "token:1", resourceOfferWant: "idea:1" }), resourceHost.token);
+  if (!offerOne.game || offerOne.game.kind !== "resource-negotiation-game") throw new Error("resource offer projection missing");
+  const offerId = offerOne.game.offers[0]!.id;
+  await assert.rejects(resource.service.execute(command(resource.host.room.code, "trade-wrong-actor", offerOne.version, "resource_offer_accept", { participantId: resourceHost.id, resourceOfferId: offerId }), resourceHost.token), (error: unknown) => error instanceof RoomDomainError && error.code === "trade_recipient_required");
+  const acceptedOne = await resource.service.execute(command(resource.host.room.code, "trade-accept-one", offerOne.version, "resource_offer_accept", { participantId: resourceBob.id, resourceOfferId: offerId }), resourceBob.token);
+  const offerTwo = await resource.service.execute(command(resource.host.room.code, "trade-two", acceptedOne.version, "resource_offer_create", { participantId: resourceHost.id, resourceOfferRecipientId: resourceBob.id, resourceOfferGive: "token:1", resourceOfferWant: "idea:1" }), resourceHost.token);
+  if (!offerTwo.game || offerTwo.game.kind !== "resource-negotiation-game") throw new Error("second resource offer projection missing");
+  const offerTwoId = offerTwo.game.offers.find((offer) => offer.status === "pending")!.id;
+  const resourceFinished = await resource.service.execute(command(resource.host.room.code, "trade-accept-two", offerTwo.version, "resource_offer_accept", { participantId: resourceBob.id, resourceOfferId: offerTwoId }), resourceBob.token);
+  assert.equal(resourceFinished.status, "finished");
+  if (!resourceFinished.game || resourceFinished.game.kind !== "resource-negotiation-game" || !resourceFinished.game.result) throw new Error("resource result missing");
+  assert.equal(resourceFinished.game.result.winnerId, resourceHost.id);
+  assert.equal(resourceFinished.game.result.inventories[resourceHost.id]?.idea, 3);
+
+  const arm = await startFinalNativeGame("arm-wrestling-tournament", ["Alice", "Bob"]);
+  if (!arm.started.game || arm.started.game.kind !== "arm-wrestling-tournament" || !arm.started.game.currentMatch) throw new Error("arm bracket match missing");
+  const armGame = arm.started.game;
+  const referee = arm.sessions.find((session) => session.id === armGame.refereeId)!;
+  const competitor = arm.sessions.find((session) => session.id !== referee.id)!;
+  await assert.rejects(arm.service.execute(command(arm.host.room.code, "arm-wrong-referee", arm.version, "arm_wrestling_record", { participantId: competitor.id, armWrestlingWinnerId: competitor.id }), competitor.token), (error: unknown) => error instanceof RoomDomainError && error.code === "referee_required");
+  const armFinished = await arm.service.execute(command(arm.host.room.code, "arm-record", arm.version, "arm_wrestling_record", { participantId: referee.id, armWrestlingWinnerId: competitor.id }), referee.token);
+  assert.equal(armFinished.status, "finished");
+  if (!armFinished.game || armFinished.game.kind !== "arm-wrestling-tournament" || !armFinished.game.result) throw new Error("arm result missing");
+  assert.equal(armFinished.game.result.winnerId, competitor.id);
+  assert.ok(armFinished.game.result.safetyNotice.length > 0);
+
+  const majority = await startFinalNativeGame("large-majority-game", Array.from({ length: 9 }, (_, index) => `Player-${index}`), { largeMajorityOptions: ["A", "B", "C"] });
+  if (!majority.started.game || majority.started.game.kind !== "large-majority-game") throw new Error("large majority start projection missing");
+  const majorityPlayers = majority.sessions;
+  const majorityBase = majority.version;
+  const majorityFirst = await majority.service.execute(command(majority.host.room.code, "majority-first", majorityBase, "large_majority_vote", { participantId: majorityPlayers[0]!.id, largeMajorityVote: "A" }), majorityPlayers[0]!.token);
+  const majorityWaiting = await majority.service.getProjection(majority.host.room.code, majorityPlayers[1]!.id, majorityPlayers[1]!.token);
+  assert.equal(majorityWaiting?.game?.kind, "large-majority-game");
+  if (!majorityWaiting?.game || majorityWaiting.game.kind !== "large-majority-game") throw new Error("majority waiting projection missing");
+  assert.equal(majorityWaiting.game.result, undefined);
+  const remainingMajority = await Promise.all(majorityPlayers.slice(1).map((session, index) => majority.service.execute(command(majority.host.room.code, `majority-vote-${index}`, majorityFirst.version, "large_majority_vote", { participantId: session.id, largeMajorityVote: index % 2 === 0 ? "A" : "B" }), session.token)));
+  const majorityFinished = await majority.service.getProjection(majority.host.room.code, majorityPlayers[0]!.id, majorityPlayers[0]!.token);
+  assert.ok(remainingMajority.length === majorityPlayers.length - 1);
+  assert.equal(majorityFinished?.status, "finished");
+  if (!majorityFinished?.game || majorityFinished.game.kind !== "large-majority-game" || !majorityFinished.game.result) throw new Error("large majority result missing");
+  assert.equal(majorityFinished.game.result.votes[majorityPlayers[0]!.id], "A");
+
+  for (const kind of ["drinking-sugoroku", "life-event-sugoroku"] as const) {
+    const sugoroku = await startFinalNativeGame(kind, ["Alice"], { sugorokuBoardLength: 6 });
+    if (!sugoroku.started.game || sugoroku.started.game.kind !== kind) throw new Error(`${kind} start projection missing`);
+    assert.match(sugoroku.started.game.safeNotice, /安全|休憩/);
+    let version = sugoroku.version;
+    let rounds = 0;
+    while (true) {
+      const view = await sugoroku.service.getProjection(sugoroku.host.room.code, sugoroku.sessions[0]!.id, sugoroku.sessions[0]!.token);
+      const game = view?.game as { kind: typeof kind; phase: string; currentPlayerId: string | null; safeNotice: string } | undefined;
+      if (!game || game.kind !== kind) throw new Error(`${kind} view missing`);
+      if (game.phase === "revealed") break;
+      const current = sugoroku.sessions.find((session) => session.id === game.currentPlayerId)!;
+      const rolled = await sugoroku.service.execute(command(sugoroku.host.room.code, `${kind}-roll-${rounds}`, version, kind === "drinking-sugoroku" ? "drinking_sugoroku_roll" : "life_event_sugoroku_roll", { participantId: current.id }), current.token);
+      version = rolled.version;
+      rounds += 1;
+      if (rounds > 30) throw new Error(`${kind} did not finish`);
+    }
+    const finished = await sugoroku.service.getProjection(sugoroku.host.room.code, sugoroku.sessions[0]!.id, sugoroku.sessions[0]!.token);
+    assert.equal(finished?.status, "finished");
+  }
+});
+
 test("native truth-lie keeps presenter secrets private, includes the host as a voter, and rematches cleanly", async () => {
   const { service, host, sessions, version } = await createRoomWithPlayers(["Alice", "Bob"]);
   const hostSession = sessions[0]!;
