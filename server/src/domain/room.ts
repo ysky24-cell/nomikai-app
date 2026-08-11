@@ -156,6 +156,177 @@ type PartyPackGameState = {
   hiddenAnswer?: string;
   result?: PartyPackResult;
 };
+
+export type NativeTurnAction = "answer" | "pass" | "out";
+
+type TruthLieResult = {
+  presenterId: string;
+  statements: string[];
+  lieIndex: number;
+  votes: Record<string, number>;
+  scores: Record<string, number>;
+  correctCount: number;
+};
+
+type TruthLieGameState = {
+  kind: "truth-lie-game";
+  startedVersion?: number;
+  prompt: string;
+  phase: "presenting" | "voting" | "revealed";
+  presenterId: string;
+  statements: string[];
+  lieIndex: number | null;
+  votes: Record<string, number>;
+  result?: TruthLieResult;
+};
+
+type ReverseWordTurn = {
+  id: string;
+  playerId: string;
+  action: NativeTurnAction;
+  answer?: string;
+};
+
+type ReverseWordResult = {
+  expected: string;
+  turnHistory: ReverseWordTurn[];
+  outIds: string[];
+  scores: Record<string, number>;
+};
+
+type ReverseWordGameState = {
+  kind: "reverse-word-game";
+  startedVersion?: number;
+  prompt: string;
+  phase: "playing" | "finished";
+  playerOrder: string[];
+  currentPlayerId: string | null;
+  actedPlayerIds: string[];
+  outIds: string[];
+  turnHistory: ReverseWordTurn[];
+  result?: ReverseWordResult;
+};
+
+type FastTypingSubmission = {
+  text: string;
+  submittedAt: number;
+  order: number;
+};
+
+type FastTypingLeaderboardEntry = {
+  participantId: string;
+  rank: number;
+  completedAt: number;
+  score: number;
+};
+
+type FastTypingResult = {
+  expected: string;
+  submissions: Record<string, FastTypingSubmission>;
+  leaderboard: FastTypingLeaderboardEntry[];
+  scores: Record<string, number>;
+};
+
+type FastTypingGameState = {
+  kind: "fast-typing-game";
+  startedVersion?: number;
+  prompt: string;
+  phase: "typing" | "revealed";
+  startedAt: number;
+  nextSubmissionOrder: number;
+  submissions: Record<string, FastTypingSubmission>;
+  result?: FastTypingResult;
+};
+
+type MemoryDrawingResult = {
+  target: string;
+  descriptions: Record<string, string>;
+  votes: Record<string, string>;
+  scores: Record<string, number>;
+};
+
+type MemoryDrawingGameState = {
+  kind: "memory-drawing-game";
+  startedVersion?: number;
+  prompt: string;
+  target: string;
+  phase: "drawing" | "voting" | "revealed";
+  descriptions: Record<string, string>;
+  votes: Record<string, string>;
+  result?: MemoryDrawingResult;
+};
+
+type ValueMeterRow = {
+  value: number;
+  phrase: string;
+};
+
+type ValueMeterResult = {
+  rows: Record<string, ValueMeterRow>;
+  average: number;
+  median: number;
+  min: number;
+  max: number;
+  scores: Record<string, number>;
+};
+
+type ValueMeterGameState = {
+  kind: "value-meter-game";
+  startedVersion?: number;
+  prompt: string;
+  phase: "submitting" | "revealed";
+  rows: Record<string, ValueMeterRow>;
+  result?: ValueMeterResult;
+};
+
+type ActingResult = {
+  prompt: string;
+  emotion: string;
+  performerId: string;
+  guesses: Record<string, string>;
+  scores: Record<string, number>;
+};
+
+type ActingGameState = {
+  kind: "acting-game";
+  startedVersion?: number;
+  prompt: string;
+  phase: "guessing" | "revealed";
+  performerId: string;
+  emotion: string;
+  guesses: Record<string, string>;
+  result?: ActingResult;
+};
+
+type LoanwordBanStrike = {
+  id: string;
+  participantId: string;
+  word: string;
+};
+
+type LoanwordBanResult = {
+  prompt: string;
+  prohibitedWords: string[];
+  turnHistory: ReverseWordTurn[];
+  strikes: LoanwordBanStrike[];
+  outIds: string[];
+  scores: Record<string, number>;
+};
+
+type LoanwordBanGameState = {
+  kind: "loanword-ban-game";
+  startedVersion?: number;
+  prompt: string;
+  prohibitedWords: string[];
+  phase: "playing" | "finished";
+  playerOrder: string[];
+  currentPlayerId: string | null;
+  actedPlayerIds: string[];
+  outIds: string[];
+  turnHistory: ReverseWordTurn[];
+  strikes: LoanwordBanStrike[];
+  result?: LoanwordBanResult;
+};
 export type WerewolfRole = "werewolf" | "seer" | "guard" | "villager";
 type WerewolfGameState = {
   kind: "werewolf";
@@ -190,7 +361,7 @@ export type LegacyGameResult = {
   summary: string;
   scores: Record<string, number>;
 };
-export type RoomGameState = TwoChoiceGameState | ImpressionGameState | MajorityGameState | JohariGameState | AnonymousGameState | WordWolfGameState | NgWordGameState | TurtleSoupGameState | YamanoteGameState | PartyPackGameState | WerewolfGameState | LegacyGameState;
+export type RoomGameState = TwoChoiceGameState | ImpressionGameState | MajorityGameState | JohariGameState | AnonymousGameState | WordWolfGameState | NgWordGameState | TurtleSoupGameState | YamanoteGameState | PartyPackGameState | TruthLieGameState | ReverseWordGameState | FastTypingGameState | MemoryDrawingGameState | ValueMeterGameState | ActingGameState | LoanwordBanGameState | WerewolfGameState | LegacyGameState;
 
 export type RoomRecord = {
   id: string;
@@ -233,6 +404,13 @@ export type PublicRoomGame =
   | { kind: "turtle-soup"; prompt: string; phase: "questioning" | "revealed"; questionCount: number; pendingQuestionCount: number; questions: Array<Pick<TurtleSoupQuestion, "id" | "askerId" | "text" | "classification">>; hintLevel: number; hints: string[]; availableHints?: string[]; hostTruth?: string; truth?: string }
   | { kind: "yamanote"; prompt: string; phase: "playing" | "finished"; playerOrder: string[]; currentPlayerId: string | null; actedPlayerIds: string[]; outIds: string[]; answerHistory: YamanoteAnswerLog[]; result?: { answerHistory: YamanoteAnswerLog[]; outIds: string[] } }
   | { kind: "party-pack"; prompt: string; promptId: string; instruction: string; mode: PartyPackMode; progression: "simultaneous" | "turn"; phase: "playing" | "revealed"; playerOrder: string[]; currentPlayerId: string | null; inputCount: number; participantCount: number; remainingCount: number; ownInput?: string; hostAnswer?: string; result?: PartyPackResult }
+  | { kind: "truth-lie-game"; prompt: string; phase: "presenting" | "voting" | "revealed"; presenterId: string; ownRole: "presenter" | "voter"; statementCount: number; voterCount: number; voteCount: number; ownStatements?: string[]; ownLieIndex?: number; statements?: string[]; ownVote?: number; result?: TruthLieResult }
+  | { kind: "reverse-word-game"; prompt: string; phase: "playing" | "finished"; playerOrder: string[]; currentPlayerId: string | null; actedPlayerIds: string[]; outIds: string[]; turnCount: number; turnHistory: Array<Pick<ReverseWordTurn, "id" | "playerId" | "action">>; result?: ReverseWordResult }
+  | { kind: "fast-typing-game"; prompt: string; phase: "typing" | "revealed"; submittedCount: number; participantCount: number; remainingCount: number; ownSubmission?: Pick<FastTypingSubmission, "text" | "submittedAt">; result?: FastTypingResult }
+  | { kind: "memory-drawing-game"; prompt: string; phase: "drawing" | "voting" | "revealed"; drawingCount: number; participantCount: number; voteCount: number; voterCount: number; ownDescription?: string; ownVote?: string; hostTarget?: string; result?: MemoryDrawingResult }
+  | { kind: "value-meter-game"; prompt: string; phase: "submitting" | "revealed"; submittedCount: number; participantCount: number; remainingCount: number; ownRow?: ValueMeterRow; result?: ValueMeterResult }
+  | { kind: "acting-game"; prompt: string; phase: "guessing" | "revealed"; performerId: string; audienceCount: number; guessCount: number; ownRole: "performer" | "audience"; ownPerformerPrompt?: string; ownEmotion?: string; ownGuess?: string; result?: ActingResult }
+  | { kind: "loanword-ban-game"; phase: "playing" | "finished"; prompt: string; playerOrder: string[]; currentPlayerId: string | null; actedPlayerIds: string[]; outIds: string[]; turnCount: number; strikeCount: number; ownPrompt?: string; ownProhibitedWords?: string[]; turnHistory: Array<Pick<ReverseWordTurn, "id" | "playerId" | "action">>; strikes: Array<Pick<LoanwordBanStrike, "id" | "participantId"> & { word?: string }>; result?: LoanwordBanResult }
   | { kind: "werewolf"; phase: "night" | "day" | "voting" | "revote" | "finished"; phaseDeadlineAt: number | null; aliveIds: string[]; ownRole?: WerewolfRole; teammates?: string[]; ownSeerResults?: { targetId: string; role: WerewolfRole }[]; ownVote?: string; tiedTargetIds?: string[]; winner?: "werewolf" | "villager" }
   | { kind: "legacy-game"; gameKey: string; prompt: string; mode: string; progression: "simultaneous" | "turn" | "count-up"; phase: "playing" | "finished"; inputCount: number; participantCount: number; remainingCount: number; ownInput?: string; currentPlayerId?: string; currentTotal?: number; targetNumber?: number; turnHistory?: Array<{ playerId: string; add: number; total: number }>; result?: LegacyGameResult };
 
@@ -240,12 +418,12 @@ export type RoomCommand = {
   roomCode: string;
   commandId: string;
   expectedVersion: number;
-  kind: "join" | "reconnect" | "leave" | "kick" | "start" | "close" | "reset" | "game_reset" | "game_start" | "game_answer" | "game_reveal" | "game_phase" | "johari_self_submit" | "johari_peer_submit" | "anonymous_submit" | "anonymous_moderate" | "game_vote" | "werewolf_action" | "legacy_input" | "ng_word_hit" | "turtle_soup_question" | "turtle_soup_classify" | "turtle_soup_hint" | "yamanote_answer" | "party_pack_action";
+  kind: "join" | "reconnect" | "leave" | "kick" | "start" | "close" | "reset" | "game_reset" | "game_start" | "game_answer" | "game_reveal" | "game_phase" | "johari_self_submit" | "johari_peer_submit" | "anonymous_submit" | "anonymous_moderate" | "game_vote" | "werewolf_action" | "legacy_input" | "ng_word_hit" | "turtle_soup_question" | "turtle_soup_classify" | "turtle_soup_hint" | "yamanote_answer" | "party_pack_action" | "truth_lie_present" | "truth_lie_vote" | "truth_lie_submit" | "reverse_word_action" | "reverse_word_answer" | "fast_typing_submit" | "fast_typing_complete" | "memory_drawing_submit" | "memory_drawing_vote" | "value_meter_submit" | "acting_guess" | "acting_submit" | "loanword_ban_action" | "loanword_ban_answer";
   participantId?: string;
   joinNonce?: string;
   targetParticipantId?: string;
   name?: string;
-  gameKind?: "two-choice" | "impression-ranking" | "majority-game" | "johari-window" | "anonymous-box" | "word-wolf" | "werewolf" | "ng-word" | "turtle-soup" | "yamanote" | "party-pack" | "legacy-game";
+  gameKind?: "two-choice" | "impression-ranking" | "majority-game" | "johari-window" | "anonymous-box" | "word-wolf" | "werewolf" | "ng-word" | "turtle-soup" | "yamanote" | "party-pack" | "truth-lie-game" | "reverse-word-game" | "fast-typing-game" | "memory-drawing-game" | "value-meter-game" | "acting-game" | "loanword-ban-game" | "legacy-game";
   legacyGameKey?: string;
   mode?: string;
   prompt?: string;
@@ -262,7 +440,7 @@ export type RoomCommand = {
   majorityTopic?: string;
   minorityTopic?: string;
   voteTargetId?: string;
-  action?: "kill" | "guard" | "inspect";
+  action?: "kill" | "guard" | "inspect" | NativeTurnAction;
   input?: string;
   ngWordDifficulty?: "easy" | "normal";
   turtleSoupQuestionId?: string;
@@ -273,6 +451,19 @@ export type RoomCommand = {
   yamanoteAction?: YamanoteAction;
   partyPackMode?: PartyPackMode;
   partyPackPromptId?: string;
+  truthLiePresenterId?: string;
+  truthLieStatements?: string[];
+  truthLieLieIndex?: number;
+  truthLieVote?: number;
+  turnAction?: NativeTurnAction;
+  fastTypingText?: string;
+  memoryDrawingDescription?: string;
+  memoryDrawingTarget?: string;
+  memoryDrawingVoteTargetId?: string;
+  valueMeterValue?: number;
+  valueMeterPhrase?: string;
+  actingPerformerId?: string;
+  actingGuess?: string;
 };
 
 export interface RoomRepository {
@@ -399,6 +590,13 @@ const nativeMinimumPlayers: Record<Exclude<RoomCommand["gameKind"], "legacy-game
   "turtle-soup": 2,
   yamanote: 2,
   "party-pack": 3,
+  "truth-lie-game": 3,
+  "reverse-word-game": 2,
+  "fast-typing-game": 2,
+  "memory-drawing-game": 3,
+  "value-meter-game": 2,
+  "acting-game": 3,
+  "loanword-ban-game": 2,
   werewolf: 4,
 };
 
@@ -441,6 +639,9 @@ const partyPackDefinitions: readonly PartyPackDefinition[] = [
   { id: "acting-01", mode: "acting", prompt: "『大丈夫です』を喜んで演じる", instruction: "演技の感情やヒントを入力します。" },
   { id: "hint-quiz-01", mode: "hint-quiz", prompt: "写真なしで人物を当てよう", instruction: "答えまたはヒントを入力します。", answer: "スポーツ選手" },
 ];
+
+const actingEmotionPool = ["うれしい", "かなしい", "おどろき", "いかり", "ねむい", "あせり"] as const;
+const loanwordBanDefaultWords = ["スマホ", "アプリ", "ゲーム", "ネット", "パソコン", "テレビ", "コンビニ"] as const;
 
 const commandResultTtlMs = 10 * 60 * 1000;
 const maxCommandResults = 4_096;
@@ -493,6 +694,8 @@ function isTerminalGame(game: RoomGameState | undefined) {
   if (game.kind === "word-wolf") return game.phase === "revealed";
   if (game.kind === "ng-word" || game.kind === "turtle-soup" || game.kind === "party-pack") return game.phase === "revealed";
   if (game.kind === "yamanote") return game.phase === "finished";
+  if (game.kind === "reverse-word-game" || game.kind === "loanword-ban-game") return game.phase === "finished";
+  if (game.kind === "truth-lie-game" || game.kind === "fast-typing-game" || game.kind === "memory-drawing-game" || game.kind === "value-meter-game" || game.kind === "acting-game") return game.phase === "revealed";
   if (game.kind === "werewolf") return game.phase === "finished";
   if (game.kind === "legacy-game") return game.phase === "finished";
   return false;
@@ -840,6 +1043,17 @@ function removeParticipantFromGameState(
     }
     else if (game.kind === "yamanote") reconcileYamanoteDeparture(game, room, participantId);
     else if (game.kind === "party-pack") reconcilePartyPackDeparture(game, room, participantId);
+    else if (game.kind === "truth-lie-game") reconcileTruthLieDeparture(game, room, participantId);
+    else if (game.kind === "reverse-word-game") reconcileReverseWordDeparture(game, room, participantId);
+    else if (game.kind === "fast-typing-game") delete game.submissions[participantId];
+    else if (game.kind === "memory-drawing-game") {
+      delete game.descriptions[participantId];
+      delete game.votes[participantId];
+      for (const [voterId, targetId] of Object.entries(game.votes)) if (targetId === participantId) delete game.votes[voterId];
+    }
+    else if (game.kind === "value-meter-game") delete game.rows[participantId];
+    else if (game.kind === "acting-game") reconcileActingDeparture(game, room, participantId);
+    else if (game.kind === "loanword-ban-game") reconcileLoanwordBanDeparture(game, room, participantId);
     else {
       delete game.inputs[participantId];
       if (game.turnHistory) game.turnHistory = game.turnHistory.filter((turn) => turn.playerId !== participantId);
@@ -889,6 +1103,22 @@ function removeParticipantFromGameState(
     reconcileYamanoteDeparture(game, room, participantId);
   } else if (game.kind === "party-pack") {
     reconcilePartyPackDeparture(game, room, participantId);
+  } else if (game.kind === "truth-lie-game") {
+    reconcileTruthLieDeparture(game, room, participantId);
+  } else if (game.kind === "reverse-word-game") {
+    reconcileReverseWordDeparture(game, room, participantId);
+  } else if (game.kind === "fast-typing-game") {
+    delete game.submissions[participantId];
+  } else if (game.kind === "memory-drawing-game") {
+    delete game.descriptions[participantId];
+    delete game.votes[participantId];
+    for (const [voterId, targetId] of Object.entries(game.votes)) if (targetId === participantId) delete game.votes[voterId];
+  } else if (game.kind === "value-meter-game") {
+    delete game.rows[participantId];
+  } else if (game.kind === "acting-game") {
+    reconcileActingDeparture(game, room, participantId);
+  } else if (game.kind === "loanword-ban-game") {
+    reconcileLoanwordBanDeparture(game, room, participantId);
   } else {
     delete game.inputs[participantId];
     if (game.turnHistory) game.turnHistory = game.turnHistory.filter((turn) => turn.playerId !== participantId);
@@ -942,13 +1172,19 @@ function canMergeStaleCommand(room: RoomRecord, command: RoomCommand) {
   }
   if (command.kind === "werewolf_action") return game.kind === "werewolf" && game.phase === "night";
   if (command.kind === "legacy_input") return game.kind === "legacy-game" && game.phase === "playing" && game.progression === "simultaneous" && !game.inputs[actorId];
+  if (command.kind === "truth_lie_vote" || command.kind === "truth_lie_submit") return game.kind === "truth-lie-game" && game.phase === "voting" && actorId !== game.presenterId && !Object.prototype.hasOwnProperty.call(game.votes, actorId);
+  if (command.kind === "fast_typing_submit" || command.kind === "fast_typing_complete") return game.kind === "fast-typing-game" && game.phase === "typing" && !Object.prototype.hasOwnProperty.call(game.submissions, actorId);
+  if (command.kind === "memory_drawing_submit") return game.kind === "memory-drawing-game" && game.phase === "drawing" && !Object.prototype.hasOwnProperty.call(game.descriptions, actorId);
+  if (command.kind === "memory_drawing_vote") return game.kind === "memory-drawing-game" && game.phase === "voting" && !Object.prototype.hasOwnProperty.call(game.votes, actorId);
+  if (command.kind === "acting_guess" || command.kind === "acting_submit") return game.kind === "acting-game" && game.phase === "guessing" && actorId !== game.performerId && !Object.prototype.hasOwnProperty.call(game.guesses, actorId);
+  if (command.kind === "value_meter_submit") return game.kind === "value-meter-game" && game.phase === "submitting" && !Object.prototype.hasOwnProperty.call(game.rows, actorId);
   return false;
 }
 
 function isMergeableCommand(command: unknown) {
   if (!command || typeof command !== "object") return false;
   const kind = (command as { kind?: unknown }).kind;
-  return kind === "join" || kind === "game_answer" || kind === "johari_self_submit" || kind === "johari_peer_submit" || kind === "game_vote" || kind === "anonymous_submit" || kind === "werewolf_action" || kind === "legacy_input" || kind === "ng_word_hit" || kind === "turtle_soup_question" || kind === "party_pack_action";
+  return kind === "join" || kind === "game_answer" || kind === "johari_self_submit" || kind === "johari_peer_submit" || kind === "game_vote" || kind === "anonymous_submit" || kind === "werewolf_action" || kind === "legacy_input" || kind === "ng_word_hit" || kind === "turtle_soup_question" || kind === "party_pack_action" || kind === "truth_lie_vote" || kind === "truth_lie_submit" || kind === "fast_typing_submit" || kind === "fast_typing_complete" || kind === "memory_drawing_submit" || kind === "memory_drawing_vote" || kind === "acting_guess" || kind === "acting_submit" || kind === "value_meter_submit";
 }
 
 function token(size = 24) {
@@ -975,6 +1211,239 @@ function reverseText(value: string) {
 function normalizeTruthAnswer(value: string) {
   const normalized = value.trim().toUpperCase();
   return ({ A: "1", B: "2", C: "3" } as Record<string, string>)[normalized] ?? normalized;
+}
+
+function nativePresenterId(room: RoomRecord, requested?: string) {
+  const active = activeParticipants(room);
+  if (requested && active.some((participant) => participant.id === requested)) return requested;
+  return active.find((participant) => participant.role !== "host")?.id ?? active[0]?.id ?? "";
+}
+
+function nativePendingTurnPlayer(
+  playerOrder: readonly string[],
+  actedPlayerIds: readonly string[],
+  outIds: readonly string[],
+  activeIds: ReadonlySet<string>,
+  afterId: string | null,
+) {
+  const pending = playerOrder.filter((id) => activeIds.has(id) && !actedPlayerIds.includes(id) && !outIds.includes(id));
+  if (pending.length === 0) return null;
+  const startIndex = Math.max(0, playerOrder.indexOf(afterId ?? ""));
+  for (let offset = 1; offset <= playerOrder.length; offset += 1) {
+    const candidate = playerOrder[(startIndex + offset) % playerOrder.length];
+    if (candidate && pending.includes(candidate)) return candidate;
+  }
+  return pending[0] ?? null;
+}
+
+function truthLieVoterIds(game: TruthLieGameState, room: RoomRecord) {
+  return activeParticipants(room).map((participant) => participant.id).filter((id) => id !== game.presenterId);
+}
+
+function resolveTruthLieResult(game: TruthLieGameState, participants: readonly RoomParticipant[]): TruthLieResult {
+  const lieIndex = game.lieIndex ?? 0;
+  const scores: Record<string, number> = Object.fromEntries(participants.map((participant) => [participant.id, 0]));
+  let correctCount = 0;
+  for (const participant of participants) {
+    if (participant.id !== game.presenterId && game.votes[participant.id] === lieIndex) {
+      scores[participant.id] = 1;
+      correctCount += 1;
+    }
+  }
+  return {
+    presenterId: game.presenterId,
+    statements: [...game.statements],
+    lieIndex,
+    votes: { ...game.votes },
+    scores,
+    correctCount,
+  };
+}
+
+function finishTruthLie(game: TruthLieGameState, participants: readonly RoomParticipant[]) {
+  game.phase = "revealed";
+  game.result = resolveTruthLieResult(game, participants);
+}
+
+function reverseWordExpected(game: ReverseWordGameState) {
+  return reverseText(game.prompt.trim());
+}
+
+function resolveReverseWordResult(game: ReverseWordGameState, participants: readonly RoomParticipant[]): ReverseWordResult {
+  const expected = reverseWordExpected(game);
+  const scores: Record<string, number> = Object.fromEntries(participants.map((participant) => [participant.id, 0]));
+  for (const turn of game.turnHistory) {
+    if (turn.action === "answer" && turn.answer?.normalize("NFKC").trim().toLocaleLowerCase() === expected.normalize("NFKC").toLocaleLowerCase()) scores[turn.playerId] = 1;
+  }
+  return { expected, turnHistory: game.turnHistory.map((turn) => ({ ...turn })), outIds: [...game.outIds], scores };
+}
+
+function finishReverseWord(game: ReverseWordGameState, participants: readonly RoomParticipant[]) {
+  game.phase = "finished";
+  game.currentPlayerId = null;
+  game.result = resolveReverseWordResult(game, participants);
+}
+
+function resolveFastTypingResult(game: FastTypingGameState, participants: readonly RoomParticipant[]): FastTypingResult {
+  const ordered = Object.entries(game.submissions)
+    .filter(([participantId]) => participants.some((participant) => participant.id === participantId))
+    .sort(([, left], [, right]) => left.submittedAt - right.submittedAt || left.order - right.order || left.text.localeCompare(right.text));
+  const scores: Record<string, number> = Object.fromEntries(participants.map((participant) => [participant.id, 0]));
+  const leaderboard = ordered.map(([participantId, submission], index) => {
+    const score = ordered.length - index;
+    scores[participantId] = score;
+    return { participantId, rank: index + 1, completedAt: submission.submittedAt, score };
+  });
+  return { expected: game.prompt, submissions: structuredClone(game.submissions), leaderboard, scores };
+}
+
+function finishFastTyping(game: FastTypingGameState, participants: readonly RoomParticipant[]) {
+  game.phase = "revealed";
+  game.result = resolveFastTypingResult(game, participants);
+}
+
+function resolveMemoryDrawingResult(game: MemoryDrawingGameState, participants: readonly RoomParticipant[]): MemoryDrawingResult {
+  const scores: Record<string, number> = Object.fromEntries(participants.map((participant) => [participant.id, 0]));
+  for (const targetId of Object.values(game.votes)) if (scores[targetId] !== undefined) scores[targetId] += 1;
+  return { target: game.target, descriptions: { ...game.descriptions }, votes: { ...game.votes }, scores };
+}
+
+function finishMemoryDrawing(game: MemoryDrawingGameState, participants: readonly RoomParticipant[]) {
+  game.phase = "revealed";
+  game.result = resolveMemoryDrawingResult(game, participants);
+}
+
+function resolveValueMeterResult(game: ValueMeterGameState, participants: readonly RoomParticipant[]): ValueMeterResult {
+  const rows = Object.fromEntries(
+    participants.filter((participant) => game.rows[participant.id]).map((participant) => [participant.id, { ...game.rows[participant.id]! }]),
+  ) as Record<string, ValueMeterRow>;
+  const values = Object.values(rows).map((row) => row.value).sort((left, right) => left - right);
+  const average = values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0;
+  const middle = Math.floor(values.length / 2);
+  const median = values.length === 0 ? 0 : values.length % 2 === 1 ? values[middle]! : (values[middle - 1]! + values[middle]!) / 2;
+  const scores: Record<string, number> = Object.fromEntries(participants.map((participant) => [participant.id, 0]));
+  for (const [participantId, row] of Object.entries(rows)) scores[participantId] = Math.max(0, Number((100 - Math.abs(row.value - average)).toFixed(2)));
+  return { rows, average: Number(average.toFixed(2)), median, min: values[0] ?? 0, max: values.at(-1) ?? 0, scores };
+}
+
+function finishValueMeter(game: ValueMeterGameState, participants: readonly RoomParticipant[]) {
+  game.phase = "revealed";
+  game.result = resolveValueMeterResult(game, participants);
+}
+
+function resolveActingResult(game: ActingGameState, participants: readonly RoomParticipant[]): ActingResult {
+  const scores: Record<string, number> = Object.fromEntries(participants.map((participant) => [participant.id, 0]));
+  for (const participant of participants) {
+    if (participant.id !== game.performerId && normalizeName(game.guesses[participant.id] ?? "") === normalizeName(game.emotion)) scores[participant.id] = 1;
+  }
+  return { prompt: game.prompt, emotion: game.emotion, performerId: game.performerId, guesses: { ...game.guesses }, scores };
+}
+
+function finishActing(game: ActingGameState, participants: readonly RoomParticipant[]) {
+  game.phase = "revealed";
+  game.result = resolveActingResult(game, participants);
+}
+
+function loanwordBanResult(game: LoanwordBanGameState, participants: readonly RoomParticipant[]): LoanwordBanResult {
+  const scores: Record<string, number> = Object.fromEntries(participants.map((participant) => [participant.id, 0]));
+  for (const participant of participants) scores[participant.id] = Math.max(0, 1 - game.strikes.filter((strike) => strike.participantId === participant.id).length);
+  return { prompt: game.prompt, prohibitedWords: [...game.prohibitedWords], turnHistory: game.turnHistory.map((turn) => ({ ...turn })), strikes: game.strikes.map((strike) => ({ ...strike })), outIds: [...game.outIds], scores };
+}
+
+function finishLoanwordBan(game: LoanwordBanGameState, participants: readonly RoomParticipant[]) {
+  game.phase = "finished";
+  game.currentPlayerId = null;
+  game.result = loanwordBanResult(game, participants);
+}
+
+function normalizeAction(command: RoomCommand): NativeTurnAction {
+  const action = command.turnAction ?? command.yamanoteAction ?? (command.action === "answer" || command.action === "pass" || command.action === "out" ? command.action : undefined);
+  return action ?? "answer";
+}
+
+function containsProhibitedWord(input: string, words: readonly string[]) {
+  const normalized = input.normalize("NFKC").toLocaleLowerCase();
+  return words.find((word) => normalized.includes(word.normalize("NFKC").toLocaleLowerCase()));
+}
+
+function reconcileTruthLieDeparture(game: TruthLieGameState, room: RoomRecord, participantId: string) {
+  delete game.votes[participantId];
+  if (game.presenterId !== participantId) return;
+  const replacement = activeParticipants(room)[0];
+  if (!replacement) {
+    game.phase = "revealed";
+    game.result = { presenterId: participantId, statements: [], lieIndex: 0, votes: {}, scores: {}, correctCount: 0 };
+    return;
+  }
+  game.presenterId = replacement.id;
+  game.phase = "presenting";
+  game.statements = [];
+  game.lieIndex = null;
+  game.votes = {};
+  delete game.result;
+}
+
+function reconcileReverseWordDeparture(game: ReverseWordGameState, room: RoomRecord, participantId: string) {
+  const previousCurrent = game.currentPlayerId;
+  const previousIndex = Math.max(0, game.playerOrder.indexOf(participantId));
+  game.playerOrder = game.playerOrder.filter((id) => id !== participantId);
+  game.actedPlayerIds = game.actedPlayerIds.filter((id) => id !== participantId);
+  game.outIds = game.outIds.filter((id) => id !== participantId);
+  if (game.phase !== "playing") return;
+  const activeIds = new Set(activeParticipants(room).map((participant) => participant.id));
+  const pending = game.playerOrder.filter((id) => activeIds.has(id) && !game.actedPlayerIds.includes(id) && !game.outIds.includes(id));
+  if (pending.length === 0) {
+    finishReverseWord(game, activeParticipants(room));
+    return;
+  }
+  if (previousCurrent === participantId || !pending.includes(previousCurrent ?? "")) {
+    for (let offset = 0; offset < game.playerOrder.length; offset += 1) {
+      const candidate = game.playerOrder[(previousIndex + offset) % game.playerOrder.length];
+      if (pending.includes(candidate)) {
+        game.currentPlayerId = candidate;
+        return;
+      }
+    }
+    game.currentPlayerId = pending[0] ?? null;
+  }
+}
+
+function reconcileLoanwordBanDeparture(game: LoanwordBanGameState, room: RoomRecord, participantId: string) {
+  const previousCurrent = game.currentPlayerId;
+  const previousIndex = Math.max(0, game.playerOrder.indexOf(participantId));
+  game.playerOrder = game.playerOrder.filter((id) => id !== participantId);
+  game.actedPlayerIds = game.actedPlayerIds.filter((id) => id !== participantId);
+  game.outIds = game.outIds.filter((id) => id !== participantId);
+  if (game.phase !== "playing") return;
+  const activeIds = new Set(activeParticipants(room).map((participant) => participant.id));
+  const pending = game.playerOrder.filter((id) => activeIds.has(id) && !game.actedPlayerIds.includes(id) && !game.outIds.includes(id));
+  if (pending.length === 0) {
+    finishLoanwordBan(game, activeParticipants(room));
+    return;
+  }
+  if (previousCurrent === participantId || !pending.includes(previousCurrent ?? "")) {
+    for (let offset = 0; offset < game.playerOrder.length; offset += 1) {
+      const candidate = game.playerOrder[(previousIndex + offset) % game.playerOrder.length];
+      if (pending.includes(candidate)) {
+        game.currentPlayerId = candidate;
+        return;
+      }
+    }
+    game.currentPlayerId = pending[0] ?? null;
+  }
+}
+
+function reconcileActingDeparture(game: ActingGameState, room: RoomRecord, participantId: string) {
+  delete game.guesses[participantId];
+  if (game.performerId !== participantId || game.phase !== "guessing") return;
+  const replacement = nativePresenterId(room);
+  if (!replacement) {
+    game.phase = "revealed";
+    game.result = resolveActingResult(game, []);
+    return;
+  }
+  game.performerId = replacement;
+  game.guesses = {};
 }
 
 function resolveLegacyResult(game: LegacyGameState, participants: RoomParticipant[]): LegacyGameResult {
@@ -1242,7 +1711,7 @@ export class RoomService {
     if (!roomCode) throw new RoomDomainError("room_code_required");
     if (typeof command.commandId !== "string" || !command.commandId.trim()) throw new RoomDomainError("command_id_required");
     if (!Number.isInteger(command.expectedVersion) || command.expectedVersion < 0) throw new RoomDomainError("expected_version_invalid");
-    if (!("join reconnect leave kick start close reset game_reset game_start game_answer game_reveal game_phase johari_self_submit johari_peer_submit anonymous_submit anonymous_moderate game_vote werewolf_action legacy_input ng_word_hit turtle_soup_question turtle_soup_classify turtle_soup_hint yamanote_answer party_pack_action" as const).split(" ").includes(command.kind)) throw new RoomDomainError("command_kind_invalid");
+    if (!("join reconnect leave kick start close reset game_reset game_start game_answer game_reveal game_phase johari_self_submit johari_peer_submit anonymous_submit anonymous_moderate game_vote werewolf_action legacy_input ng_word_hit turtle_soup_question turtle_soup_classify turtle_soup_hint yamanote_answer party_pack_action truth_lie_present truth_lie_vote truth_lie_submit reverse_word_action reverse_word_answer fast_typing_submit fast_typing_complete memory_drawing_submit memory_drawing_vote acting_guess acting_submit loanword_ban_action loanword_ban_answer value_meter_submit" as const).split(" ").includes(command.kind)) throw new RoomDomainError("command_kind_invalid");
     command = { ...command, roomCode, commandId: command.commandId.trim() };
     const suppliedToken = typeof tokenValue === "string" ? tokenValue : undefined;
     const room = await this.repository.get(command.roomCode) ?? null;
@@ -1307,7 +1776,7 @@ export class RoomService {
     }
     if (room.version !== command.expectedVersion && !canMergeStaleCommand(room, command)) throw new RoomDomainError("version_conflict");
     if (room.status === "closed" && command.kind !== "close") throw new RoomDomainError(command.kind === "join" ? "room_not_joinable" : "room_closed");
-    if (room.status === "finished" && ["game_answer", "game_reveal", "johari_self_submit", "johari_peer_submit", "anonymous_submit", "anonymous_moderate", "game_vote", "game_phase", "werewolf_action", "legacy_input", "ng_word_hit", "turtle_soup_question", "turtle_soup_classify", "turtle_soup_hint", "yamanote_answer", "party_pack_action"].includes(command.kind)) throw new RoomDomainError("game_finished");
+    if (room.status === "finished" && ["game_answer", "game_reveal", "johari_self_submit", "johari_peer_submit", "anonymous_submit", "anonymous_moderate", "game_vote", "game_phase", "werewolf_action", "legacy_input", "ng_word_hit", "turtle_soup_question", "turtle_soup_classify", "turtle_soup_hint", "yamanote_answer", "party_pack_action", "truth_lie_present", "truth_lie_vote", "truth_lie_submit", "reverse_word_action", "reverse_word_answer", "fast_typing_submit", "fast_typing_complete", "memory_drawing_submit", "memory_drawing_vote", "acting_guess", "acting_submit", "loanword_ban_action", "loanword_ban_answer", "value_meter_submit"].includes(command.kind)) throw new RoomDomainError("game_finished");
     let issuedReconnectToken: string | undefined;
     let createdParticipantId: string | undefined;
     const presenceChanges: RoomPresenceChange[] = [];
@@ -1365,7 +1834,7 @@ export class RoomService {
       presenceChanges.push({ participantId: actor!.id, connected: true });
     } else if (command.kind === "game_start") {
       if (actor!.role !== "host") throw new RoomDomainError("host_required");
-      if (command.gameKind !== "two-choice" && command.gameKind !== "impression-ranking" && command.gameKind !== "majority-game" && command.gameKind !== "johari-window" && command.gameKind !== "anonymous-box" && command.gameKind !== "word-wolf" && command.gameKind !== "werewolf" && command.gameKind !== "ng-word" && command.gameKind !== "turtle-soup" && command.gameKind !== "yamanote" && command.gameKind !== "party-pack" && command.gameKind !== "legacy-game") throw new RoomDomainError("game_kind_invalid");
+      if (command.gameKind !== "two-choice" && command.gameKind !== "impression-ranking" && command.gameKind !== "majority-game" && command.gameKind !== "johari-window" && command.gameKind !== "anonymous-box" && command.gameKind !== "word-wolf" && command.gameKind !== "werewolf" && command.gameKind !== "ng-word" && command.gameKind !== "turtle-soup" && command.gameKind !== "yamanote" && command.gameKind !== "party-pack" && command.gameKind !== "truth-lie-game" && command.gameKind !== "reverse-word-game" && command.gameKind !== "fast-typing-game" && command.gameKind !== "memory-drawing-game" && command.gameKind !== "value-meter-game" && command.gameKind !== "acting-game" && command.gameKind !== "loanword-ban-game" && command.gameKind !== "legacy-game") throw new RoomDomainError("game_kind_invalid");
       if (room.status === "playing" && room.game && !isTerminalGame(room.game)) throw new RoomDomainError("game_in_progress");
       if (room.status !== "locked") throw new RoomDomainError("room_not_locked");
       const prompt = typeof command.prompt === "string" ? command.prompt.trim() : "";
@@ -1441,6 +1910,74 @@ export class RoomService {
           currentPlayerId: progression === "turn" ? playerOrder[0] ?? null : null,
           inputs: {},
           ...(hiddenAnswer ? { hiddenAnswer } : {}),
+        };
+      } else if (command.gameKind === "truth-lie-game") {
+        room.game = {
+          kind: "truth-lie-game",
+          startedVersion,
+          prompt,
+          phase: "presenting",
+          presenterId: nativePresenterId(room, command.truthLiePresenterId),
+          statements: [],
+          lieIndex: null,
+          votes: {},
+        };
+      } else if (command.gameKind === "reverse-word-game") {
+        const playerOrder = activeParticipants(room).map((participant) => participant.id);
+        room.game = {
+          kind: "reverse-word-game",
+          startedVersion,
+          prompt,
+          phase: "playing",
+          playerOrder,
+          currentPlayerId: playerOrder[0] ?? null,
+          actedPlayerIds: [],
+          outIds: [],
+          turnHistory: [],
+        };
+      } else if (command.gameKind === "fast-typing-game") {
+        room.game = {
+          kind: "fast-typing-game",
+          startedVersion,
+          prompt,
+          phase: "typing",
+          startedAt: this.now(),
+          nextSubmissionOrder: 1,
+          submissions: {},
+        };
+      } else if (command.gameKind === "memory-drawing-game") {
+        const target = typeof command.memoryDrawingTarget === "string" && command.memoryDrawingTarget.trim() ? command.memoryDrawingTarget.trim() : prompt;
+        if (target.length > 200) throw new RoomDomainError("memory_drawing_target_invalid");
+        room.game = {
+          kind: "memory-drawing-game",
+          startedVersion,
+          prompt,
+          target,
+          phase: "drawing",
+          descriptions: {},
+          votes: {},
+        };
+      } else if (command.gameKind === "value-meter-game") {
+        room.game = { kind: "value-meter-game", startedVersion, prompt, phase: "submitting", rows: {} };
+      } else if (command.gameKind === "acting-game") {
+        const performerId = nativePresenterId(room, command.actingPerformerId);
+        const emotion = randomOrder(actingEmotionPool)[0] ?? actingEmotionPool[0];
+        room.game = { kind: "acting-game", startedVersion, prompt, phase: "guessing", performerId, emotion, guesses: {} };
+      } else if (command.gameKind === "loanword-ban-game") {
+        const words = [...new Set([prompt, ...loanwordBanDefaultWords].map((word) => word.trim()).filter(Boolean))].slice(0, 8);
+        const playerOrder = activeParticipants(room).map((participant) => participant.id);
+        room.game = {
+          kind: "loanword-ban-game",
+          startedVersion,
+          prompt,
+          prohibitedWords: words,
+          phase: "playing",
+          playerOrder,
+          currentPlayerId: playerOrder[0] ?? null,
+          actedPlayerIds: [],
+          outIds: [],
+          turnHistory: [],
+          strikes: [],
         };
       } else if (command.gameKind === "werewolf") {
         const ids = randomOrder(activeParticipants(room).map((item) => item.id));
@@ -1523,6 +2060,118 @@ export class RoomService {
       room.game.inputs[actor!.id] = input;
       const nextPlayerId = nextPendingPartyPackPlayer(room.game, room, actor!.id);
       room.game.currentPlayerId = room.game.progression === "turn" ? nextPlayerId : null;
+    } else if (command.kind === "truth_lie_present" || command.kind === "truth_lie_vote" || command.kind === "truth_lie_submit") {
+      if (!room.game || room.game.kind !== "truth-lie-game") throw new RoomDomainError("game_not_active");
+      if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
+      const hasPresentation = Array.isArray(command.truthLieStatements) || command.truthLieLieIndex !== undefined;
+      const presentationCommand = command.kind === "truth_lie_present" || command.kind === "truth_lie_submit" && hasPresentation;
+      if (presentationCommand) {
+        if (room.game.phase !== "presenting" || room.game.presenterId !== actor!.id) throw new RoomDomainError("not_your_turn");
+        const rawStatements = Array.isArray(command.truthLieStatements)
+          ? command.truthLieStatements
+          : typeof command.input === "string" ? command.input.split(/\r?\n|\|/g) : [];
+        const statements = rawStatements.map((statement) => typeof statement === "string" ? statement.trim() : "");
+        if (statements.length !== 3 || statements.some((statement) => !statement || statement.length > 200)) throw new RoomDomainError("truth_lie_statements_invalid");
+        const lieIndex = typeof command.truthLieLieIndex === "number" ? command.truthLieLieIndex : Number.NaN;
+        if (!Number.isInteger(lieIndex) || lieIndex < 1 || lieIndex > 3) throw new RoomDomainError("truth_lie_index_invalid");
+        room.game.statements = statements;
+        room.game.lieIndex = lieIndex as number;
+        room.game.phase = "voting";
+        room.game.votes = {};
+      } else {
+        if (room.game.phase !== "voting") throw new RoomDomainError("game_not_ready");
+        if (actor!.id === room.game.presenterId || !truthLieVoterIds(room.game, room).includes(actor!.id)) throw new RoomDomainError("vote_target_invalid");
+        if (Object.prototype.hasOwnProperty.call(room.game.votes, actor!.id)) throw new RoomDomainError("vote_already_submitted");
+        const rawVote = command.truthLieVote ?? (typeof command.voteTargetId === "string" ? Number(command.voteTargetId) : typeof command.input === "string" ? Number(command.input) : Number.NaN);
+        const vote = Number.isInteger(rawVote) ? rawVote : Number(normalizeTruthAnswer(String(rawVote)));
+        if (!Number.isInteger(vote) || vote < 1 || vote > 3) throw new RoomDomainError("vote_target_invalid");
+        room.game.votes[actor!.id] = vote;
+      }
+    } else if (command.kind === "reverse_word_action" || command.kind === "reverse_word_answer") {
+      if (!room.game || room.game.kind !== "reverse-word-game" || room.game.phase !== "playing") throw new RoomDomainError("game_not_ready");
+      if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
+      if (room.game.currentPlayerId !== actor!.id) throw new RoomDomainError("not_your_turn");
+      const action = normalizeAction(command);
+      if (!(["answer", "pass", "out"] as NativeTurnAction[]).includes(action)) throw new RoomDomainError("turn_action_invalid");
+      const answer = typeof command.input === "string" ? command.input.trim() : typeof command.text === "string" ? command.text.trim() : "";
+      if (action === "answer") {
+        if (!answer) throw new RoomDomainError("answer_required");
+        if (answer.length > 100) throw new RoomDomainError("answer_too_long");
+        const normalized = answer.normalize("NFKC").toLocaleLowerCase();
+        if (normalized !== reverseWordExpected(room.game).normalize("NFKC").toLocaleLowerCase()) throw new RoomDomainError("answer_invalid");
+      }
+      room.game.turnHistory.push({ id: token(10), playerId: actor!.id, action, ...(action === "answer" ? { answer } : {}) });
+      room.game.actedPlayerIds.push(actor!.id);
+      if (action === "out" && !room.game.outIds.includes(actor!.id)) room.game.outIds.push(actor!.id);
+      const nextPlayerId = nativePendingTurnPlayer(room.game.playerOrder, room.game.actedPlayerIds, room.game.outIds, new Set(activeParticipants(room).map((participant) => participant.id)), actor!.id);
+      if (!nextPlayerId) finishReverseWord(room.game, activeParticipants(room));
+      else room.game.currentPlayerId = nextPlayerId;
+      markGameFinished(room);
+    } else if (command.kind === "fast_typing_submit" || command.kind === "fast_typing_complete") {
+      if (!room.game || room.game.kind !== "fast-typing-game" || room.game.phase !== "typing") throw new RoomDomainError("game_not_ready");
+      if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
+      if (Object.prototype.hasOwnProperty.call(room.game.submissions, actor!.id)) throw new RoomDomainError("input_already_submitted");
+      const text = typeof command.fastTypingText === "string" ? command.fastTypingText.trim() : typeof command.text === "string" ? command.text.trim() : typeof command.input === "string" ? command.input.trim() : "";
+      if (!text) throw new RoomDomainError("input_required");
+      if (text.length > 500) throw new RoomDomainError("input_too_long");
+      if (text.normalize("NFKC") !== room.game.prompt.normalize("NFKC")) throw new RoomDomainError("answer_invalid");
+      room.game.submissions[actor!.id] = { text, submittedAt: this.now(), order: room.game.nextSubmissionOrder };
+      room.game.nextSubmissionOrder += 1;
+    } else if (command.kind === "memory_drawing_submit") {
+      if (!room.game || room.game.kind !== "memory-drawing-game" || room.game.phase !== "drawing") throw new RoomDomainError("game_not_ready");
+      if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
+      if (Object.prototype.hasOwnProperty.call(room.game.descriptions, actor!.id)) throw new RoomDomainError("input_already_submitted");
+      const description = typeof command.memoryDrawingDescription === "string" ? command.memoryDrawingDescription.trim() : typeof command.text === "string" ? command.text.trim() : typeof command.input === "string" ? command.input.trim() : "";
+      if (!description) throw new RoomDomainError("input_required");
+      if (description.length > 500) throw new RoomDomainError("input_too_long");
+      room.game.descriptions[actor!.id] = description;
+    } else if (command.kind === "memory_drawing_vote") {
+      if (!room.game || room.game.kind !== "memory-drawing-game" || room.game.phase !== "voting") throw new RoomDomainError("game_not_ready");
+      if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
+      if (Object.prototype.hasOwnProperty.call(room.game.votes, actor!.id)) throw new RoomDomainError("vote_already_submitted");
+      const target = command.memoryDrawingVoteTargetId ?? command.targetParticipantId ?? command.voteTargetId;
+      if (!target || target === actor!.id || !activeParticipants(room).some((participant) => participant.id === target) || !room.game.descriptions[target]) throw new RoomDomainError("vote_target_invalid");
+      room.game.votes[actor!.id] = target;
+    } else if (command.kind === "value_meter_submit") {
+      if (!room.game || room.game.kind !== "value-meter-game" || room.game.phase !== "submitting") throw new RoomDomainError("game_not_ready");
+      if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
+      if (Object.prototype.hasOwnProperty.call(room.game.rows, actor!.id)) throw new RoomDomainError("input_already_submitted");
+      const raw = typeof command.input === "string" ? command.input.trim() : "";
+      const separator = raw.indexOf("|");
+      const rawValue = command.valueMeterValue ?? (separator > 0 ? Number(raw.slice(0, separator).trim()) : Number.NaN);
+      const phrase = typeof command.valueMeterPhrase === "string" ? command.valueMeterPhrase.trim() : separator > 0 ? raw.slice(separator + 1).trim() : typeof command.text === "string" ? command.text.trim() : "";
+      if (!Number.isInteger(rawValue) || rawValue < 1 || rawValue > 100) throw new RoomDomainError("value_meter_value_invalid");
+      if (!phrase || phrase.length > 200) throw new RoomDomainError("value_meter_phrase_invalid");
+      room.game.rows[actor!.id] = { value: rawValue, phrase };
+    } else if (command.kind === "acting_guess" || command.kind === "acting_submit") {
+      if (!room.game || room.game.kind !== "acting-game" || room.game.phase !== "guessing") throw new RoomDomainError("game_not_ready");
+      if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
+      if (actor!.id === room.game.performerId) throw new RoomDomainError("performer_cannot_guess");
+      if (Object.prototype.hasOwnProperty.call(room.game.guesses, actor!.id)) throw new RoomDomainError("input_already_submitted");
+      const guess = typeof command.actingGuess === "string" ? command.actingGuess.trim() : typeof command.text === "string" ? command.text.trim() : typeof command.input === "string" ? command.input.trim() : "";
+      if (!guess) throw new RoomDomainError("input_required");
+      if (guess.length > 100) throw new RoomDomainError("input_too_long");
+      room.game.guesses[actor!.id] = guess;
+    } else if (command.kind === "loanword_ban_action" || command.kind === "loanword_ban_answer") {
+      if (!room.game || room.game.kind !== "loanword-ban-game" || room.game.phase !== "playing") throw new RoomDomainError("game_not_ready");
+      if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
+      if (room.game.currentPlayerId !== actor!.id) throw new RoomDomainError("not_your_turn");
+      const action = normalizeAction(command);
+      if (!(["answer", "pass", "out"] as NativeTurnAction[]).includes(action)) throw new RoomDomainError("turn_action_invalid");
+      const answer = typeof command.input === "string" ? command.input.trim() : typeof command.text === "string" ? command.text.trim() : "";
+      if (action === "answer") {
+        if (!answer) throw new RoomDomainError("answer_required");
+        if (answer.length > 500) throw new RoomDomainError("answer_too_long");
+        const prohibitedWord = containsProhibitedWord(answer, room.game.prohibitedWords);
+        if (prohibitedWord) room.game.strikes.push({ id: token(10), participantId: actor!.id, word: prohibitedWord });
+      }
+      room.game.turnHistory.push({ id: token(10), playerId: actor!.id, action, ...(action === "answer" ? { answer } : {}) });
+      room.game.actedPlayerIds.push(actor!.id);
+      if (action === "out" && !room.game.outIds.includes(actor!.id)) room.game.outIds.push(actor!.id);
+      const nextPlayerId = nativePendingTurnPlayer(room.game.playerOrder, room.game.actedPlayerIds, room.game.outIds, new Set(activeParticipants(room).map((participant) => participant.id)), actor!.id);
+      if (!nextPlayerId) finishLoanwordBan(room.game, activeParticipants(room));
+      else room.game.currentPlayerId = nextPlayerId;
+      markGameFinished(room);
     } else if (command.kind === "johari_self_submit") {
       if (!room.game || room.game.kind !== "johari-window" || room.game.phase !== "self") throw new RoomDomainError("game_not_ready");
       if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
@@ -1578,6 +2227,33 @@ export class RoomService {
         const game = room.game;
         if (game.phase !== "playing" || activeParticipants(room).some((participant) => !game.inputs[participant.id])) throw new RoomDomainError("game_not_ready");
         finishPartyPack(game, activeParticipants(room));
+      } else if (room.game.kind === "truth-lie-game") {
+        const game = room.game;
+        const voters = truthLieVoterIds(game, room);
+        if (game.phase !== "voting" || voters.some((participantId) => !game.votes[participantId])) throw new RoomDomainError("game_not_ready");
+        finishTruthLie(game, activeParticipants(room));
+      } else if (room.game.kind === "reverse-word-game") {
+        if (room.game.phase !== "playing") throw new RoomDomainError("game_not_ready");
+        finishReverseWord(room.game, activeParticipants(room));
+      } else if (room.game.kind === "fast-typing-game") {
+        if (room.game.phase !== "typing") throw new RoomDomainError("game_not_ready");
+        finishFastTyping(room.game, activeParticipants(room));
+      } else if (room.game.kind === "memory-drawing-game") {
+        const game = room.game;
+        if (game.phase !== "voting" || activeParticipants(room).some((participant) => !game.votes[participant.id])) throw new RoomDomainError("game_not_ready");
+        finishMemoryDrawing(game, activeParticipants(room));
+      } else if (room.game.kind === "value-meter-game") {
+        const game = room.game;
+        if (game.phase !== "submitting" || activeParticipants(room).some((participant) => !game.rows[participant.id])) throw new RoomDomainError("game_not_ready");
+        finishValueMeter(game, activeParticipants(room));
+      } else if (room.game.kind === "acting-game") {
+        const game = room.game;
+        const audience = activeParticipants(room).filter((participant) => participant.id !== game.performerId);
+        if (game.phase !== "guessing" || audience.some((participant) => !game.guesses[participant.id])) throw new RoomDomainError("game_not_ready");
+        finishActing(game, activeParticipants(room));
+      } else if (room.game.kind === "loanword-ban-game") {
+        if (room.game.phase !== "playing") throw new RoomDomainError("game_not_ready");
+        finishLoanwordBan(room.game, activeParticipants(room));
       } else if (room.game.kind === "werewolf") {
         const game = room.game;
         if ((game.phase !== "voting" && game.phase !== "revote") || game.aliveIds.some((id) => !game.votes[id])) throw new RoomDomainError("game_not_ready");
@@ -1650,6 +2326,10 @@ export class RoomService {
           room.game.phaseDeadlineAt = room.game.winner ? null : this.now() + 60_000;
         } else if (room.game.phase === "day") { room.game.phase = "voting"; room.game.phaseDeadlineAt = this.now() + 60_000; }
         else throw new RoomDomainError("game_not_ready");
+      } else if (room.game.kind === "memory-drawing-game") {
+        const game = room.game;
+        if (game.phase !== "drawing" || activeParticipants(room).some((participant) => !game.descriptions[participant.id])) throw new RoomDomainError("game_not_ready");
+        game.phase = "voting";
       } else throw new RoomDomainError("game_not_active");
       markGameFinished(room);
     } else if (command.kind === "legacy_input") {
@@ -1910,6 +2590,125 @@ export class RoomService {
         ...(participantId && game.inputs[participantId] ? { ownInput: game.inputs[participantId] } : {}),
         ...(isHost && game.phase === "playing" && game.hiddenAnswer ? { hostAnswer: game.hiddenAnswer } : {}),
         ...(game.phase === "revealed" && game.result ? { result: game.result } : {}),
+      };
+    } else if (room.game?.kind === "truth-lie-game") {
+      const game = room.game;
+      const active = activeParticipants(room);
+      const voters = truthLieVoterIds(game, room);
+      const ownIsPresenter = participantId === game.presenterId;
+      projection.game = {
+        kind: "truth-lie-game",
+        prompt: game.prompt,
+        phase: game.phase,
+        presenterId: game.presenterId,
+        ownRole: ownIsPresenter ? "presenter" : "voter",
+        statementCount: game.statements.length,
+        voterCount: voters.length,
+        voteCount: voters.filter((id) => Boolean(game.votes[id])).length,
+        ...(ownIsPresenter && game.statements.length > 0 ? { ownStatements: [...game.statements] } : {}),
+        ...(ownIsPresenter && game.lieIndex !== null ? { ownLieIndex: game.lieIndex } : {}),
+        ...(game.phase !== "presenting" ? { statements: [...game.statements] } : {}),
+        ...(participantId && !ownIsPresenter && game.votes[participantId] ? { ownVote: game.votes[participantId] } : {}),
+        ...(game.phase === "revealed" ? { result: game.result ?? resolveTruthLieResult(game, active) } : {}),
+      };
+    } else if (room.game?.kind === "reverse-word-game") {
+      const game = room.game;
+      const activeIds = new Set(activeParticipants(room).map((participant) => participant.id));
+      const visibleHistory = game.phase === "finished" ? game.turnHistory.map((turn) => ({ ...turn })) : game.turnHistory.map(({ id, playerId, action }) => ({ id, playerId, action }));
+      projection.game = {
+        kind: "reverse-word-game",
+        prompt: game.prompt,
+        phase: game.phase,
+        playerOrder: game.playerOrder.filter((id) => activeIds.has(id)),
+        currentPlayerId: game.currentPlayerId,
+        actedPlayerIds: game.actedPlayerIds.filter((id) => activeIds.has(id)),
+        outIds: game.outIds.filter((id) => activeIds.has(id)),
+        turnCount: game.turnHistory.length,
+        turnHistory: visibleHistory,
+        ...(game.phase === "finished" ? { result: game.result ?? resolveReverseWordResult(game, activeParticipants(room)) } : {}),
+      };
+    } else if (room.game?.kind === "fast-typing-game") {
+      const game = room.game;
+      const active = activeParticipants(room);
+      projection.game = {
+        kind: "fast-typing-game",
+        prompt: game.prompt,
+        phase: game.phase,
+        submittedCount: active.filter((participant) => Boolean(game.submissions[participant.id])).length,
+        participantCount: active.length,
+        remainingCount: game.phase === "revealed" ? 0 : active.filter((participant) => !game.submissions[participant.id]).length,
+        ...(participantId && game.submissions[participantId] ? { ownSubmission: { text: game.submissions[participantId].text, submittedAt: game.submissions[participantId].submittedAt } } : {}),
+        ...(game.phase === "revealed" ? { result: game.result ?? resolveFastTypingResult(game, active) } : {}),
+      };
+    } else if (room.game?.kind === "memory-drawing-game") {
+      const game = room.game;
+      const active = activeParticipants(room);
+      const isHost = participantId ? room.participants.find((participant) => participant.id === participantId)?.role === "host" : false;
+      projection.game = {
+        kind: "memory-drawing-game",
+        prompt: game.phase === "revealed" ? game.prompt : "お題を思い出して特徴を文章で提出",
+        phase: game.phase,
+        drawingCount: active.filter((participant) => Boolean(game.descriptions[participant.id])).length,
+        participantCount: active.length,
+        voteCount: active.filter((participant) => Boolean(game.votes[participant.id])).length,
+        voterCount: active.length,
+        ...(participantId && game.descriptions[participantId] ? { ownDescription: game.descriptions[participantId] } : {}),
+        ...(participantId && game.votes[participantId] ? { ownVote: game.votes[participantId] } : {}),
+        ...(isHost && game.phase !== "revealed" ? { hostTarget: game.target } : {}),
+        ...(game.phase === "revealed" ? { result: game.result ?? resolveMemoryDrawingResult(game, active) } : {}),
+      };
+    } else if (room.game?.kind === "value-meter-game") {
+      const game = room.game;
+      const active = activeParticipants(room);
+      projection.game = {
+        kind: "value-meter-game",
+        prompt: game.prompt,
+        phase: game.phase,
+        submittedCount: active.filter((participant) => Boolean(game.rows[participant.id])).length,
+        participantCount: active.length,
+        remainingCount: game.phase === "revealed" ? 0 : active.filter((participant) => !game.rows[participant.id]).length,
+        ...(participantId && game.rows[participantId] ? { ownRow: { ...game.rows[participantId] } } : {}),
+        ...(game.phase === "revealed" ? { result: game.result ?? resolveValueMeterResult(game, active) } : {}),
+      };
+    } else if (room.game?.kind === "acting-game") {
+      const game = room.game;
+      const active = activeParticipants(room);
+      const audience = active.filter((participant) => participant.id !== game.performerId);
+      const ownIsPerformer = participantId === game.performerId;
+      projection.game = {
+        kind: "acting-game",
+        prompt: game.prompt,
+        phase: game.phase,
+        performerId: game.performerId,
+        audienceCount: audience.length,
+        guessCount: audience.filter((participant) => Boolean(game.guesses[participant.id])).length,
+        ownRole: ownIsPerformer ? "performer" : "audience",
+        ...(ownIsPerformer ? { ownPerformerPrompt: game.prompt, ownEmotion: game.emotion } : {}),
+        ...(participantId && !ownIsPerformer && game.guesses[participantId] ? { ownGuess: game.guesses[participantId] } : {}),
+        ...(game.phase === "revealed" ? { result: game.result ?? resolveActingResult(game, active) } : {}),
+      };
+    } else if (room.game?.kind === "loanword-ban-game") {
+      const game = room.game;
+      const activeIds = new Set(activeParticipants(room).map((participant) => participant.id));
+      const isCurrentActor = participantId !== null && participantId === game.currentPlayerId;
+      const visibleHistory = game.phase === "finished" ? game.turnHistory.map((turn) => ({ ...turn })) : game.turnHistory.map(({ id, playerId, action }) => ({ id, playerId, action }));
+      const visibleStrikes = game.phase === "finished"
+        ? game.strikes.map((strike) => ({ ...strike }))
+        : game.strikes.map(({ id, participantId: strikeParticipantId }) => ({ id, participantId: strikeParticipantId }));
+      projection.game = {
+        kind: "loanword-ban-game",
+        prompt: game.phase === "finished" ? game.prompt : isCurrentActor ? game.prompt : "",
+        phase: game.phase,
+        playerOrder: game.playerOrder.filter((id) => activeIds.has(id)),
+        currentPlayerId: game.currentPlayerId,
+        actedPlayerIds: game.actedPlayerIds.filter((id) => activeIds.has(id)),
+        outIds: game.outIds.filter((id) => activeIds.has(id)),
+        turnCount: game.turnHistory.length,
+        strikeCount: game.strikes.length,
+        ...(isCurrentActor && game.phase !== "finished" ? { ownPrompt: game.prompt, ownProhibitedWords: [...game.prohibitedWords] } : {}),
+        turnHistory: visibleHistory,
+        strikes: visibleStrikes,
+        ...(game.phase === "finished" ? { result: game.result ?? loanwordBanResult(game, activeParticipants(room)) } : {}),
       };
     } else if (room.game?.kind === "werewolf") {
       const game = room.game;

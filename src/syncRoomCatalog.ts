@@ -15,10 +15,10 @@ export const NEW_SYNC_ROOM_GAME_KEYS = [
   "song-association-quiz",
   "drawing-quiz",
   "hazard-card-game",
-  "typing-speed-game",
-  "memory-logo-drawing",
+  "fast-typing-game",
+  "memory-drawing-game",
   "value-meter-game",
-  "acting-phrase-game",
+  "acting-game",
   "party-sugoroku",
   "territory-board-game",
   "weird-karuta-game",
@@ -46,6 +46,13 @@ export const NATIVE_SYNC_ROOM_GAME_KEYS = [
   "anonymous-box",
   "word-wolf",
   "werewolf-game",
+  "truth-lie-game",
+  "reverse-word-game",
+  "fast-typing-game",
+  "memory-drawing-game",
+  "value-meter-game",
+  "acting-game",
+  "loanword-ban-game",
 ] as const;
 
 export function isNewSyncRoomGameKey(key: string) {

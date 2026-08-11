@@ -178,6 +178,137 @@ type SharedGame =
       };
     }
   | {
+      kind: "truth-lie-game";
+      prompt: string;
+      phase: "presenting" | "voting" | "revealed" | string;
+      presenterId: string;
+      ownRole: "presenter" | "voter";
+      statementCount: number;
+      voterCount: number;
+      voteCount: number;
+      ownStatements?: string[];
+      ownLieIndex?: number;
+      statements?: string[];
+      ownVote?: number;
+      result?: {
+        presenterId: string;
+        statements: string[];
+        lieIndex: number;
+        votes: Record<string, number>;
+        scores: Record<string, number>;
+        correctCount: number;
+      };
+    }
+  | {
+      kind: "reverse-word-game";
+      prompt: string;
+      phase: "playing" | "finished" | string;
+      playerOrder: string[];
+      currentPlayerId: string | null;
+      actedPlayerIds: string[];
+      outIds: string[];
+      turnCount: number;
+      turnHistory: Array<{ id: string; playerId: string; action: "answer" | "pass" | "out"; answer?: string }>;
+      result?: {
+        expected: string;
+        turnHistory: Array<{ id: string; playerId: string; action: "answer" | "pass" | "out"; answer?: string }>;
+        outIds: string[];
+        scores: Record<string, number>;
+      };
+    }
+  | {
+      kind: "fast-typing-game";
+      prompt: string;
+      phase: "typing" | "revealed" | string;
+      submittedCount: number;
+      participantCount: number;
+      remainingCount: number;
+      ownSubmission?: { text: string; submittedAt: number };
+      result?: {
+        expected: string;
+        submissions: Record<string, { text: string; submittedAt: number; order: number }>;
+        leaderboard: Array<{ participantId: string; rank: number; completedAt: number; score: number }>;
+        scores: Record<string, number>;
+      };
+    }
+  | {
+      kind: "memory-drawing-game";
+      prompt: string;
+      phase: "drawing" | "voting" | "revealed" | string;
+      drawingCount: number;
+      participantCount: number;
+      voteCount: number;
+      voterCount: number;
+      ownDescription?: string;
+      ownVote?: string;
+      hostTarget?: string;
+      result?: {
+        target: string;
+        descriptions: Record<string, string>;
+        votes: Record<string, string>;
+        scores: Record<string, number>;
+      };
+    }
+  | {
+      kind: "value-meter-game";
+      prompt: string;
+      phase: "submitting" | "revealed" | string;
+      submittedCount: number;
+      participantCount: number;
+      remainingCount: number;
+      ownRow?: { value: number; phrase: string };
+      result?: {
+        rows: Record<string, { value: number; phrase: string }>;
+        average: number;
+        median: number;
+        min: number;
+        max: number;
+        scores: Record<string, number>;
+      };
+    }
+  | {
+      kind: "acting-game";
+      prompt: string;
+      phase: "guessing" | "revealed" | string;
+      performerId: string;
+      audienceCount: number;
+      guessCount: number;
+      ownRole: "performer" | "audience";
+      ownPerformerPrompt?: string;
+      ownEmotion?: string;
+      ownGuess?: string;
+      result?: {
+        prompt: string;
+        emotion: string;
+        performerId: string;
+        guesses: Record<string, string>;
+        scores: Record<string, number>;
+      };
+    }
+  | {
+      kind: "loanword-ban-game";
+      phase: "playing" | "finished" | string;
+      prompt: string;
+      playerOrder: string[];
+      currentPlayerId: string | null;
+      actedPlayerIds: string[];
+      outIds: string[];
+      turnCount: number;
+      strikeCount: number;
+      ownPrompt?: string;
+      ownProhibitedWords?: string[];
+      turnHistory: Array<{ id: string; playerId: string; action: "answer" | "pass" | "out"; answer?: string }>;
+      strikes: Array<{ id: string; participantId: string; word?: string }>;
+      result?: {
+        prompt: string;
+        prohibitedWords: string[];
+        turnHistory: Array<{ id: string; playerId: string; action: "answer" | "pass" | "out"; answer?: string }>;
+        strikes: Array<{ id: string; participantId: string; word: string }>;
+        outIds: string[];
+        scores: Record<string, number>;
+      };
+    }
+  | {
       kind: "werewolf";
       phase: string;
       phaseDeadlineAt: number | null;
@@ -248,7 +379,21 @@ type CommandKind =
   | "turtle_soup_classify"
   | "turtle_soup_hint"
   | "yamanote_answer"
-  | "party_pack_action";
+  | "party_pack_action"
+  | "truth_lie_present"
+  | "truth_lie_vote"
+  | "truth_lie_submit"
+  | "reverse_word_action"
+  | "reverse_word_answer"
+  | "fast_typing_submit"
+  | "fast_typing_complete"
+  | "memory_drawing_submit"
+  | "memory_drawing_vote"
+  | "value_meter_submit"
+  | "acting_guess"
+  | "acting_submit"
+  | "loanword_ban_action"
+  | "loanword_ban_answer";
 
 const SHARED_SESSION_KEY = "nomikai:shared-room-session:v1";
 const LEGACY_SYNC_GAME_KEYS = NEW_SYNC_ROOM_GAME_KEYS.filter(
@@ -265,6 +410,13 @@ const SHARED_GAME_MINIMUMS = {
   "majority-game": 3,
   "johari-window": 3,
   "word-wolf": 4,
+  "truth-lie-game": 3,
+  "reverse-word-game": 2,
+  "fast-typing-game": 2,
+  "memory-drawing-game": 3,
+  "value-meter-game": 2,
+  "acting-game": 3,
+  "loanword-ban-game": 2,
   werewolf: 4,
 } as const;
 
@@ -392,6 +544,14 @@ function roomError(error: unknown) {
     input_required: "回答を入力してください。",
     input_too_long: "回答は500文字以内で入力してください。",
     input_invalid: "このミニゲームの入力形式を確認してください。",
+    truth_lie_statements_invalid: "3つの発言をすべて入力し、嘘の番号を確認してください。",
+    truth_lie_index_invalid: "嘘の番号は1〜3で指定してください。",
+    memory_drawing_target_invalid: "記憶描きのお題を確認してください。",
+    value_meter_value_invalid: "数値は1〜100の整数で入力してください。",
+    value_meter_phrase_invalid: "価値観の理由を入力してください。",
+    performer_cannot_guess: "演者は予想を提出できません。",
+    turn_action_invalid: "答える・パス・アウトのいずれかを選んでください。",
+    answer_invalid: "サーバーが判定できる正しい回答を入力してください。",
     rate_limited: "操作が多すぎます。少し待ってから試してください。",
     participant_required: "参加者情報が見つかりません。もう一度参加してください。",
     participant_auth_required:
@@ -453,7 +613,7 @@ function normalizeGamePhase(game: SharedGame | undefined): SharedGame | undefine
   if (["complete", "completed", "finished", "closed", "ended"].includes(phase)) {
     return {
       ...game,
-      phase: game.kind === "werewolf" || game.kind === "legacy-game" ? "finished" : game.kind === "johari-window" ? "result" : "revealed",
+       phase: game.kind === "werewolf" || game.kind === "legacy-game" || game.kind === "reverse-word-game" || game.kind === "loanword-ban-game" ? "finished" : game.kind === "johari-window" ? "result" : "revealed",
     } as SharedGame;
   }
   if (phase === "active" || phase === "playing") {
@@ -516,6 +676,15 @@ export function SharedRoomLobby({
   const [error, setError] = useState("");
   const [anonymousText, setAnonymousText] = useState("");
   const [legacyInput, setLegacyInput] = useState("");
+  const [truthLieStatements, setTruthLieStatements] = useState(["", "", ""]);
+  const [truthLieLieIndex, setTruthLieLieIndex] = useState("1");
+  const [reverseWordInput, setReverseWordInput] = useState("");
+  const [fastTypingInput, setFastTypingInput] = useState("");
+  const [memoryDrawingInput, setMemoryDrawingInput] = useState("");
+  const [valueMeterValue, setValueMeterValue] = useState("");
+  const [valueMeterPhrase, setValueMeterPhrase] = useState("");
+  const [actingGuessInput, setActingGuessInput] = useState("");
+  const [loanwordBanInput, setLoanwordBanInput] = useState("");
   const [turtleQuestion, setTurtleQuestion] = useState("");
   const [yamanoteInput, setYamanoteInput] = useState("");
   const [partyPackInput, setPartyPackInput] = useState("");
@@ -744,9 +913,15 @@ export function SharedRoomLobby({
         next.game?.kind === "werewolf" ||
         (next.game?.kind === "two-choice" && !next.game.ownAnswer) ||
         (next.game?.kind === "impression-ranking" && !next.game.ownVote) ||
-        (next.game?.kind === "majority-game" && !next.game.ownVote) ||
-        (next.game?.kind === "anonymous-box" && !next.game.ownEntry) ||
-        (next.game?.kind === "legacy-game" && !next.game.ownInput);
+         (next.game?.kind === "majority-game" && !next.game.ownVote) ||
+         (next.game?.kind === "anonymous-box" && !next.game.ownEntry) ||
+         (next.game?.kind === "truth-lie-game" && (next.game.ownRole === "presenter" ? !next.game.ownStatements : !next.game.ownVote)) ||
+         (next.game?.kind === "fast-typing-game" && !next.game.ownSubmission) ||
+         (next.game?.kind === "memory-drawing-game" && !next.game.ownDescription && next.game.phase === "drawing") ||
+         (next.game?.kind === "value-meter-game" && !next.game.ownRow) ||
+         (next.game?.kind === "acting-game" && (next.game.ownRole === "performer" ? !next.game.ownEmotion : !next.game.ownGuess)) ||
+         (next.game?.kind === "loanword-ban-game" && next.game.currentPlayerId === session.participantId && !next.game.ownPrompt) ||
+         (next.game?.kind === "legacy-game" && !next.game.ownInput);
       if (needsPrivateRefresh)
         void refresh(session).catch((caught) => setError(roomError(caught)));
       setConnection("online");
@@ -1043,6 +1218,15 @@ export function SharedRoomLobby({
               "ng_word_hit",
               "turtle_soup_question",
               "party_pack_action",
+              "truth_lie_vote",
+              "truth_lie_submit",
+              "fast_typing_submit",
+              "fast_typing_complete",
+              "memory_drawing_submit",
+              "memory_drawing_vote",
+              "value_meter_submit",
+              "acting_guess",
+              "acting_submit",
             ].includes(kind) &&
             latest
           ) {
@@ -1157,6 +1341,13 @@ export function SharedRoomLobby({
   const turtleSoupGame = activeGame?.kind === "turtle-soup" ? activeGame : null;
   const yamanoteGame = activeGame?.kind === "yamanote" ? activeGame : null;
   const partyPackGame = activeGame?.kind === "party-pack" ? activeGame : null;
+  const truthLieGame = activeGame?.kind === "truth-lie-game" ? activeGame : null;
+  const reverseWordGame = activeGame?.kind === "reverse-word-game" ? activeGame : null;
+  const fastTypingGame = activeGame?.kind === "fast-typing-game" ? activeGame : null;
+  const memoryDrawingGame = activeGame?.kind === "memory-drawing-game" ? activeGame : null;
+  const valueMeterGame = activeGame?.kind === "value-meter-game" ? activeGame : null;
+  const actingGame = activeGame?.kind === "acting-game" ? activeGame : null;
+  const loanwordBanGame = activeGame?.kind === "loanword-ban-game" ? activeGame : null;
   const johariDeckWords = johariGame
     ? johariGame.deckWordIds
       .map((id) => johariWords.find((word) => word.id === id))
@@ -1495,15 +1686,81 @@ export function SharedRoomLobby({
                     <option value="hint-quiz">ヒントクイズ</option>
                   </select>
                 </label>
-                <button
-                  className="secondary-button"
-                  type="button"
-                  disabled={busy || participantCount < minimumPlayersForGame("party-pack") || !hostPrompt.trim()}
-                  onClick={() => void startGame({ gameKind: "party-pack", partyPackMode, prompt: hostPrompt.trim() || "最近ハマっていること" })}
-                >
-                  <Play size={18} />
-                  定番ゲームパックを開始（3人以上）
-                </button>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || participantCount < minimumPlayersForGame("party-pack") || !hostPrompt.trim()}
+                onClick={() => void startGame({ gameKind: "party-pack", partyPackMode, prompt: hostPrompt.trim() || "最近ハマっていること" })}
+              >
+                <Play size={18} />
+                定番ゲームパックを開始（3人以上）
+              </button>
+              <p className="soft-note">
+                <strong>会話・反射ゲームの専用同期版</strong>：回答・得点・手番はサーバーが管理します。ホストも通常の参加者として参加します。
+              </p>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || participantCount < minimumPlayersForGame("truth-lie-game") || !hostPrompt.trim()}
+                onClick={() => void startGame({ gameKind: "truth-lie-game", prompt: hostPrompt.trim() || "最近あった3つの出来事" })}
+              >
+                <Play size={18} />
+                2つの真実と1つの嘘を開始（3人以上）
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || participantCount < minimumPlayersForGame("reverse-word-game") || !hostPrompt.trim()}
+                onClick={() => void startGame({ gameKind: "reverse-word-game", prompt: hostPrompt.trim() || "さくら" })}
+              >
+                <Play size={18} />
+                逆さ言葉ゲームを開始（2人以上）
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || participantCount < minimumPlayersForGame("fast-typing-game") || !hostPrompt.trim()}
+                onClick={() => void startGame({ gameKind: "fast-typing-game", prompt: hostPrompt.trim() || "今日はみんなで楽しく遊ぼう" })}
+              >
+                <Play size={18} />
+                サーバー判定早打ちを開始（2人以上）
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || participantCount < minimumPlayersForGame("memory-drawing-game") || !hostPrompt.trim()}
+                onClick={() => void startGame({ gameKind: "memory-drawing-game", prompt: hostPrompt.trim() || "身近な店のロゴ" })}
+              >
+                <Play size={18} />
+                記憶描きゲームを開始（3人以上）
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || participantCount < minimumPlayersForGame("value-meter-game") || !hostPrompt.trim()}
+                onClick={() => void startGame({ gameKind: "value-meter-game", prompt: hostPrompt.trim() || "休日は予定を入れたい" })}
+              >
+                <Play size={18} />
+                価値観メーターを開始（2人以上）
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || participantCount < minimumPlayersForGame("acting-game") || !hostPrompt.trim()}
+                onClick={() => void startGame({ gameKind: "acting-game", prompt: hostPrompt.trim() || "『大丈夫です』を演じる" })}
+              >
+                <Play size={18} />
+                ひとこと演技ゲームを開始（3人以上）
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || participantCount < minimumPlayersForGame("loanword-ban-game") || !hostPrompt.trim()}
+                onClick={() => void startGame({ gameKind: "loanword-ban-game", prompt: hostPrompt.trim() || "スマホ" })}
+              >
+                <Play size={18} />
+                外来語禁止ゲームを開始（2人以上）
+              </button>
               </div>
               <button
                 className="primary-button"
@@ -2539,6 +2796,243 @@ export function SharedRoomLobby({
             </div>
           )}
 
+          {truthLieGame && (
+            <div className="shared-room-game-card">
+              <h3>2つの真実と1つの嘘</h3>
+              <p>{truthLieGame.prompt}</p>
+              <p className="soft-note">
+                話し手：{projection.participants.find((item) => item.id === truthLieGame.presenterId)?.name ?? truthLieGame.presenterId} / 投票 {truthLieGame.voteCount}/{truthLieGame.voterCount}。投票内容は結果公開まで非表示です。
+              </p>
+              {truthLieGame.phase === "presenting" && truthLieGame.ownRole === "presenter" && (
+                <div className="shared-room-form">
+                  {truthLieStatements.map((statement, index) => (
+                    <label key={index}>
+                      {index + 1}つ目の発言
+                      <input
+                        value={statement}
+                        maxLength={200}
+                        onChange={(event) => setTruthLieStatements((current) => current.map((item, itemIndex) => itemIndex === index ? event.currentTarget.value : item))}
+                      />
+                    </label>
+                  ))}
+                  <label>
+                    嘘の番号（話し手だけに表示）
+                    <select value={truthLieLieIndex} onChange={(event) => setTruthLieLieIndex(event.currentTarget.value)}>
+                      <option value="1">1</option>
+                      <option value="2">2</option>
+                      <option value="3">3</option>
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="primary-button"
+                    disabled={busy || truthLieStatements.some((statement) => !statement.trim())}
+                    onClick={() => void command("truth_lie_present", { truthLieStatements, truthLieLieIndex: Number(truthLieLieIndex) })}
+                  >
+                    3つの発言を提出
+                  </button>
+                </div>
+              )}
+              {truthLieGame.phase === "presenting" && truthLieGame.ownRole !== "presenter" && (
+                <p className="soft-note">話し手が3つの発言を準備しています。あなたは発言後に投票します。</p>
+              )}
+              {truthLieGame.phase === "voting" && (
+                <>
+                  <div className="shared-room-choice-actions">
+                    {(truthLieGame.statements ?? []).map((statement, index) => (
+                      <button
+                        type="button"
+                        className={truthLieGame.ownVote === index + 1 ? "primary-button" : "secondary-button"}
+                        key={`${index}-${statement}`}
+                        disabled={busy || truthLieGame.ownRole === "presenter" || truthLieGame.ownVote !== undefined}
+                        onClick={() => void command("truth_lie_vote", { truthLieVote: index + 1 })}
+                      >
+                        {index + 1}：{statement}
+                      </button>
+                    ))}
+                  </div>
+                  {truthLieGame.ownRole === "presenter" ? (
+                    <p className="soft-note">話し手は投票せず、全員の予想を待ちます。</p>
+                  ) : truthLieGame.ownVote ? (
+                    <p className="soft-note">投票済みです。ほかの人の投票内容はまだ見えません。</p>
+                  ) : (
+                    <p className="soft-note">嘘だと思う発言を1つ選んでください。</p>
+                  )}
+                  {isHost && (
+                    <button type="button" className="secondary-button" disabled={busy || truthLieGame.voteCount < truthLieGame.voterCount} onClick={() => void command("game_reveal")}>
+                      投票結果を公開
+                    </button>
+                  )}
+                </>
+              )}
+              {truthLieGame.phase === "revealed" && truthLieGame.result && (
+                <div className="shared-room-result">
+                  <strong>嘘は {truthLieGame.result.lieIndex} 番</strong>
+                  <p>正解者 {truthLieGame.result.correctCount}人</p>
+                  {truthLieGame.result.statements.map((statement, index) => <span key={`${index}-${statement}`}>{index + 1}：{statement}{index + 1 === truthLieGame.result?.lieIndex ? "（嘘）" : ""}</span>)}
+                  {Object.entries(truthLieGame.result.scores).map(([participantId, score]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}：{score}点</span>)}
+                </div>
+              )}
+            </div>
+          )}
+          {reverseWordGame && (
+            <div className="shared-room-game-card">
+              <h3>逆さ言葉ゲーム</h3>
+              <p>お題：{reverseWordGame.prompt}</p>
+              {reverseWordGame.phase === "playing" && (
+                <p className="soft-note">
+                  {reverseWordGame.currentPlayerId === session.participantId
+                    ? "あなたの番です。正解を答える、パス、アウトのいずれかを選んでください。"
+                    : `次は${projection.participants.find((item) => item.id === reverseWordGame.currentPlayerId)?.name ?? "次の参加者"}さんの番です。`}
+                </p>
+              )}
+              {reverseWordGame.phase === "playing" && reverseWordGame.currentPlayerId === session.participantId && (
+                <div className="shared-room-form">
+                  <label>
+                    逆から読んだ言葉
+                    <input value={reverseWordInput} onChange={(event) => setReverseWordInput(event.currentTarget.value)} maxLength={100} placeholder="例：らくさ" />
+                  </label>
+                  <div className="shared-room-choice-actions">
+                    <button type="button" className="primary-button" disabled={busy || !reverseWordInput.trim()} onClick={() => void command("reverse_word_action", { action: "answer", input: reverseWordInput.trim() }).then(() => setReverseWordInput(""))}>答える</button>
+                    <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("reverse_word_action", { action: "pass" })}>パス</button>
+                    <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("reverse_word_action", { action: "out" })}>アウト</button>
+                  </div>
+                </div>
+              )}
+              <p className="soft-note">手番 {reverseWordGame.turnCount}件。回答の正誤と結果はサーバーが確定します。</p>
+              {isHost && reverseWordGame.phase === "playing" && <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("game_reveal")}>ここでラウンドを終了</button>}
+              {reverseWordGame.phase === "finished" && reverseWordGame.result && (
+                <div className="shared-room-result">
+                  <strong>正解：{reverseWordGame.result.expected}</strong>
+                  {Object.entries(reverseWordGame.result.scores).map(([participantId, score]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}：{score}点</span>)}
+                </div>
+              )}
+            </div>
+          )}
+          {fastTypingGame && (
+            <div className="shared-room-game-card">
+              <h3>サーバー判定早打ち</h3>
+              <p>次の文章をそのまま入力：{fastTypingGame.prompt}</p>
+              {fastTypingGame.phase === "typing" && (
+                <>
+                  <div className="shared-room-form">
+                    <label>
+                      入力文
+                      <input value={fastTypingInput} onChange={(event) => setFastTypingInput(event.currentTarget.value)} maxLength={500} />
+                    </label>
+                    <button type="button" className="primary-button" disabled={busy || !fastTypingInput.trim() || Boolean(fastTypingGame.ownSubmission)} onClick={() => void command("fast_typing_submit", { fastTypingText: fastTypingInput.trim() }).then(() => setFastTypingInput(""))}>正しい入力を送信</button>
+                  </div>
+                  <p className="soft-note">送信済み {fastTypingGame.submittedCount}/{fastTypingGame.participantCount}人。サーバーが受け付けた到着順だけを結果に使います。</p>
+                  {isHost && <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("game_reveal")}>ランキングを公開</button>}
+                </>
+              )}
+              {fastTypingGame.phase === "revealed" && fastTypingGame.result && (
+                <div className="shared-room-result">
+                  <strong>到着順ランキング</strong>
+                  {fastTypingGame.result.leaderboard.map((entry) => <span key={entry.participantId}>{entry.rank}位：{projection.participants.find((item) => item.id === entry.participantId)?.name ?? entry.participantId}（{entry.completedAt} / {entry.score}点）</span>)}
+                </div>
+              )}
+            </div>
+          )}
+          {memoryDrawingGame && (
+            <div className="shared-room-game-card">
+              <h3>記憶描きゲーム</h3>
+              <p>{memoryDrawingGame.prompt}</p>
+              {memoryDrawingGame.hostTarget && isHost && <p className="soft-note">ホストだけが確認できるターゲット：{memoryDrawingGame.hostTarget}</p>}
+              {memoryDrawingGame.phase === "drawing" && (
+                <>
+                  <div className="shared-room-form">
+                    <label>
+                      覚えている特徴（画像は送信しません）
+                      <textarea value={memoryDrawingInput} onChange={(event) => setMemoryDrawingInput(event.currentTarget.value)} maxLength={500} placeholder="例：丸い枠の中に緑の文字" />
+                    </label>
+                    <button type="button" className="primary-button" disabled={busy || !memoryDrawingInput.trim() || Boolean(memoryDrawingGame.ownDescription)} onClick={() => void command("memory_drawing_submit", { memoryDrawingDescription: memoryDrawingInput.trim() }).then(() => setMemoryDrawingInput(""))}>特徴を提出</button>
+                  </div>
+                  <p className="soft-note">提出済み {memoryDrawingGame.drawingCount}/{memoryDrawingGame.participantCount}人。特徴の文章は投票まで非公開です。</p>
+                  {isHost && <button type="button" className="secondary-button" disabled={busy || memoryDrawingGame.drawingCount < memoryDrawingGame.participantCount} onClick={() => void command("game_phase")}>投票へ進む</button>}
+                </>
+              )}
+              {memoryDrawingGame.phase === "voting" && (
+                <>
+                  <p className="soft-note">一番お題に近いと思う参加者を非公開で選びます。投票 {memoryDrawingGame.voteCount}/{memoryDrawingGame.voterCount}人。</p>
+                  <div className="shared-room-choice-actions">
+                    {projection.participants.filter((item) => item.connected && item.id !== session.participantId && memoryDrawingGame.drawingCount > 0).map((item) => <button type="button" className={memoryDrawingGame.ownVote === item.id ? "primary-button" : "secondary-button"} key={item.id} disabled={busy || Boolean(memoryDrawingGame.ownVote)} onClick={() => void command("memory_drawing_vote", { memoryDrawingVoteTargetId: item.id })}>{item.name}に投票</button>)}
+                  </div>
+                  {isHost && <button type="button" className="secondary-button" disabled={busy || memoryDrawingGame.voteCount < memoryDrawingGame.voterCount} onClick={() => void command("game_reveal")}>ターゲットと投票を公開</button>}
+                </>
+              )}
+              {memoryDrawingGame.phase === "revealed" && memoryDrawingGame.result && (
+                <div className="shared-room-result">
+                  <strong>ターゲット：{memoryDrawingGame.result.target}</strong>
+                  {Object.entries(memoryDrawingGame.result.descriptions).map(([participantId, description]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}：{description}（{memoryDrawingGame.result?.scores[participantId] ?? 0}票）</span>)}
+                </div>
+              )}
+            </div>
+          )}
+          {valueMeterGame && (
+            <div className="shared-room-game-card">
+              <h3>価値観メーター</h3>
+              <p>{valueMeterGame.prompt}</p>
+              {valueMeterGame.phase === "submitting" && (
+                <>
+                  <div className="shared-room-form">
+                    <label>数値（1〜100）<input value={valueMeterValue} onChange={(event) => setValueMeterValue(event.currentTarget.value)} inputMode="numeric" /></label>
+                    <label>理由・ひとこと<input value={valueMeterPhrase} onChange={(event) => setValueMeterPhrase(event.currentTarget.value)} maxLength={200} /></label>
+                    <button type="button" className="primary-button" disabled={busy || !valueMeterValue.trim() || !valueMeterPhrase.trim() || Boolean(valueMeterGame.ownRow)} onClick={() => void command("value_meter_submit", { valueMeterValue: Number(valueMeterValue), valueMeterPhrase: valueMeterPhrase.trim() }).then(() => { setValueMeterValue(""); setValueMeterPhrase(""); })}>非公開で提出</button>
+                  </div>
+                  <p className="soft-note">提出済み {valueMeterGame.submittedCount}/{valueMeterGame.participantCount}人。ほかの人の数値と理由はまだ見えません。</p>
+                  {isHost && <button type="button" className="secondary-button" disabled={busy || valueMeterGame.remainingCount > 0} onClick={() => void command("game_reveal")}>集計結果を公開</button>}
+                </>
+              )}
+              {valueMeterGame.phase === "revealed" && valueMeterGame.result && (
+                <div className="shared-room-result">
+                  <strong>平均 {valueMeterGame.result.average} / 中央値 {valueMeterGame.result.median}</strong>
+                  <p>範囲 {valueMeterGame.result.min}〜{valueMeterGame.result.max}</p>
+                  {Object.entries(valueMeterGame.result.rows).map(([participantId, row]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}：{row.value}「{row.phrase}」</span>)}
+                </div>
+              )}
+            </div>
+          )}
+          {actingGame && (
+            <div className="shared-room-game-card">
+              <h3>ひとこと演技ゲーム</h3>
+              <p>{actingGame.prompt}</p>
+              {actingGame.phase === "guessing" && actingGame.ownRole === "performer" && (
+                <div className="notice-panel calm"><strong>あなたが演者です</strong><p>秘密の感情：{actingGame.ownEmotion}</p><p>この感情を声や表情で演じてください。ほかの参加者には秘密です。</p></div>
+              )}
+              {actingGame.phase === "guessing" && actingGame.ownRole === "audience" && (
+                <div className="shared-room-form">
+                  <label>演技から予想した感情<input value={actingGuessInput} onChange={(event) => setActingGuessInput(event.currentTarget.value)} maxLength={100} placeholder="例：うれしい" /></label>
+                  <button type="button" className="primary-button" disabled={busy || !actingGuessInput.trim() || Boolean(actingGame.ownGuess)} onClick={() => void command("acting_guess", { actingGuess: actingGuessInput.trim() }).then(() => setActingGuessInput(""))}>予想を提出</button>
+                </div>
+              )}
+              {actingGame.phase === "guessing" && <p className="soft-note">予想済み {actingGame.guessCount}/{actingGame.audienceCount}人。予想内容は結果公開まで非公開です。</p>}
+              {actingGame.phase === "guessing" && isHost && <button type="button" className="secondary-button" disabled={busy || actingGame.guessCount < actingGame.audienceCount} onClick={() => void command("game_reveal")}>感情と予想を公開</button>}
+              {actingGame.phase === "revealed" && actingGame.result && (
+                <div className="shared-room-result"><strong>正解の感情：{actingGame.result.emotion}</strong>{Object.entries(actingGame.result.guesses).map(([participantId, guess]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}：{guess}（{actingGame.result?.scores[participantId] ?? 0}点）</span>)}</div>
+              )}
+            </div>
+          )}
+          {loanwordBanGame && (
+            <div className="shared-room-game-card">
+              <h3>外来語禁止ゲーム</h3>
+              {loanwordBanGame.phase === "playing" && <p className="soft-note">{loanwordBanGame.currentPlayerId === session.participantId ? `あなたの説明対象：${loanwordBanGame.ownPrompt ?? "準備中"}` : `説明役：${projection.participants.find((item) => item.id === loanwordBanGame.currentPlayerId)?.name ?? "次の参加者"}`} / ストライク {loanwordBanGame.strikeCount}件</p>}
+              {loanwordBanGame.currentPlayerId === session.participantId && loanwordBanGame.phase === "playing" && <p className="soft-note">禁止語：{loanwordBanGame.ownProhibitedWords?.join("・")}</p>}
+              {loanwordBanGame.phase === "playing" && loanwordBanGame.currentPlayerId === session.participantId && (
+                <div className="shared-room-form">
+                  <label>禁止語を避けた説明<input value={loanwordBanInput} onChange={(event) => setLoanwordBanInput(event.currentTarget.value)} maxLength={500} /></label>
+                  <div className="shared-room-choice-actions">
+                    <button type="button" className="primary-button" disabled={busy || !loanwordBanInput.trim()} onClick={() => void command("loanword_ban_action", { action: "answer", input: loanwordBanInput.trim() }).then(() => setLoanwordBanInput(""))}>答える</button>
+                    <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("loanword_ban_action", { action: "pass" })}>パス</button>
+                    <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("loanword_ban_action", { action: "out" })}>アウト</button>
+                  </div>
+                </div>
+              )}
+              {loanwordBanGame.phase === "playing" && <p className="soft-note">手番 {loanwordBanGame.turnCount}件。禁止語の使用はサーバーが記録します。</p>}
+              {isHost && loanwordBanGame.phase === "playing" && <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("game_reveal")}>ここで結果を公開</button>}
+              {loanwordBanGame.phase === "finished" && loanwordBanGame.result && <div className="shared-room-result"><strong>お題：{loanwordBanGame.result.prompt}</strong><p>禁止語：{loanwordBanGame.result.prohibitedWords.join("・")}</p>{Object.entries(loanwordBanGame.result.scores).map(([participantId, score]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}：{score}点</span>)}</div>}
+            </div>
+          )}
           {legacyGame?.kind === "legacy-game" && activeLegacyDefinition && (
             <div className="shared-room-game-card">
               <p className="eyebrow">

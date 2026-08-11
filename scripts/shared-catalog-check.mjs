@@ -3,10 +3,15 @@ import fs from "node:fs";
 
 const api = (process.argv[2] || "http://localhost:3000").replace(/\/$/, "");
 const source = fs.readFileSync(new URL("../src/syncRoomCatalog.ts", import.meta.url), "utf8");
-const keys = [...source.matchAll(/^\s*"([a-z0-9-]+)",?$/gm)].map((match) => match[1]);
-const native = new Set(["two-choice", "impression-ranking", "majority-game", "anonymous-box", "word-wolf", "werewolf-game"]);
+const keys = [...new Set([...source.matchAll(/^\s*"([a-z0-9-]+)",?$/gm)].map((match) => match[1]))];
+const native = new Set([
+  "two-choice", "impression-ranking", "majority-game", "anonymous-box", "word-wolf", "werewolf-game",
+  "yamanote", "ng-word", "turtle-soup", "party-pack", "johari-window",
+  "truth-lie-game", "reverse-word-game", "fast-typing-game", "memory-drawing-game", "value-meter-game", "acting-game", "loanword-ban-game",
+]);
 const requestedKeys = (process.argv[3] || process.env.NOMIKAI_SHARED_KEYS || "").split(",").map((key) => key.trim()).filter(Boolean);
 const legacyKeys = keys.filter((key) => !native.has(key) && (requestedKeys.length === 0 || requestedKeys.includes(key)));
+const nativeKeys = keys.filter((key) => native.has(key) && (requestedKeys.length === 0 || requestedKeys.includes(key)));
 const turnKeys = new Set([
   "yamanote", "ng-word", "party-pack", "turtle-soup", "song-association-quiz", "drawing-quiz", "hazard-card-game", "acting-phrase-game", "party-sugoroku", "territory-board-game", "life-event-sugoroku", "arm-wrestling-tournament", "safe-random-draw", "person-hint-quiz", "humming-intro-quiz", "loanword-ban-game",
 ]);
@@ -23,6 +28,10 @@ async function command(room, token, body) {
 }
 
 const checks = [];
+for (const key of ["truth-lie-game", "reverse-word-game", "fast-typing-game", "memory-drawing-game", "value-meter-game", "acting-game", "loanword-ban-game"]) {
+  assert.ok(native.has(key), `${key}: missing native catalog classification`);
+  assert.equal(legacyKeys.includes(key), false, `${key}: still routed through generic legacy selector`);
+}
 const priorityInputs = {
   "truth-lie-game": ["2", "1"],
   "count-up-game": ["1,2,3", "1,2"],
@@ -100,4 +109,4 @@ for (const gameKey of legacyKeys) {
   checks.push(gameKey);
 }
 
-console.log(JSON.stringify({ ok: true, keys: checks.length, checks, priority: Object.keys(priorityInputs) }));
+console.log(JSON.stringify({ ok: true, keys: checks.length, checks, nativeKeys, priority: Object.keys(priorityInputs) }));

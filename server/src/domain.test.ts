@@ -952,3 +952,177 @@ test("native party pack supports private simultaneous answers, turn progression,
   assert.equal(rematchResult.game?.kind, "party-pack");
   if (rematchResult.game?.kind === "party-pack") assert.equal(rematchResult.game.result?.answer, "らくさ");
 });
+
+test("native truth-lie keeps presenter secrets private, includes the host as a voter, and rematches cleanly", async () => {
+  const { service, host, sessions, version } = await createRoomWithPlayers(["Alice", "Bob"]);
+  const hostSession = sessions[0]!;
+  const presenter = sessions[1]!;
+  const bob = sessions[2]!;
+  const locked = await lockRoom(service, host.room.code, version, hostSession.id, hostSession.token, "truth-native-lock");
+  const started = await service.execute(command(host.room.code, "truth-native-start", locked.version, "game_start", {
+    participantId: hostSession.id,
+    gameKind: "truth-lie-game",
+    prompt: "最近あった3つの出来事",
+  }), hostSession.token);
+  if (!started.game || started.game.kind !== "truth-lie-game") throw new Error("truth-lie start projection missing");
+  assert.equal(started.game.presenterId, presenter.id);
+  assert.equal(started.game.ownRole, "voter");
+  const presenterBefore = await service.getProjection(host.room.code, presenter.id, presenter.token);
+  if (!presenterBefore?.game || presenterBefore.game.kind !== "truth-lie-game") throw new Error("truth-lie presenter projection missing");
+  assert.equal(presenterBefore.game.ownRole, "presenter");
+
+  const presented = await service.execute(command(host.room.code, "truth-native-present", started.version, "truth_lie_present", {
+    participantId: presenter.id,
+    truthLieStatements: ["昨日は早起きした", "猫が話しかけてきた", "新しい店を見つけた"],
+    truthLieLieIndex: 2,
+  }), presenter.token);
+  const bobBeforeVote = await service.getProjection(host.room.code, bob.id, bob.token);
+  if (!bobBeforeVote?.game || bobBeforeVote.game.kind !== "truth-lie-game") throw new Error("truth-lie voter projection missing");
+  assert.equal("ownLieIndex" in bobBeforeVote.game, false);
+  assert.equal("result" in bobBeforeVote.game, false);
+  assert.deepEqual(bobBeforeVote.game.statements, ["昨日は早起きした", "猫が話しかけてきた", "新しい店を見つけた"]);
+
+  const hostVote = await service.execute(command(host.room.code, "truth-native-host-vote", presented.version, "truth_lie_vote", { participantId: hostSession.id, truthLieVote: 2 }), hostSession.token);
+  await assert.rejects(
+    service.execute(command(host.room.code, "truth-native-early-reveal", hostVote.version, "game_reveal", { participantId: hostSession.id }), hostSession.token),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "game_not_ready",
+  );
+  const bobVote = await service.execute(command(host.room.code, "truth-native-bob-vote", hostVote.version, "truth_lie_vote", { participantId: bob.id, truthLieVote: 1 }), bob.token);
+
+  const presenterRestored = await service.execute(command(host.room.code, "truth-native-reconnect", bobVote.version, "reconnect", { participantId: presenter.id }), presenter.token);
+  const presenterAfter = await service.getProjection(host.room.code, presenter.id, presenter.token);
+  if (!presenterAfter?.game || presenterAfter.game.kind !== "truth-lie-game") throw new Error("truth-lie reconnect projection missing");
+  assert.deepEqual(presenterAfter.game.ownStatements, ["昨日は早起きした", "猫が話しかけてきた", "新しい店を見つけた"]);
+  assert.equal(presenterAfter.game.ownLieIndex, 2);
+  const revealed = await service.execute(command(host.room.code, "truth-native-reveal", presenterRestored.version, "game_reveal", { participantId: hostSession.id }), hostSession.token);
+  assert.equal(revealed.status, "finished");
+  if (!revealed.game || revealed.game.kind !== "truth-lie-game") throw new Error("truth-lie result projection missing");
+  assert.equal(revealed.game.result?.correctCount, 1);
+  assert.equal(revealed.game.result?.scores[hostSession.id], 1);
+  assert.equal(revealed.game.result?.scores[presenter.id], 0);
+
+  const reset = await service.execute(command(host.room.code, "truth-native-reset", revealed.version, "reset", { participantId: hostSession.id }), hostSession.token);
+  const rematchLock = await lockRoom(service, host.room.code, reset.version, hostSession.id, hostSession.token, "truth-native-rematch-lock");
+  const rematch = await service.execute(command(host.room.code, "truth-native-rematch", rematchLock.version, "game_start", { participantId: hostSession.id, gameKind: "truth-lie-game", prompt: "もう一度" }), hostSession.token);
+  assert.equal(rematch.game?.kind, "truth-lie-game");
+  assert.equal(rematch.status, "playing");
+});
+
+test("native reverse-word and loanword-ban keep roster turns valid across departure and record server-side outcomes", async () => {
+  const { service, host, sessions, version } = await createRoomWithPlayers(["Alice", "Bob"]);
+  const hostSession = sessions[0]!;
+  const alice = sessions[1]!;
+  const bob = sessions[2]!;
+  const locked = await lockRoom(service, host.room.code, version, hostSession.id, hostSession.token, "turn-native-lock");
+  const started = await service.execute(command(host.room.code, "reverse-native-start", locked.version, "game_start", { participantId: hostSession.id, gameKind: "reverse-word-game", prompt: "hello" }), hostSession.token);
+  if (!started.game || started.game.kind !== "reverse-word-game") throw new Error("reverse-word native start missing");
+  assert.equal(started.game.currentPlayerId, hostSession.id);
+  await assert.rejects(
+    service.execute(command(host.room.code, "reverse-native-out-of-turn", started.version, "reverse_word_action", { participantId: alice.id, action: "pass" }), alice.token),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "not_your_turn",
+  );
+  const hostAnswer = await service.execute(command(host.room.code, "reverse-native-host", started.version, "reverse_word_action", { participantId: hostSession.id, action: "answer", input: "olleh" }), hostSession.token);
+  assert.equal(hostAnswer.game?.kind, "reverse-word-game");
+  assert.equal(hostAnswer.game?.currentPlayerId, alice.id);
+  const aliceLeft = await service.execute(command(host.room.code, "reverse-native-alice-leave", hostAnswer.version, "leave", { participantId: alice.id }), alice.token);
+  if (!aliceLeft.game || aliceLeft.game.kind !== "reverse-word-game") throw new Error("reverse-word departure projection missing");
+  assert.equal(aliceLeft.game.currentPlayerId, bob.id);
+  assert.equal(aliceLeft.game.playerOrder.includes(alice.id), false);
+  const bobPass = await service.execute(command(host.room.code, "reverse-native-bob-pass", aliceLeft.version, "reverse_word_action", { participantId: bob.id, action: "pass" }), bob.token);
+  assert.equal(bobPass.status, "finished");
+  assert.equal(bobPass.game?.kind, "reverse-word-game");
+  if (bobPass.game?.kind === "reverse-word-game") assert.equal(bobPass.game.result?.expected, "olleh");
+
+  const reconnected = await service.execute(command(host.room.code, "turn-native-reconnect", bobPass.version, "reconnect", { participantId: alice.id }), alice.token);
+  const reset = await service.execute(command(host.room.code, "turn-native-reset", reconnected.version, "reset", { participantId: hostSession.id }), hostSession.token);
+  const rematchLock = await lockRoom(service, host.room.code, reset.version, hostSession.id, hostSession.token, "loanword-native-lock");
+  const loanword = await service.execute(command(host.room.code, "loanword-native-start", rematchLock.version, "game_start", { participantId: hostSession.id, gameKind: "loanword-ban-game", prompt: "スマホ" }), hostSession.token);
+  if (!loanword.game || loanword.game.kind !== "loanword-ban-game") throw new Error("loanword-ban native start missing");
+  assert.equal(loanword.game.currentPlayerId, hostSession.id);
+  assert.equal(loanword.game.ownPrompt, "スマホ");
+  const struck = await service.execute(command(host.room.code, "loanword-native-strike", loanword.version, "loanword_ban_action", { participantId: hostSession.id, action: "answer", input: "スマホです" }), hostSession.token);
+  if (!struck.game || struck.game.kind !== "loanword-ban-game") throw new Error("loanword-ban strike projection missing");
+  assert.equal(struck.game.strikeCount, 1);
+  assert.equal(struck.game.strikes[0]?.word, undefined);
+  assert.equal(struck.game.currentPlayerId, alice.id);
+  const alicePassAgain = await service.execute(command(host.room.code, "loanword-native-alice", struck.version, "loanword_ban_action", { participantId: alice.id, action: "pass" }), alice.token);
+  const bobOut = await service.execute(command(host.room.code, "loanword-native-bob", alicePassAgain.version, "loanword_ban_action", { participantId: bob.id, action: "out" }), bob.token);
+  assert.equal(bobOut.status, "finished");
+  if (!bobOut.game || bobOut.game.kind !== "loanword-ban-game") throw new Error("loanword-ban result projection missing");
+  assert.equal(bobOut.game.result?.strikes[0]?.participantId, hostSession.id);
+});
+
+test("native fast typing, memory drawing, value meter, and acting keep private submissions behind gates", async () => {
+  const { service, host, sessions, version } = await createRoomWithPlayers(["Alice", "Bob"]);
+  const hostSession = sessions[0]!;
+  const alice = sessions[1]!;
+  const bob = sessions[2]!;
+  let locked = await lockRoom(service, host.room.code, version, hostSession.id, hostSession.token, "simultaneous-native-lock-1");
+  let started = await service.execute(command(host.room.code, "typing-native-start", locked.version, "game_start", { participantId: hostSession.id, gameKind: "fast-typing-game", prompt: "same text" }), hostSession.token);
+  const aliceTyping = await service.execute(command(host.room.code, "typing-native-alice", started.version, "fast_typing_submit", { participantId: alice.id, fastTypingText: "same text" }), alice.token);
+  const hostTyping = await service.execute(command(host.room.code, "typing-native-host", aliceTyping.version, "fast_typing_submit", { participantId: hostSession.id, fastTypingText: "same text" }), hostSession.token);
+  const typingPrivate = await service.getProjection(host.room.code, alice.id, alice.token);
+  if (!typingPrivate?.game || typingPrivate.game.kind !== "fast-typing-game") throw new Error("fast typing private projection missing");
+  assert.equal(typingPrivate.game.ownSubmission?.text, "same text");
+  assert.equal("result" in typingPrivate.game, false);
+  const typingPublic = await service.getProjection(host.room.code, null);
+  if (!typingPublic?.game || typingPublic.game.kind !== "fast-typing-game") throw new Error("fast typing public projection missing");
+  assert.equal("ownSubmission" in typingPublic.game, false);
+  const typingResult = await service.execute(command(host.room.code, "typing-native-reveal", hostTyping.version, "game_reveal", { participantId: hostSession.id }), hostSession.token);
+  assert.equal(typingResult.status, "finished");
+  assert.equal(typingResult.game?.kind, "fast-typing-game");
+  if (typingResult.game?.kind === "fast-typing-game") assert.equal(typingResult.game.result?.leaderboard[0]?.participantId, alice.id);
+
+  const resetTyping = await service.execute(command(host.room.code, "typing-native-reset", typingResult.version, "reset", { participantId: hostSession.id }), hostSession.token);
+  locked = await lockRoom(service, host.room.code, resetTyping.version, hostSession.id, hostSession.token, "simultaneous-native-lock-2");
+  started = await service.execute(command(host.room.code, "drawing-native-start", locked.version, "game_start", { participantId: hostSession.id, gameKind: "memory-drawing-game", prompt: "赤いりんご" }), hostSession.token);
+  if (!started.game || started.game.kind !== "memory-drawing-game") throw new Error("memory drawing start missing");
+  assert.equal(started.game.hostTarget, "赤いりんご");
+  const drawingPublic = await service.getProjection(host.room.code, null);
+  if (!drawingPublic?.game || drawingPublic.game.kind !== "memory-drawing-game") throw new Error("memory drawing public projection missing");
+  assert.notEqual(drawingPublic.game.prompt, started.game.hostTarget);
+  assert.equal("hostTarget" in drawingPublic.game, false);
+  const drawingAlicePrivate = await service.getProjection(host.room.code, alice.id, alice.token);
+  if (!drawingAlicePrivate?.game || drawingAlicePrivate.game.kind !== "memory-drawing-game") throw new Error("memory drawing private projection missing");
+  assert.equal("hostTarget" in drawingAlicePrivate.game, false);
+  const drawingVersion = started.version;
+  const afterHostDrawing = await service.execute(command(host.room.code, "drawing-native-host", drawingVersion, "memory_drawing_submit", { participantId: hostSession.id, memoryDrawingDescription: "赤い丸い果物" }), hostSession.token);
+  const afterAliceDrawing = await service.execute(command(host.room.code, "drawing-native-alice", afterHostDrawing.version, "memory_drawing_submit", { participantId: alice.id, memoryDrawingDescription: "赤い実" }), alice.token);
+  const afterBobDrawing = await service.execute(command(host.room.code, "drawing-native-bob", afterAliceDrawing.version, "memory_drawing_submit", { participantId: bob.id, memoryDrawingDescription: "丸い食べ物" }), bob.token);
+  const voting = await service.execute(command(host.room.code, "drawing-native-voting", afterBobDrawing.version, "game_phase", { participantId: hostSession.id }), hostSession.token);
+  const hostDrawingVote = await service.execute(command(host.room.code, "drawing-native-host-vote", voting.version, "memory_drawing_vote", { participantId: hostSession.id, memoryDrawingVoteTargetId: alice.id }), hostSession.token);
+  const aliceDrawingVote = await service.execute(command(host.room.code, "drawing-native-alice-vote", hostDrawingVote.version, "memory_drawing_vote", { participantId: alice.id, memoryDrawingVoteTargetId: bob.id }), alice.token);
+  const bobDrawingVote = await service.execute(command(host.room.code, "drawing-native-bob-vote", aliceDrawingVote.version, "memory_drawing_vote", { participantId: bob.id, memoryDrawingVoteTargetId: alice.id }), bob.token);
+  const drawingResult = await service.execute(command(host.room.code, "drawing-native-reveal", bobDrawingVote.version, "game_reveal", { participantId: hostSession.id }), hostSession.token);
+  assert.equal(drawingResult.status, "finished");
+  if (drawingResult.game?.kind === "memory-drawing-game") assert.equal(drawingResult.game.result?.target, "赤いりんご");
+
+  const resetDrawing = await service.execute(command(host.room.code, "drawing-native-reset", drawingResult.version, "reset", { participantId: hostSession.id }), hostSession.token);
+  locked = await lockRoom(service, host.room.code, resetDrawing.version, hostSession.id, hostSession.token, "simultaneous-native-lock-3");
+  started = await service.execute(command(host.room.code, "value-native-start", locked.version, "game_start", { participantId: hostSession.id, gameKind: "value-meter-game", prompt: "休日は予定を入れたい" }), hostSession.token);
+  await assert.rejects(
+    service.execute(command(host.room.code, "value-native-early", started.version, "game_reveal", { participantId: hostSession.id }), hostSession.token),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "game_not_ready",
+  );
+  const valueHost = await service.execute(command(host.room.code, "value-native-host", started.version, "value_meter_submit", { participantId: hostSession.id, valueMeterValue: 72, valueMeterPhrase: "外出が好き" }), hostSession.token);
+  const valueAlice = await service.execute(command(host.room.code, "value-native-alice", valueHost.version, "value_meter_submit", { participantId: alice.id, valueMeterValue: 48, valueMeterPhrase: "家が好き" }), alice.token);
+  const valueBob = await service.execute(command(host.room.code, "value-native-bob", valueAlice.version, "value_meter_submit", { participantId: bob.id, valueMeterValue: 60, valueMeterPhrase: "半々" }), bob.token);
+  const valueResult = await service.execute(command(host.room.code, "value-native-reveal", valueBob.version, "game_reveal", { participantId: hostSession.id }), hostSession.token);
+  if (!valueResult.game || valueResult.game.kind !== "value-meter-game") throw new Error("value meter result missing");
+  assert.equal(valueResult.game.result?.average, 60);
+
+  const resetValue = await service.execute(command(host.room.code, "value-native-reset", valueResult.version, "reset", { participantId: hostSession.id }), hostSession.token);
+  locked = await lockRoom(service, host.room.code, resetValue.version, hostSession.id, hostSession.token, "simultaneous-native-lock-4");
+  started = await service.execute(command(host.room.code, "acting-native-start", locked.version, "game_start", { participantId: hostSession.id, gameKind: "acting-game", prompt: "大丈夫です" }), hostSession.token);
+  if (!started.game || started.game.kind !== "acting-game") throw new Error("acting start missing");
+  const performerId = started.game.performerId;
+  const performerSession = sessions.find((session) => session.id === performerId)!;
+  const performerView = await service.getProjection(host.room.code, performerId, performerSession.token);
+  if (!performerView?.game || performerView.game.kind !== "acting-game") throw new Error("acting performer projection missing");
+  assert.ok(performerView.game.ownEmotion);
+  const actingHost = await service.execute(command(host.room.code, "acting-native-host", started.version, "acting_guess", { participantId: hostSession.id, actingGuess: performerView.game.ownEmotion }), hostSession.token);
+  const actingBob = await service.execute(command(host.room.code, "acting-native-bob", actingHost.version, "acting_guess", { participantId: bob.id, actingGuess: "違う答え" }), bob.token);
+  const actingResult = await service.execute(command(host.room.code, "acting-native-reveal", actingBob.version, "game_reveal", { participantId: hostSession.id }), hostSession.token);
+  assert.equal(actingResult.status, "finished");
+  if (actingResult.game?.kind === "acting-game") assert.equal(actingResult.game.result?.scores[hostSession.id], 1);
+});

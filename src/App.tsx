@@ -1019,7 +1019,7 @@ function HomeScreen({ onStart, onResetAll, partySession, roomMode }: { onStart: 
       );
       return;
     }
-    const nativeRoomGame = ["two-choice", "impression-ranking", "majority-game", "anonymous-box", "word-wolf", "werewolf-game"].includes(game);
+    const nativeRoomGame = isNativeSyncRoomGameKey(game);
     setSyncStartHint(
       targetMode === "v2" && !nativeRoomGame
         ? `全ゲーム同期ルーム：「${gameTitle}」は簡易同期ブリッジで参加者へ同期します。`
