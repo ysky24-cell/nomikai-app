@@ -114,7 +114,7 @@ import {
   type YamanoteCategory,
 } from "./data/yamanoteThemes";
 import { SharedRoomLobby } from "./SharedRoomLobby";
-import { isNativeSyncRoomGameKey, isNewSyncRoomGameKey } from "./syncRoomCatalog";
+import { NATIVE_SYNC_ROOM_GAME_KEYS, isNativeSyncRoomGameKey, isNewSyncRoomGameKey } from "./syncRoomCatalog";
 
 type BuiltInGameKey =
   | "yamanote"
@@ -958,7 +958,7 @@ function RoomModeNotice({ roomMode }: { roomMode: Exclude<AppRoomMode, "pages"> 
     <section className="room-panel" aria-label="Docker版同期ルームの設定" role="status">
       <div className="room-panel-heading">
         <div>
-          <p className="eyebrow">{roomMode === "v2" ? "v2同期ルーム（正式版＋簡易ブリッジ）" : "簡易同期版"}</p>
+          <p className="eyebrow">{roomMode === "v2" ? "v2同期ルーム（全33ゲーム正式同期）" : "簡易同期版"}</p>
           <h2>同期ルームのAPI URLが未設定です</h2>
           <p>
             GitHub Pagesの静的版ではSocket.IO同期を使いません。Docker版で利用する場合は、
@@ -979,7 +979,6 @@ function HomeScreen({ onStart, onResetAll, partySession, roomMode }: { onStart: 
   const [peopleFilter, setPeopleFilter] = useState<HomePeopleFilter>("all");
   const [hasRoomContext, setHasRoomContext] = useState(false);
   const [syncStartHint, setSyncStartHint] = useState("");
-  const [syncGameKey, setSyncGameKey] = useState<GameKey | null>(null);
   const syncModeGames = roomMode === "pages"
     ? activeGames
     : activeGames.filter((game) => isNewSyncRoomGameKey(game.key));
@@ -998,15 +997,13 @@ function HomeScreen({ onStart, onResetAll, partySession, roomMode }: { onStart: 
   const visibleBetaGames = visibleGames.filter((game) => game.status === "beta");
   const visibleFacilitatorGames = visibleGames.filter((game) => game.status === "facilitator");
   const newSyncReadyCount = activeGames.filter((game) => isNewSyncRoomGameKey(game.key) && game.status === "ready").length;
-  const nativeSyncReadyCount = activeGames.filter((game) => isNativeSyncRoomGameKey(game.key) && game.status === "ready").length;
-  const bridgeSyncReadyCount = Math.max(0, newSyncReadyCount - nativeSyncReadyCount);
+  const nativeSyncReadyCount = NATIVE_SYNC_ROOM_GAME_KEYS.length;
   const displayedReadyCount = roomMode === "pages"
     ? activeGames.filter((game) => game.status === "ready").length
     : newSyncReadyCount;
 
   function requestSyncGameStart(game: GameKey) {
     const gameTitle = findGameMeta(game)?.title ?? "選んだゲーム";
-    setSyncGameKey(game);
     if (roomMode === "pages") {
       onStart(game);
       return;
@@ -1019,15 +1016,12 @@ function HomeScreen({ onStart, onResetAll, partySession, roomMode }: { onStart: 
       );
       return;
     }
-    const nativeRoomGame = isNativeSyncRoomGameKey(game);
     setSyncStartHint(
-      targetMode === "v2" && !nativeRoomGame
-        ? `全ゲーム同期ルーム：「${gameTitle}」は簡易同期ブリッジで参加者へ同期します。`
-        : !API_URL && targetMode === "legacy"
+      !API_URL && targetMode === "legacy"
           ? `「${gameTitle}」は、まず同期ルームに参加してください。`
           : hasRoomContext
           ? `「${gameTitle}」を始めるときは、参加中の同期ルームでホストがゲームを開始してください。`
-          : `「${gameTitle}」は、まず${targetMode === "v2" ? "正式版同期ルーム" : "簡易同期ルーム"}に参加してください。参加後はホストがルーム内で開始します。`,
+          : `「${gameTitle}」は、まず同期ルームに参加してください。参加後はホストがルーム内で開始します。`,
     );
     const lobbyId = targetMode === "v2" ? "shared-room-lobby" : "sync-room-lobby";
     const scrollToLobby = () => document.getElementById(lobbyId)?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -1060,7 +1054,7 @@ function HomeScreen({ onStart, onResetAll, partySession, roomMode }: { onStart: 
             {roomMode === "pages"
               ? `静的版 ${displayedReadyCount}本`
               : roomMode === "v2"
-                ? `v2同期 ${nativeSyncReadyCount}本正式 / ${bridgeSyncReadyCount}本簡易`
+                ? `v2同期 ${nativeSyncReadyCount}本正式`
                 : `簡易同期版 ${displayedReadyCount}本`}
           </div>
           {!hasRoomContext && (
@@ -1119,14 +1113,6 @@ function HomeScreen({ onStart, onResetAll, partySession, roomMode }: { onStart: 
       )}
 
       {syncStartHint && <p className="room-message" role="status">{syncStartHint}</p>}
-      {roomMode === "v2" && syncGameKey && syncStartHint.startsWith("全ゲーム同期ルーム") && (
-        <div className="sync-mode-toggle" role="group" aria-label="同期モード">
-          <button type="button" className="secondary-button" aria-pressed="true">
-            全ゲーム同期（33ゲーム）
-          </button>
-        </div>
-      )}
-
       {!hasRoomContext && (
         <>
           <section className="home-filter" aria-label="ゲーム絞り込み">
@@ -1199,7 +1185,7 @@ function HomeGameSection({
                     ? "静的版（1台共有）"
                     : game.status === "ready"
                       ? roomMode === "v2"
-                        ? isNativeSyncRoomGameKey(game.key) ? "正式同期版" : "簡易同期版（ブリッジ）"
+                        ? "正式同期版"
                         : "簡易同期版"
                       : game.status === "facilitator" ? "進行カード" : "QR対応予定"}
                 </span>

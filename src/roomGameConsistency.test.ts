@@ -88,9 +88,9 @@ describe("room game contracts", () => {
     }
 
     expect(getSyncGameDefinition("count-up-game").progression).toBe("count-up");
-    expect(getSyncGameDefinition("drinking-sugoroku").rule).toContain("no alcohol");
-    expect(getSyncGameDefinition("arm-wrestling-tournament").rule).toContain("no physical force");
-    expect(getSyncGameDefinition("resource-negotiation-game").rule).toContain("atomically");
+    expect(getSyncGameDefinition("drinking-sugoroku").rule).toContain("飲酒は不要");
+    expect(getSyncGameDefinition("arm-wrestling-tournament").rule).toContain("安全を最優先");
+    expect(getSyncGameDefinition("resource-negotiation-game").rule).toContain("同時に反映");
     for (const legacyAlias of ["hazard-card-game", "party-sugoroku", "territory-board-game"] as const) {
       expect(isNewSyncRoomGameKey(legacyAlias)).toBe(false);
       expect(isNativeSyncRoomGameKey(legacyAlias)).toBe(false);
