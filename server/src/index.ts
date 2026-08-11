@@ -3308,7 +3308,7 @@ function sanitizeRoomSnapshotForParticipant(snapshot: RoomSnapshot, requester: R
   if (currentGame === "johari-window") {
     maskJohariState(state, requester?.id ?? null);
   }
-  if (currentGame === "anonymous-box") {
+  if (currentGame === "anonymous-box" && requester?.role !== "host") {
     maskAnonymousQuestionState(state);
   }
   if (currentGame === "turtle-soup") {
