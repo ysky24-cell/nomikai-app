@@ -309,6 +309,81 @@ type SharedGame =
       };
     }
   | {
+      kind: "song-association-quiz" | "emo-hint-game" | "person-hint-quiz";
+      prompt: string;
+      phase: "setting" | "guessing" | "revealed" | string;
+      facilitatorId: string;
+      ownRole: "facilitator" | "guesser";
+      hints: string[];
+      hintCount: number;
+      guessCount: number;
+      participantCount: number;
+      ownTarget?: string;
+      ownGuess?: string;
+      result?: {
+        facilitatorId: string;
+        target: string;
+        hints: string[];
+        guesses: Record<string, string>;
+        scores: Record<string, number>;
+        correctCount: number;
+      };
+    }
+  | {
+      kind: "drawing-quiz";
+      prompt: string;
+      phase: "preparing" | "guessing" | "revealed" | string;
+      artistId: string;
+      ownRole: "artist" | "guesser";
+      artistReady: boolean;
+      readyCount: number;
+      participantCount: number;
+      guessCount: number;
+      ownTarget?: string;
+      ownReady?: boolean;
+      ownGuess?: string;
+      result?: {
+        artistId: string;
+        target: string;
+        guesses: Record<string, string>;
+        scores: Record<string, number>;
+        correctCount: number;
+      };
+    }
+  | {
+      kind: "funny-line-karuta";
+      prompt: string;
+      phase: "claiming" | "revealed" | string;
+      claimCount: number;
+      participantCount: number;
+      winnerId?: string | null;
+      ownClaim?: { response: string; claimedAt: number; order: number };
+      result?: {
+        prompt: string;
+        claims: Array<{ id: string; participantId: string; response: string; claimedAt: number; order: number }>;
+        winnerId: string | null;
+        scores: Record<string, number>;
+      };
+    }
+  | {
+      kind: "humming-intro-quiz";
+      prompt: string;
+      phase: "preparing" | "guessing" | "revealed" | string;
+      singerId: string;
+      ownRole: "singer" | "guesser";
+      guessCount: number;
+      participantCount: number;
+      ownTarget?: string;
+      ownGuess?: { text: string; submittedAt: number };
+      result?: {
+        singerId: string;
+        target: string;
+        guesses: Record<string, { text: string; submittedAt: number; order: number }>;
+        leaderboard: Array<{ participantId: string; rank: number; submittedAt: number; correct: boolean; score: number }>;
+        scores: Record<string, number>;
+      };
+    }
+  | {
       kind: "werewolf";
       phase: string;
       phaseDeadlineAt: number | null;
@@ -393,7 +468,22 @@ type CommandKind =
   | "acting_guess"
   | "acting_submit"
   | "loanword_ban_action"
-  | "loanword_ban_answer";
+  | "loanword_ban_answer"
+  | "song_association_prepare"
+  | "song_association_hint"
+  | "song_association_guess"
+  | "drawing_quiz_prepare"
+  | "drawing_quiz_ready"
+  | "drawing_quiz_guess"
+  | "funny_line_karuta_claim"
+  | "emo_hint_prepare"
+  | "emo_hint_hint"
+  | "emo_hint_guess"
+  | "person_hint_prepare"
+  | "person_hint_hint"
+  | "person_hint_guess"
+  | "humming_intro_prepare"
+  | "humming_intro_guess";
 
 const SHARED_SESSION_KEY = "nomikai:shared-room-session:v1";
 const LEGACY_SYNC_GAME_KEYS = NEW_SYNC_ROOM_GAME_KEYS.filter(
@@ -417,6 +507,12 @@ const SHARED_GAME_MINIMUMS = {
   "value-meter-game": 2,
   "acting-game": 3,
   "loanword-ban-game": 2,
+  "song-association-quiz": 3,
+  "drawing-quiz": 3,
+  "funny-line-karuta": 2,
+  "emo-hint-game": 3,
+  "person-hint-quiz": 3,
+  "humming-intro-quiz": 3,
   werewolf: 4,
 } as const;
 
@@ -552,6 +648,15 @@ function roomError(error: unknown) {
     performer_cannot_guess: "演者は予想を提出できません。",
     turn_action_invalid: "答える・パス・アウトのいずれかを選んでください。",
     answer_invalid: "サーバーが判定できる正しい回答を入力してください。",
+    quiz_target_invalid: "クイズの答えを確認してください。",
+    quiz_hint_invalid: "ヒントを入力してください。",
+    quiz_hint_limit: "ヒントの上限に達しました。",
+    quiz_guess_invalid: "予想を入力してください。",
+    drawing_target_invalid: "描き手のお題を確認してください。",
+    claim_already_submitted: "この札はすでに取っています。",
+    claim_invalid: "札を取る回答を入力してください。",
+    guess_already_submitted: "予想はすでに提出済みです。",
+    humming_target_invalid: "曲名を確認してください。",
     rate_limited: "操作が多すぎます。少し待ってから試してください。",
     participant_required: "参加者情報が見つかりません。もう一度参加してください。",
     participant_auth_required:
@@ -685,6 +790,14 @@ export function SharedRoomLobby({
   const [valueMeterPhrase, setValueMeterPhrase] = useState("");
   const [actingGuessInput, setActingGuessInput] = useState("");
   const [loanwordBanInput, setLoanwordBanInput] = useState("");
+  const [nativeQuizTarget, setNativeQuizTarget] = useState("");
+  const [nativeQuizHint, setNativeQuizHint] = useState("");
+  const [nativeQuizGuess, setNativeQuizGuess] = useState("");
+  const [drawingQuizTarget, setDrawingQuizTarget] = useState("");
+  const [drawingQuizGuess, setDrawingQuizGuess] = useState("");
+  const [karutaResponse, setKarutaResponse] = useState("");
+  const [hummingIntroTarget, setHummingIntroTarget] = useState("");
+  const [hummingIntroGuess, setHummingIntroGuess] = useState("");
   const [turtleQuestion, setTurtleQuestion] = useState("");
   const [yamanoteInput, setYamanoteInput] = useState("");
   const [partyPackInput, setPartyPackInput] = useState("");
@@ -921,6 +1034,10 @@ export function SharedRoomLobby({
          (next.game?.kind === "value-meter-game" && !next.game.ownRow) ||
          (next.game?.kind === "acting-game" && (next.game.ownRole === "performer" ? !next.game.ownEmotion : !next.game.ownGuess)) ||
          (next.game?.kind === "loanword-ban-game" && next.game.currentPlayerId === session.participantId && !next.game.ownPrompt) ||
+         ((next.game?.kind === "song-association-quiz" || next.game?.kind === "emo-hint-game" || next.game?.kind === "person-hint-quiz") && (next.game.ownRole === "facilitator" ? !next.game.ownTarget : !next.game.ownGuess)) ||
+         (next.game?.kind === "drawing-quiz" && (next.game.ownRole === "artist" ? !next.game.ownTarget : !next.game.ownGuess)) ||
+         (next.game?.kind === "funny-line-karuta" && !next.game.ownClaim) ||
+         (next.game?.kind === "humming-intro-quiz" && (next.game.ownRole === "singer" ? !next.game.ownTarget : !next.game.ownGuess)) ||
          (next.game?.kind === "legacy-game" && !next.game.ownInput);
       if (needsPrivateRefresh)
         void refresh(session).catch((caught) => setError(roomError(caught)));
@@ -1227,6 +1344,13 @@ export function SharedRoomLobby({
               "value_meter_submit",
               "acting_guess",
               "acting_submit",
+              "song_association_guess",
+              "emo_hint_guess",
+              "person_hint_guess",
+              "drawing_quiz_ready",
+              "drawing_quiz_guess",
+              "funny_line_karuta_claim",
+              "humming_intro_guess",
             ].includes(kind) &&
             latest
           ) {
@@ -1348,6 +1472,33 @@ export function SharedRoomLobby({
   const valueMeterGame = activeGame?.kind === "value-meter-game" ? activeGame : null;
   const actingGame = activeGame?.kind === "acting-game" ? activeGame : null;
   const loanwordBanGame = activeGame?.kind === "loanword-ban-game" ? activeGame : null;
+  const songAssociationGame = activeGame?.kind === "song-association-quiz" ? activeGame : null;
+  const drawingQuizGame = activeGame?.kind === "drawing-quiz" ? activeGame : null;
+  const funnyLineKarutaGame = activeGame?.kind === "funny-line-karuta" ? activeGame : null;
+  const emoHintGame = activeGame?.kind === "emo-hint-game" ? activeGame : null;
+  const personHintGame = activeGame?.kind === "person-hint-quiz" ? activeGame : null;
+  const hummingIntroGame = activeGame?.kind === "humming-intro-quiz" ? activeGame : null;
+  const nativeHintQuizGame = songAssociationGame ?? emoHintGame ?? personHintGame;
+  const nativeHintQuizLabel = nativeHintQuizGame?.kind === "song-association-quiz"
+    ? "Song association quiz"
+    : nativeHintQuizGame?.kind === "emo-hint-game"
+      ? "Emo hint game"
+      : "Person hint quiz";
+  const nativeHintPrepareCommand: CommandKind = nativeHintQuizGame?.kind === "song-association-quiz"
+    ? "song_association_prepare"
+    : nativeHintQuizGame?.kind === "emo-hint-game"
+      ? "emo_hint_prepare"
+      : "person_hint_prepare";
+  const nativeHintCommand: CommandKind = nativeHintQuizGame?.kind === "song-association-quiz"
+    ? "song_association_hint"
+    : nativeHintQuizGame?.kind === "emo-hint-game"
+      ? "emo_hint_hint"
+      : "person_hint_hint";
+  const nativeHintGuessCommand: CommandKind = nativeHintQuizGame?.kind === "song-association-quiz"
+    ? "song_association_guess"
+    : nativeHintQuizGame?.kind === "emo-hint-game"
+      ? "emo_hint_guess"
+      : "person_hint_guess";
   const johariDeckWords = johariGame
     ? johariGame.deckWordIds
       .map((id) => johariWords.find((word) => word.id === id))
@@ -1762,6 +1913,60 @@ export function SharedRoomLobby({
                 外来語禁止ゲームを開始（2人以上）
               </button>
               </div>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || participantCount < minimumPlayersForGame("song-association-quiz") || !hostPrompt.trim()}
+                onClick={() => void startGame({ gameKind: "song-association-quiz", prompt: hostPrompt.trim() || "Song association" })}
+              >
+                <Play size={18} />
+                Song association quiz (3+)
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || participantCount < minimumPlayersForGame("drawing-quiz") || !hostPrompt.trim()}
+                onClick={() => void startGame({ gameKind: "drawing-quiz", prompt: hostPrompt.trim() || "Draw this" })}
+              >
+                <Play size={18} />
+                Drawing quiz (3+)
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || participantCount < minimumPlayersForGame("funny-line-karuta") || !hostPrompt.trim()}
+                onClick={() => void startGame({ gameKind: "funny-line-karuta", prompt: hostPrompt.trim() || "Funny line" })}
+              >
+                <Play size={18} />
+                Funny-line karuta (2+)
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || participantCount < minimumPlayersForGame("emo-hint-game") || !hostPrompt.trim()}
+                onClick={() => void startGame({ gameKind: "emo-hint-game", prompt: hostPrompt.trim() || "Emotion" })}
+              >
+                <Play size={18} />
+                Emo hint game (3+)
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || participantCount < minimumPlayersForGame("person-hint-quiz") || !hostPrompt.trim()}
+                onClick={() => void startGame({ gameKind: "person-hint-quiz", prompt: hostPrompt.trim() || "Person" })}
+              >
+                <Play size={18} />
+                Person hint quiz (3+)
+              </button>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={busy || participantCount < minimumPlayersForGame("humming-intro-quiz") || !hostPrompt.trim()}
+                onClick={() => void startGame({ gameKind: "humming-intro-quiz", prompt: hostPrompt.trim() || "Song intro" })}
+              >
+                <Play size={18} />
+                Humming intro quiz (3+)
+              </button>
               <button
                 className="primary-button"
                 type="button"
@@ -3031,6 +3236,129 @@ export function SharedRoomLobby({
               {loanwordBanGame.phase === "playing" && <p className="soft-note">手番 {loanwordBanGame.turnCount}件。禁止語の使用はサーバーが記録します。</p>}
               {isHost && loanwordBanGame.phase === "playing" && <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("game_reveal")}>ここで結果を公開</button>}
               {loanwordBanGame.phase === "finished" && loanwordBanGame.result && <div className="shared-room-result"><strong>お題：{loanwordBanGame.result.prompt}</strong><p>禁止語：{loanwordBanGame.result.prohibitedWords.join("・")}</p>{Object.entries(loanwordBanGame.result.scores).map(([participantId, score]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}：{score}点</span>)}</div>}
+            </div>
+          )}
+          {nativeHintQuizGame && (
+            <div className="shared-room-game-card">
+              <h3>{nativeHintQuizLabel}</h3>
+              <p>{nativeHintQuizGame.prompt}</p>
+              {nativeHintQuizGame.hints.length > 0 && (
+                <div className="shared-room-result">
+                  <strong>Public hints</strong>
+                  {nativeHintQuizGame.hints.map((hint, index) => <span key={`${index}-${hint}`}>{index + 1}. {hint}</span>)}
+                </div>
+              )}
+              {nativeHintQuizGame.ownRole === "facilitator" && nativeHintQuizGame.ownTarget && nativeHintQuizGame.phase !== "revealed" && (
+                <p className="soft-note">Private target: {nativeHintQuizGame.ownTarget}</p>
+              )}
+              {nativeHintQuizGame.phase === "setting" && nativeHintQuizGame.ownRole === "facilitator" && (
+                <div className="shared-room-form">
+                  <label>Private target<input value={nativeQuizTarget} onChange={(event) => setNativeQuizTarget(event.currentTarget.value)} maxLength={200} /></label>
+                  <label>First hint<input value={nativeQuizHint} onChange={(event) => setNativeQuizHint(event.currentTarget.value)} maxLength={200} /></label>
+                  <button type="button" className="primary-button" disabled={busy || !nativeQuizTarget.trim() || !nativeQuizHint.trim()} onClick={() => void command(nativeHintPrepareCommand, { nativeQuizTarget: nativeQuizTarget.trim(), nativeQuizHint: nativeQuizHint.trim() }).then(() => { setNativeQuizTarget(""); setNativeQuizHint(""); })}>Start clue</button>
+                </div>
+              )}
+              {nativeHintQuizGame.phase === "guessing" && nativeHintQuizGame.ownRole === "facilitator" && (
+                <div className="shared-room-form">
+                  <label>Add a hint<input value={nativeQuizHint} onChange={(event) => setNativeQuizHint(event.currentTarget.value)} maxLength={200} /></label>
+                  <button type="button" className="secondary-button" disabled={busy || !nativeQuizHint.trim() || nativeHintQuizGame.hintCount >= 8} onClick={() => void command(nativeHintCommand, { nativeQuizHint: nativeQuizHint.trim() }).then(() => setNativeQuizHint(""))}>Share hint</button>
+                </div>
+              )}
+              {nativeHintQuizGame.phase === "guessing" && nativeHintQuizGame.ownRole === "guesser" && (
+                <div className="shared-room-form">
+                  <label>Private guess<input value={nativeQuizGuess} onChange={(event) => setNativeQuizGuess(event.currentTarget.value)} maxLength={200} /></label>
+                  <button type="button" className="primary-button" disabled={busy || !nativeQuizGuess.trim() || Boolean(nativeHintQuizGame.ownGuess)} onClick={() => void command(nativeHintGuessCommand, { nativeQuizGuess: nativeQuizGuess.trim() }).then(() => setNativeQuizGuess(""))}>Submit guess</button>
+                </div>
+              )}
+              {nativeHintQuizGame.phase === "guessing" && <p className="soft-note">Private guesses received: {nativeHintQuizGame.guessCount}/{nativeHintQuizGame.participantCount}</p>}
+              {nativeHintQuizGame.phase === "guessing" && isHost && (
+                <button type="button" className="secondary-button" disabled={busy || nativeHintQuizGame.guessCount < nativeHintQuizGame.participantCount} onClick={() => void command("game_reveal")}>Reveal result</button>
+              )}
+              {nativeHintQuizGame.phase === "revealed" && nativeHintQuizGame.result && (
+                <div className="shared-room-result">
+                  <strong>Target: {nativeHintQuizGame.result.target}</strong>
+                  {Object.entries(nativeHintQuizGame.result.guesses).map(([participantId, guess]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}: {guess} / {nativeHintQuizGame.result?.scores[participantId] ?? 0} point</span>)}
+                </div>
+              )}
+            </div>
+          )}
+          {drawingQuizGame && (
+            <div className="shared-room-game-card">
+              <h3>Drawing quiz</h3>
+              <p>{drawingQuizGame.prompt}</p>
+              <p className="soft-note">Artist: {projection.participants.find((item) => item.id === drawingQuizGame.artistId)?.name ?? drawingQuizGame.artistId} / ready {drawingQuizGame.readyCount}/{drawingQuizGame.participantCount}</p>
+              {drawingQuizGame.ownRole === "artist" && drawingQuizGame.ownTarget && drawingQuizGame.phase !== "revealed" && <p className="soft-note">Private target: {drawingQuizGame.ownTarget}. Text-only status is synchronized; no image upload is used.</p>}
+              {drawingQuizGame.phase === "preparing" && drawingQuizGame.ownRole === "artist" && (
+                <div className="shared-room-form">
+                  <label>Drawing target<input value={drawingQuizTarget} onChange={(event) => setDrawingQuizTarget(event.currentTarget.value)} maxLength={200} /></label>
+                  <button type="button" className="primary-button" disabled={busy || !drawingQuizTarget.trim()} onClick={() => void command("drawing_quiz_prepare", { drawingQuizTarget: drawingQuizTarget.trim() }).then(() => setDrawingQuizTarget(""))}>Set target and begin</button>
+                </div>
+              )}
+              {drawingQuizGame.phase === "preparing" && drawingQuizGame.ownRole === "guesser" && (
+                <button type="button" className={drawingQuizGame.ownReady ? "primary-button" : "secondary-button"} disabled={busy} onClick={() => void command("drawing_quiz_ready", { drawingQuizReady: !drawingQuizGame.ownReady })}>{drawingQuizGame.ownReady ? "Ready status on" : "I am ready"}</button>
+              )}
+              {drawingQuizGame.phase === "guessing" && drawingQuizGame.ownRole === "guesser" && (
+                <div className="shared-room-form">
+                  <label>Private guess<input value={drawingQuizGuess} onChange={(event) => setDrawingQuizGuess(event.currentTarget.value)} maxLength={200} /></label>
+                  <button type="button" className="primary-button" disabled={busy || !drawingQuizGuess.trim() || Boolean(drawingQuizGame.ownGuess)} onClick={() => void command("drawing_quiz_guess", { drawingQuizGuess: drawingQuizGuess.trim() }).then(() => setDrawingQuizGuess(""))}>Submit guess</button>
+                </div>
+              )}
+              {drawingQuizGame.phase === "guessing" && <p className="soft-note">Private guesses received: {drawingQuizGame.guessCount}/{Math.max(0, drawingQuizGame.participantCount - 1)}</p>}
+              {drawingQuizGame.phase === "guessing" && isHost && <button type="button" className="secondary-button" disabled={busy || drawingQuizGame.guessCount < Math.max(0, drawingQuizGame.participantCount - 1)} onClick={() => void command("game_reveal")}>Reveal result</button>}
+              {drawingQuizGame.phase === "revealed" && drawingQuizGame.result && (
+                <div className="shared-room-result">
+                  <strong>Target: {drawingQuizGame.result.target}</strong>
+                  {Object.entries(drawingQuizGame.result.guesses).map(([participantId, guess]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}: {guess} / {drawingQuizGame.result?.scores[participantId] ?? 0} point</span>)}
+                </div>
+              )}
+            </div>
+          )}
+          {funnyLineKarutaGame && (
+            <div className="shared-room-game-card">
+              <h3>Funny-line karuta</h3>
+              <p>{funnyLineKarutaGame.prompt}</p>
+              {funnyLineKarutaGame.phase === "claiming" && (
+                <div className="shared-room-form">
+                  <label>Response<input value={karutaResponse} onChange={(event) => setKarutaResponse(event.currentTarget.value)} maxLength={200} /></label>
+                  <button type="button" className="primary-button" disabled={busy || !karutaResponse.trim() || Boolean(funnyLineKarutaGame.ownClaim)} onClick={() => void command("funny_line_karuta_claim", { funnyLineKarutaResponse: karutaResponse.trim() }).then(() => setKarutaResponse(""))}>Claim card</button>
+                </div>
+              )}
+              {funnyLineKarutaGame.phase === "claiming" && <p className="soft-note">Claims received: {funnyLineKarutaGame.claimCount}/{funnyLineKarutaGame.participantCount}. Responses stay private until reveal.</p>}
+              {funnyLineKarutaGame.phase === "claiming" && isHost && <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("game_reveal")}>Reveal winner</button>}
+              {funnyLineKarutaGame.phase === "revealed" && funnyLineKarutaGame.result && (
+                <div className="shared-room-result">
+                  <strong>Winner: {projection.participants.find((item) => item.id === funnyLineKarutaGame.result?.winnerId)?.name ?? "No winner"}</strong>
+                  {funnyLineKarutaGame.result.claims.map((claim) => <span key={claim.id}>{projection.participants.find((item) => item.id === claim.participantId)?.name ?? claim.participantId}: {claim.response} / {funnyLineKarutaGame.result?.scores[claim.participantId] ?? 0} point</span>)}
+                </div>
+              )}
+            </div>
+          )}
+          {hummingIntroGame && (
+            <div className="shared-room-game-card">
+              <h3>Humming intro quiz</h3>
+              <p>{hummingIntroGame.prompt}</p>
+              <p className="soft-note">Singer: {projection.participants.find((item) => item.id === hummingIntroGame.singerId)?.name ?? hummingIntroGame.singerId}. Text guesses only; audio is not stored or uploaded.</p>
+              {hummingIntroGame.ownRole === "singer" && hummingIntroGame.ownTarget && hummingIntroGame.phase !== "revealed" && <p className="soft-note">Private target: {hummingIntroGame.ownTarget}</p>}
+              {hummingIntroGame.phase === "preparing" && hummingIntroGame.ownRole === "singer" && (
+                <div className="shared-room-form">
+                  <label>Song target<input value={hummingIntroTarget} onChange={(event) => setHummingIntroTarget(event.currentTarget.value)} maxLength={200} /></label>
+                  <button type="button" className="primary-button" disabled={busy || !hummingIntroTarget.trim()} onClick={() => void command("humming_intro_prepare", { hummingIntroTarget: hummingIntroTarget.trim() }).then(() => setHummingIntroTarget(""))}>Set song and begin</button>
+                </div>
+              )}
+              {hummingIntroGame.phase === "guessing" && hummingIntroGame.ownRole === "guesser" && (
+                <div className="shared-room-form">
+                  <label>Private song guess<input value={hummingIntroGuess} onChange={(event) => setHummingIntroGuess(event.currentTarget.value)} maxLength={200} /></label>
+                  <button type="button" className="primary-button" disabled={busy || !hummingIntroGuess.trim() || Boolean(hummingIntroGame.ownGuess)} onClick={() => void command("humming_intro_guess", { hummingIntroGuess: hummingIntroGuess.trim() }).then(() => setHummingIntroGuess(""))}>Submit guess</button>
+                </div>
+              )}
+              {hummingIntroGame.phase === "guessing" && <p className="soft-note">Guesses received: {hummingIntroGame.guessCount}/{hummingIntroGame.participantCount}</p>}
+              {hummingIntroGame.phase === "guessing" && isHost && <button type="button" className="secondary-button" disabled={busy || hummingIntroGame.guessCount < hummingIntroGame.participantCount} onClick={() => void command("game_reveal")}>Reveal leaderboard</button>}
+              {hummingIntroGame.phase === "revealed" && hummingIntroGame.result && (
+                <div className="shared-room-result">
+                  <strong>Target: {hummingIntroGame.result.target}</strong>
+                  {hummingIntroGame.result.leaderboard.map((entry) => <span key={entry.participantId}>{entry.rank}. {projection.participants.find((item) => item.id === entry.participantId)?.name ?? entry.participantId}: {entry.correct ? "correct" : "wrong"} / {entry.score} point</span>)}
+                </div>
+              )}
             </div>
           )}
           {legacyGame?.kind === "legacy-game" && activeLegacyDefinition && (

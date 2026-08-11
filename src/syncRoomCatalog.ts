@@ -21,7 +21,7 @@ export const NEW_SYNC_ROOM_GAME_KEYS = [
   "acting-game",
   "party-sugoroku",
   "territory-board-game",
-  "weird-karuta-game",
+  "funny-line-karuta",
   "emo-hint-game",
   "resource-negotiation-game",
   "life-event-sugoroku",
@@ -53,6 +53,12 @@ export const NATIVE_SYNC_ROOM_GAME_KEYS = [
   "value-meter-game",
   "acting-game",
   "loanword-ban-game",
+  "song-association-quiz",
+  "drawing-quiz",
+  "funny-line-karuta",
+  "emo-hint-game",
+  "person-hint-quiz",
+  "humming-intro-quiz",
 ] as const;
 
 export function isNewSyncRoomGameKey(key: string) {

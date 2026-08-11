@@ -1126,3 +1126,157 @@ test("native fast typing, memory drawing, value meter, and acting keep private s
   assert.equal(actingResult.status, "finished");
   if (actingResult.game?.kind === "acting-game") assert.equal(actingResult.game.result?.scores[hostSession.id], 1);
 });
+
+test("native hint quiz family keeps role targets and guesses private through reconnect and reveal", async () => {
+  const { service, host, sessions, version } = await createRoomWithPlayers(["Alice", "Bob"]);
+  const hostSession = sessions[0]!;
+  const facilitator = sessions[1]!;
+  const bob = sessions[2]!;
+  const cases = [
+    { key: "song-association-quiz", prepare: "song_association_prepare", hint: "song_association_hint", guess: "song_association_guess" },
+    { key: "emo-hint-game", prepare: "emo_hint_prepare", hint: "emo_hint_hint", guess: "emo_hint_guess" },
+    { key: "person-hint-quiz", prepare: "person_hint_prepare", hint: "person_hint_hint", guess: "person_hint_guess" },
+  ] as const;
+  let currentVersion = version;
+
+  for (const [index, gameCase] of cases.entries()) {
+    const locked = await lockRoom(service, host.room.code, currentVersion, hostSession.id, hostSession.token, `hint-family-lock-${index}`);
+    const started = await service.execute(command(host.room.code, `hint-family-start-${index}`, locked.version, "game_start", {
+      participantId: hostSession.id,
+      gameKind: gameCase.key,
+      prompt: `${gameCase.key} prompt`,
+    }), hostSession.token);
+    if (!started.game || started.game.kind !== gameCase.key) throw new Error(`${gameCase.key} start projection missing`);
+    assert.equal(started.game.facilitatorId, facilitator.id);
+    if (index === 0) {
+      await assert.rejects(
+        service.execute(command(host.room.code, "song-hint-too-early", started.version, gameCase.hint, { participantId: facilitator.id, nativeQuizHint: "too early" }), facilitator.token),
+        (error: unknown) => error instanceof RoomDomainError && error.code === "not_your_turn",
+      );
+    }
+
+    const target = `${gameCase.key} target`;
+    const prepared = await service.execute(command(host.room.code, `hint-family-prepare-${index}`, started.version, gameCase.prepare, {
+      participantId: facilitator.id,
+      nativeQuizTarget: target,
+      nativeQuizHint: "first hint",
+    }), facilitator.token);
+    const publicView = await service.getProjection(host.room.code, hostSession.id, hostSession.token);
+    if (!publicView?.game || publicView.game.kind !== gameCase.key) throw new Error(`${gameCase.key} public projection missing`);
+    assert.equal("ownTarget" in publicView.game, false);
+    assert.equal("guesses" in publicView.game, false);
+    const facilitatorView = await service.getProjection(host.room.code, facilitator.id, facilitator.token);
+    if (!facilitatorView?.game || facilitatorView.game.kind !== gameCase.key) throw new Error(`${gameCase.key} facilitator projection missing`);
+    assert.equal(facilitatorView.game.ownTarget, target);
+
+    const reconnected = await service.execute(command(host.room.code, `hint-family-reconnect-${index}`, prepared.version, "reconnect", { participantId: facilitator.id }), facilitator.token);
+    const afterReconnect = await service.getProjection(host.room.code, facilitator.id, facilitator.token);
+    if (!afterReconnect?.game || afterReconnect.game.kind !== gameCase.key) throw new Error(`${gameCase.key} reconnect projection missing`);
+    assert.equal(afterReconnect.game.ownTarget, target);
+    const hinted = await service.execute(command(host.room.code, `hint-family-hint-${index}`, reconnected.version, gameCase.hint, {
+      participantId: facilitator.id,
+      nativeQuizHint: "second hint",
+    }), facilitator.token);
+    const hostGuess = await service.execute(command(host.room.code, `hint-family-host-guess-${index}`, hinted.version, gameCase.guess, {
+      participantId: hostSession.id,
+      nativeQuizGuess: target,
+    }), hostSession.token);
+    const bobGuess = await service.execute(command(host.room.code, `hint-family-bob-guess-${index}`, hinted.version, gameCase.guess, {
+      participantId: bob.id,
+      nativeQuizGuess: "wrong guess",
+    }), bob.token);
+    assert.ok(bobGuess.version > hostGuess.version);
+    const revealed = await service.execute(command(host.room.code, `hint-family-reveal-${index}`, bobGuess.version, "game_reveal", { participantId: hostSession.id }), hostSession.token);
+    assert.equal(revealed.status, "finished");
+    if (!revealed.game || revealed.game.kind !== gameCase.key || !revealed.game.result) throw new Error(`${gameCase.key} result projection missing`);
+    assert.equal(revealed.game.result.target, target);
+    assert.equal(revealed.game.result.scores[hostSession.id], 1);
+    assert.equal(revealed.game.result.scores[bob.id], 0);
+    const reset = await service.execute(command(host.room.code, `hint-family-reset-${index}`, revealed.version, "reset", { participantId: hostSession.id }), hostSession.token);
+    assert.equal(reset.status, "waiting");
+    currentVersion = reset.version;
+  }
+});
+
+test("native drawing, karuta, and humming games enforce safe gates and server ordering", async () => {
+  const { service, host, sessions, version } = await createRoomWithPlayers(["Alice", "Bob"]);
+  const hostSession = sessions[0]!;
+  const artistOrSinger = sessions[1]!;
+  const bob = sessions[2]!;
+
+  const drawingLocked = await lockRoom(service, host.room.code, version, hostSession.id, hostSession.token, "quiz-family-drawing-lock");
+  const drawingStarted = await service.execute(command(host.room.code, "quiz-family-drawing-start", drawingLocked.version, "game_start", {
+    participantId: hostSession.id,
+    gameKind: "drawing-quiz",
+    prompt: "Draw a clue",
+  }), hostSession.token);
+  if (!drawingStarted.game || drawingStarted.game.kind !== "drawing-quiz") throw new Error("drawing quiz start projection missing");
+  assert.equal(drawingStarted.game.artistId, artistOrSinger.id);
+  await assert.rejects(
+    service.execute(command(host.room.code, "quiz-family-drawing-host-prepare", drawingStarted.version, "drawing_quiz_prepare", { participantId: hostSession.id, drawingQuizTarget: "umbrella" }), hostSession.token),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "not_your_turn",
+  );
+  const bobReady = await service.execute(command(host.room.code, "quiz-family-drawing-ready", drawingStarted.version, "drawing_quiz_ready", { participantId: bob.id, drawingQuizReady: true }), bob.token);
+  const drawingPrepared = await service.execute(command(host.room.code, "quiz-family-drawing-prepare", bobReady.version, "drawing_quiz_prepare", { participantId: artistOrSinger.id, drawingQuizTarget: "umbrella" }), artistOrSinger.token);
+  const drawingPublic = await service.getProjection(host.room.code, hostSession.id, hostSession.token);
+  if (!drawingPublic?.game || drawingPublic.game.kind !== "drawing-quiz") throw new Error("drawing quiz public projection missing");
+  assert.equal("ownTarget" in drawingPublic.game, false);
+  const bobDrawingGuess = await service.execute(command(host.room.code, "quiz-family-drawing-bob-guess", drawingPrepared.version, "drawing_quiz_guess", { participantId: bob.id, drawingQuizGuess: "umbrella" }), bob.token);
+  const bobLeft = await service.execute(command(host.room.code, "quiz-family-drawing-bob-leave", bobDrawingGuess.version, "leave", { participantId: bob.id }), bob.token);
+  if (!bobLeft.game || bobLeft.game.kind !== "drawing-quiz") throw new Error("drawing quiz departure projection missing");
+  assert.equal(bobLeft.game.participantCount, 2);
+  const hostDrawingGuess = await service.execute(command(host.room.code, "quiz-family-drawing-host-guess", bobLeft.version, "drawing_quiz_guess", { participantId: hostSession.id, drawingQuizGuess: "umbrella" }), hostSession.token);
+  const drawingResult = await service.execute(command(host.room.code, "quiz-family-drawing-reveal", hostDrawingGuess.version, "game_reveal", { participantId: hostSession.id }), hostSession.token);
+  assert.equal(drawingResult.status, "finished");
+  if (!drawingResult.game || drawingResult.game.kind !== "drawing-quiz" || !drawingResult.game.result) throw new Error("drawing quiz result projection missing");
+  assert.equal(drawingResult.game.result.target, "umbrella");
+  assert.equal(drawingResult.game.result.scores[hostSession.id], 1);
+  const bobReconnected = await service.execute(command(host.room.code, "quiz-family-drawing-bob-reconnect", drawingResult.version, "reconnect", { participantId: bob.id }), bob.token);
+  const drawingReset = await service.execute(command(host.room.code, "quiz-family-drawing-reset", bobReconnected.version, "reset", { participantId: hostSession.id }), hostSession.token);
+
+  const karutaLocked = await lockRoom(service, host.room.code, drawingReset.version, hostSession.id, hostSession.token, "quiz-family-karuta-lock");
+  const karutaStarted = await service.execute(command(host.room.code, "quiz-family-karuta-start", karutaLocked.version, "game_start", {
+    participantId: hostSession.id,
+    gameKind: "funny-line-karuta",
+    prompt: "Complete the funny line",
+  }), hostSession.token);
+  const hostClaim = await service.execute(command(host.room.code, "quiz-family-karuta-host", karutaStarted.version, "funny_line_karuta_claim", { participantId: hostSession.id, funnyLineKarutaResponse: "host response" }), hostSession.token);
+  await assert.rejects(
+    service.execute(command(host.room.code, "quiz-family-karuta-host-duplicate", hostClaim.version, "funny_line_karuta_claim", { participantId: hostSession.id, funnyLineKarutaResponse: "second response" }), hostSession.token),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "claim_already_submitted",
+  );
+  const bobClaim = await service.execute(command(host.room.code, "quiz-family-karuta-bob", karutaStarted.version, "funny_line_karuta_claim", { participantId: bob.id, funnyLineKarutaResponse: "bob response" }), bob.token);
+  const karutaResult = await service.execute(command(host.room.code, "quiz-family-karuta-reveal", bobClaim.version, "game_reveal", { participantId: hostSession.id }), hostSession.token);
+  assert.equal(karutaResult.status, "finished");
+  if (!karutaResult.game || karutaResult.game.kind !== "funny-line-karuta" || !karutaResult.game.result) throw new Error("funny-line karuta result projection missing");
+  assert.equal(karutaResult.game.result.claims.length, 2);
+  assert.equal(karutaResult.game.result.winnerId, hostSession.id);
+  assert.equal(karutaResult.game.result.scores[hostSession.id], 1);
+  const karutaReset = await service.execute(command(host.room.code, "quiz-family-karuta-reset", karutaResult.version, "reset", { participantId: hostSession.id }), hostSession.token);
+
+  const hummingLocked = await lockRoom(service, host.room.code, karutaReset.version, hostSession.id, hostSession.token, "quiz-family-humming-lock");
+  const hummingStarted = await service.execute(command(host.room.code, "quiz-family-humming-start", hummingLocked.version, "game_start", {
+    participantId: hostSession.id,
+    gameKind: "humming-intro-quiz",
+    prompt: "Hum the intro",
+  }), hostSession.token);
+  if (!hummingStarted.game || hummingStarted.game.kind !== "humming-intro-quiz") throw new Error("humming intro start projection missing");
+  const hummingPrepared = await service.execute(command(host.room.code, "quiz-family-humming-prepare", hummingStarted.version, "humming_intro_prepare", { participantId: artistOrSinger.id, hummingIntroTarget: "Blue Monday" }), artistOrSinger.token);
+  const hummingPublic = await service.getProjection(host.room.code, hostSession.id, hostSession.token);
+  if (!hummingPublic?.game || hummingPublic.game.kind !== "humming-intro-quiz") throw new Error("humming intro public projection missing");
+  assert.equal("ownTarget" in hummingPublic.game, false);
+  const hummingHostGuess = await service.execute(command(host.room.code, "quiz-family-humming-host", hummingPrepared.version, "humming_intro_guess", { participantId: hostSession.id, hummingIntroGuess: "Blue Monday" }), hostSession.token);
+  const hummingBobGuess = await service.execute(command(host.room.code, "quiz-family-humming-bob", hummingPrepared.version, "humming_intro_guess", { participantId: bob.id, hummingIntroGuess: "Blue Monday" }), bob.token);
+  assert.ok(hummingBobGuess.version > hummingHostGuess.version);
+  const hummingResult = await service.execute(command(host.room.code, "quiz-family-humming-reveal", hummingBobGuess.version, "game_reveal", { participantId: hostSession.id }), hostSession.token);
+  assert.equal(hummingResult.status, "finished");
+  if (!hummingResult.game || hummingResult.game.kind !== "humming-intro-quiz" || !hummingResult.game.result) throw new Error("humming intro result projection missing");
+  assert.equal(hummingResult.game.result.leaderboard[0]?.participantId, hostSession.id);
+  assert.equal(hummingResult.game.result.scores[hostSession.id], 2);
+  assert.equal(hummingResult.game.result.scores[bob.id], 1);
+  const hummingReset = await service.execute(command(host.room.code, "quiz-family-humming-reset", hummingResult.version, "reset", { participantId: hostSession.id }), hostSession.token);
+  const rematchLocked = await lockRoom(service, host.room.code, hummingReset.version, hostSession.id, hostSession.token, "quiz-family-humming-rematch-lock");
+  const rematch = await service.execute(command(host.room.code, "quiz-family-humming-rematch", rematchLocked.version, "game_start", { participantId: hostSession.id, gameKind: "humming-intro-quiz", prompt: "Rematch" }), hostSession.token);
+  assert.equal(rematch.status, "playing");
+  assert.equal(rematch.game?.kind, "humming-intro-quiz");
+});

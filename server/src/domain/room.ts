@@ -327,6 +327,110 @@ type LoanwordBanGameState = {
   strikes: LoanwordBanStrike[];
   result?: LoanwordBanResult;
 };
+
+type NativeHintQuizKind = "song-association-quiz" | "emo-hint-game" | "person-hint-quiz";
+
+type NativeHintQuizResult = {
+  facilitatorId: string;
+  target: string;
+  hints: string[];
+  guesses: Record<string, string>;
+  scores: Record<string, number>;
+  correctCount: number;
+};
+
+type NativeHintQuizGameState = {
+  kind: NativeHintQuizKind;
+  startedVersion?: number;
+  prompt: string;
+  phase: "setting" | "guessing" | "revealed";
+  facilitatorId: string;
+  target: string | null;
+  hints: string[];
+  guesses: Record<string, string>;
+  result?: NativeHintQuizResult;
+};
+
+type DrawingQuizResult = {
+  artistId: string;
+  target: string;
+  guesses: Record<string, string>;
+  scores: Record<string, number>;
+  correctCount: number;
+};
+
+type DrawingQuizGameState = {
+  kind: "drawing-quiz";
+  startedVersion?: number;
+  prompt: string;
+  phase: "preparing" | "guessing" | "revealed";
+  artistId: string;
+  target: string | null;
+  readyIds: string[];
+  guesses: Record<string, string>;
+  result?: DrawingQuizResult;
+};
+
+type FunnyLineKarutaClaim = {
+  id: string;
+  participantId: string;
+  response: string;
+  claimedAt: number;
+  order: number;
+};
+
+type FunnyLineKarutaResult = {
+  prompt: string;
+  claims: FunnyLineKarutaClaim[];
+  winnerId: string | null;
+  scores: Record<string, number>;
+};
+
+type FunnyLineKarutaGameState = {
+  kind: "funny-line-karuta";
+  startedVersion?: number;
+  prompt: string;
+  phase: "claiming" | "revealed";
+  claims: Record<string, FunnyLineKarutaClaim>;
+  claimOrder: string[];
+  nextClaimOrder: number;
+  winnerId: string | null;
+  result?: FunnyLineKarutaResult;
+};
+
+type HummingIntroGuess = {
+  text: string;
+  submittedAt: number;
+  order: number;
+};
+
+type HummingIntroLeaderboardEntry = {
+  participantId: string;
+  rank: number;
+  submittedAt: number;
+  correct: boolean;
+  score: number;
+};
+
+type HummingIntroResult = {
+  singerId: string;
+  target: string;
+  guesses: Record<string, HummingIntroGuess>;
+  leaderboard: HummingIntroLeaderboardEntry[];
+  scores: Record<string, number>;
+};
+
+type HummingIntroGameState = {
+  kind: "humming-intro-quiz";
+  startedVersion?: number;
+  prompt: string;
+  phase: "preparing" | "guessing" | "revealed";
+  singerId: string;
+  target: string | null;
+  guesses: Record<string, HummingIntroGuess>;
+  nextGuessOrder: number;
+  result?: HummingIntroResult;
+};
 export type WerewolfRole = "werewolf" | "seer" | "guard" | "villager";
 type WerewolfGameState = {
   kind: "werewolf";
@@ -361,7 +465,7 @@ export type LegacyGameResult = {
   summary: string;
   scores: Record<string, number>;
 };
-export type RoomGameState = TwoChoiceGameState | ImpressionGameState | MajorityGameState | JohariGameState | AnonymousGameState | WordWolfGameState | NgWordGameState | TurtleSoupGameState | YamanoteGameState | PartyPackGameState | TruthLieGameState | ReverseWordGameState | FastTypingGameState | MemoryDrawingGameState | ValueMeterGameState | ActingGameState | LoanwordBanGameState | WerewolfGameState | LegacyGameState;
+export type RoomGameState = TwoChoiceGameState | ImpressionGameState | MajorityGameState | JohariGameState | AnonymousGameState | WordWolfGameState | NgWordGameState | TurtleSoupGameState | YamanoteGameState | PartyPackGameState | TruthLieGameState | ReverseWordGameState | FastTypingGameState | MemoryDrawingGameState | ValueMeterGameState | ActingGameState | LoanwordBanGameState | NativeHintQuizGameState | DrawingQuizGameState | FunnyLineKarutaGameState | HummingIntroGameState | WerewolfGameState | LegacyGameState;
 
 export type RoomRecord = {
   id: string;
@@ -411,6 +515,10 @@ export type PublicRoomGame =
   | { kind: "value-meter-game"; prompt: string; phase: "submitting" | "revealed"; submittedCount: number; participantCount: number; remainingCount: number; ownRow?: ValueMeterRow; result?: ValueMeterResult }
   | { kind: "acting-game"; prompt: string; phase: "guessing" | "revealed"; performerId: string; audienceCount: number; guessCount: number; ownRole: "performer" | "audience"; ownPerformerPrompt?: string; ownEmotion?: string; ownGuess?: string; result?: ActingResult }
   | { kind: "loanword-ban-game"; phase: "playing" | "finished"; prompt: string; playerOrder: string[]; currentPlayerId: string | null; actedPlayerIds: string[]; outIds: string[]; turnCount: number; strikeCount: number; ownPrompt?: string; ownProhibitedWords?: string[]; turnHistory: Array<Pick<ReverseWordTurn, "id" | "playerId" | "action">>; strikes: Array<Pick<LoanwordBanStrike, "id" | "participantId"> & { word?: string }>; result?: LoanwordBanResult }
+  | { kind: NativeHintQuizKind; prompt: string; phase: "setting" | "guessing" | "revealed"; facilitatorId: string; ownRole: "facilitator" | "guesser"; hints: string[]; hintCount: number; guessCount: number; participantCount: number; ownTarget?: string; ownGuess?: string; result?: NativeHintQuizResult }
+  | { kind: "drawing-quiz"; prompt: string; phase: "preparing" | "guessing" | "revealed"; artistId: string; ownRole: "artist" | "guesser"; artistReady: boolean; readyCount: number; participantCount: number; guessCount: number; ownTarget?: string; ownReady?: boolean; ownGuess?: string; result?: DrawingQuizResult }
+  | { kind: "funny-line-karuta"; prompt: string; phase: "claiming" | "revealed"; claimCount: number; participantCount: number; winnerId?: string | null; ownClaim?: Pick<FunnyLineKarutaClaim, "response" | "claimedAt" | "order">; result?: FunnyLineKarutaResult }
+  | { kind: "humming-intro-quiz"; prompt: string; phase: "preparing" | "guessing" | "revealed"; singerId: string; ownRole: "singer" | "guesser"; guessCount: number; participantCount: number; ownTarget?: string; ownGuess?: Pick<HummingIntroGuess, "text" | "submittedAt">; result?: HummingIntroResult }
   | { kind: "werewolf"; phase: "night" | "day" | "voting" | "revote" | "finished"; phaseDeadlineAt: number | null; aliveIds: string[]; ownRole?: WerewolfRole; teammates?: string[]; ownSeerResults?: { targetId: string; role: WerewolfRole }[]; ownVote?: string; tiedTargetIds?: string[]; winner?: "werewolf" | "villager" }
   | { kind: "legacy-game"; gameKey: string; prompt: string; mode: string; progression: "simultaneous" | "turn" | "count-up"; phase: "playing" | "finished"; inputCount: number; participantCount: number; remainingCount: number; ownInput?: string; currentPlayerId?: string; currentTotal?: number; targetNumber?: number; turnHistory?: Array<{ playerId: string; add: number; total: number }>; result?: LegacyGameResult };
 
@@ -418,12 +526,12 @@ export type RoomCommand = {
   roomCode: string;
   commandId: string;
   expectedVersion: number;
-  kind: "join" | "reconnect" | "leave" | "kick" | "start" | "close" | "reset" | "game_reset" | "game_start" | "game_answer" | "game_reveal" | "game_phase" | "johari_self_submit" | "johari_peer_submit" | "anonymous_submit" | "anonymous_moderate" | "game_vote" | "werewolf_action" | "legacy_input" | "ng_word_hit" | "turtle_soup_question" | "turtle_soup_classify" | "turtle_soup_hint" | "yamanote_answer" | "party_pack_action" | "truth_lie_present" | "truth_lie_vote" | "truth_lie_submit" | "reverse_word_action" | "reverse_word_answer" | "fast_typing_submit" | "fast_typing_complete" | "memory_drawing_submit" | "memory_drawing_vote" | "value_meter_submit" | "acting_guess" | "acting_submit" | "loanword_ban_action" | "loanword_ban_answer";
+  kind: "join" | "reconnect" | "leave" | "kick" | "start" | "close" | "reset" | "game_reset" | "game_start" | "game_answer" | "game_reveal" | "game_phase" | "johari_self_submit" | "johari_peer_submit" | "anonymous_submit" | "anonymous_moderate" | "game_vote" | "werewolf_action" | "legacy_input" | "ng_word_hit" | "turtle_soup_question" | "turtle_soup_classify" | "turtle_soup_hint" | "yamanote_answer" | "party_pack_action" | "truth_lie_present" | "truth_lie_vote" | "truth_lie_submit" | "reverse_word_action" | "reverse_word_answer" | "fast_typing_submit" | "fast_typing_complete" | "memory_drawing_submit" | "memory_drawing_vote" | "value_meter_submit" | "acting_guess" | "acting_submit" | "loanword_ban_action" | "loanword_ban_answer" | "song_association_prepare" | "song_association_hint" | "song_association_guess" | "drawing_quiz_prepare" | "drawing_quiz_ready" | "drawing_quiz_guess" | "funny_line_karuta_claim" | "emo_hint_prepare" | "emo_hint_hint" | "emo_hint_guess" | "person_hint_prepare" | "person_hint_hint" | "person_hint_guess" | "humming_intro_prepare" | "humming_intro_guess";
   participantId?: string;
   joinNonce?: string;
   targetParticipantId?: string;
   name?: string;
-  gameKind?: "two-choice" | "impression-ranking" | "majority-game" | "johari-window" | "anonymous-box" | "word-wolf" | "werewolf" | "ng-word" | "turtle-soup" | "yamanote" | "party-pack" | "truth-lie-game" | "reverse-word-game" | "fast-typing-game" | "memory-drawing-game" | "value-meter-game" | "acting-game" | "loanword-ban-game" | "legacy-game";
+  gameKind?: "two-choice" | "impression-ranking" | "majority-game" | "johari-window" | "anonymous-box" | "word-wolf" | "werewolf" | "ng-word" | "turtle-soup" | "yamanote" | "party-pack" | "truth-lie-game" | "reverse-word-game" | "fast-typing-game" | "memory-drawing-game" | "value-meter-game" | "acting-game" | "loanword-ban-game" | "song-association-quiz" | "drawing-quiz" | "funny-line-karuta" | "emo-hint-game" | "person-hint-quiz" | "humming-intro-quiz" | "legacy-game";
   legacyGameKey?: string;
   mode?: string;
   prompt?: string;
@@ -464,6 +572,20 @@ export type RoomCommand = {
   valueMeterPhrase?: string;
   actingPerformerId?: string;
   actingGuess?: string;
+  nativeQuizTarget?: string;
+  nativeQuizHint?: string;
+  nativeQuizGuess?: string;
+  songAssociationFacilitatorId?: string;
+  drawingQuizArtistId?: string;
+  drawingQuizTarget?: string;
+  drawingQuizReady?: boolean;
+  drawingQuizGuess?: string;
+  funnyLineKarutaResponse?: string;
+  emoHintFacilitatorId?: string;
+  personHintFacilitatorId?: string;
+  hummingIntroSingerId?: string;
+  hummingIntroTarget?: string;
+  hummingIntroGuess?: string;
 };
 
 export interface RoomRepository {
@@ -579,6 +701,12 @@ const legacyMinimumPlayers: Record<string, number> = {
   "large-majority-game": 10,
 };
 
+const nativeHintQuizKinds = ["song-association-quiz", "emo-hint-game", "person-hint-quiz"] as const;
+
+function isNativeHintQuizGame(game: RoomGameState): game is NativeHintQuizGameState {
+  return (nativeHintQuizKinds as readonly string[]).includes(game.kind);
+}
+
 const nativeMinimumPlayers: Record<Exclude<RoomCommand["gameKind"], "legacy-game" | undefined>, number> = {
   "two-choice": 2,
   "impression-ranking": 3,
@@ -597,6 +725,12 @@ const nativeMinimumPlayers: Record<Exclude<RoomCommand["gameKind"], "legacy-game
   "value-meter-game": 2,
   "acting-game": 3,
   "loanword-ban-game": 2,
+  "song-association-quiz": 3,
+  "drawing-quiz": 3,
+  "funny-line-karuta": 2,
+  "emo-hint-game": 3,
+  "person-hint-quiz": 3,
+  "humming-intro-quiz": 3,
   werewolf: 4,
 };
 
@@ -696,6 +830,9 @@ function isTerminalGame(game: RoomGameState | undefined) {
   if (game.kind === "yamanote") return game.phase === "finished";
   if (game.kind === "reverse-word-game" || game.kind === "loanword-ban-game") return game.phase === "finished";
   if (game.kind === "truth-lie-game" || game.kind === "fast-typing-game" || game.kind === "memory-drawing-game" || game.kind === "value-meter-game" || game.kind === "acting-game") return game.phase === "revealed";
+  if (isNativeHintQuizGame(game)) return game.phase === "revealed";
+  if (game.kind === "drawing-quiz" || game.kind === "humming-intro-quiz") return game.phase === "revealed";
+  if (game.kind === "funny-line-karuta") return game.phase === "revealed";
   if (game.kind === "werewolf") return game.phase === "finished";
   if (game.kind === "legacy-game") return game.phase === "finished";
   return false;
@@ -1054,6 +1191,10 @@ function removeParticipantFromGameState(
     else if (game.kind === "value-meter-game") delete game.rows[participantId];
     else if (game.kind === "acting-game") reconcileActingDeparture(game, room, participantId);
     else if (game.kind === "loanword-ban-game") reconcileLoanwordBanDeparture(game, room, participantId);
+    else if (isNativeHintQuizGame(game)) reconcileNativeHintQuizDeparture(game, room, participantId);
+    else if (game.kind === "drawing-quiz") reconcileDrawingQuizDeparture(game, room, participantId);
+    else if (game.kind === "funny-line-karuta") reconcileFunnyLineKarutaDeparture(game, room, participantId);
+    else if (game.kind === "humming-intro-quiz") reconcileHummingIntroDeparture(game, room, participantId);
     else {
       delete game.inputs[participantId];
       if (game.turnHistory) game.turnHistory = game.turnHistory.filter((turn) => turn.playerId !== participantId);
@@ -1119,6 +1260,14 @@ function removeParticipantFromGameState(
     reconcileActingDeparture(game, room, participantId);
   } else if (game.kind === "loanword-ban-game") {
     reconcileLoanwordBanDeparture(game, room, participantId);
+  } else if (isNativeHintQuizGame(game)) {
+    reconcileNativeHintQuizDeparture(game, room, participantId);
+  } else if (game.kind === "drawing-quiz") {
+    reconcileDrawingQuizDeparture(game, room, participantId);
+  } else if (game.kind === "funny-line-karuta") {
+    reconcileFunnyLineKarutaDeparture(game, room, participantId);
+  } else if (game.kind === "humming-intro-quiz") {
+    reconcileHummingIntroDeparture(game, room, participantId);
   } else {
     delete game.inputs[participantId];
     if (game.turnHistory) game.turnHistory = game.turnHistory.filter((turn) => turn.playerId !== participantId);
@@ -1178,13 +1327,18 @@ function canMergeStaleCommand(room: RoomRecord, command: RoomCommand) {
   if (command.kind === "memory_drawing_vote") return game.kind === "memory-drawing-game" && game.phase === "voting" && !Object.prototype.hasOwnProperty.call(game.votes, actorId);
   if (command.kind === "acting_guess" || command.kind === "acting_submit") return game.kind === "acting-game" && game.phase === "guessing" && actorId !== game.performerId && !Object.prototype.hasOwnProperty.call(game.guesses, actorId);
   if (command.kind === "value_meter_submit") return game.kind === "value-meter-game" && game.phase === "submitting" && !Object.prototype.hasOwnProperty.call(game.rows, actorId);
+  if (command.kind === "song_association_guess" || command.kind === "emo_hint_guess" || command.kind === "person_hint_guess") return isNativeHintQuizGame(game) && game.phase === "guessing" && actorId !== game.facilitatorId;
+  if (command.kind === "drawing_quiz_ready") return game.kind === "drawing-quiz" && (game.phase === "preparing" || game.phase === "guessing");
+  if (command.kind === "drawing_quiz_guess") return game.kind === "drawing-quiz" && game.phase === "guessing" && actorId !== game.artistId;
+  if (command.kind === "funny_line_karuta_claim") return game.kind === "funny-line-karuta" && game.phase === "claiming" && !Object.prototype.hasOwnProperty.call(game.claims, actorId);
+  if (command.kind === "humming_intro_guess") return game.kind === "humming-intro-quiz" && game.phase === "guessing" && actorId !== game.singerId && !Object.prototype.hasOwnProperty.call(game.guesses, actorId);
   return false;
 }
 
 function isMergeableCommand(command: unknown) {
   if (!command || typeof command !== "object") return false;
   const kind = (command as { kind?: unknown }).kind;
-  return kind === "join" || kind === "game_answer" || kind === "johari_self_submit" || kind === "johari_peer_submit" || kind === "game_vote" || kind === "anonymous_submit" || kind === "werewolf_action" || kind === "legacy_input" || kind === "ng_word_hit" || kind === "turtle_soup_question" || kind === "party_pack_action" || kind === "truth_lie_vote" || kind === "truth_lie_submit" || kind === "fast_typing_submit" || kind === "fast_typing_complete" || kind === "memory_drawing_submit" || kind === "memory_drawing_vote" || kind === "acting_guess" || kind === "acting_submit" || kind === "value_meter_submit";
+  return kind === "join" || kind === "game_answer" || kind === "johari_self_submit" || kind === "johari_peer_submit" || kind === "game_vote" || kind === "anonymous_submit" || kind === "werewolf_action" || kind === "legacy_input" || kind === "ng_word_hit" || kind === "turtle_soup_question" || kind === "party_pack_action" || kind === "truth_lie_vote" || kind === "truth_lie_submit" || kind === "fast_typing_submit" || kind === "fast_typing_complete" || kind === "memory_drawing_submit" || kind === "memory_drawing_vote" || kind === "acting_guess" || kind === "acting_submit" || kind === "value_meter_submit" || kind === "song_association_guess" || kind === "emo_hint_guess" || kind === "person_hint_guess" || kind === "drawing_quiz_ready" || kind === "drawing_quiz_guess" || kind === "funny_line_karuta_claim" || kind === "humming_intro_guess";
 }
 
 function token(size = 24) {
@@ -1364,6 +1518,162 @@ function normalizeAction(command: RoomCommand): NativeTurnAction {
 function containsProhibitedWord(input: string, words: readonly string[]) {
   const normalized = input.normalize("NFKC").toLocaleLowerCase();
   return words.find((word) => normalized.includes(word.normalize("NFKC").toLocaleLowerCase()));
+}
+
+function normalizeNativeQuizText(value: string) {
+  return value.normalize("NFKC").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+}
+
+function nativeHintQuizVoterIds(game: NativeHintQuizGameState, room: RoomRecord) {
+  return activeParticipants(room).map((participant) => participant.id).filter((id) => id !== game.facilitatorId);
+}
+
+function resolveNativeHintQuizResult(game: NativeHintQuizGameState, participants: readonly RoomParticipant[]): NativeHintQuizResult {
+  const target = game.target ?? "";
+  const targetKey = normalizeNativeQuizText(target);
+  const scores: Record<string, number> = Object.fromEntries(participants.map((participant) => [participant.id, 0]));
+  let correctCount = 0;
+  for (const participant of participants) {
+    if (participant.id !== game.facilitatorId && normalizeNativeQuizText(game.guesses[participant.id] ?? "") === targetKey && targetKey) {
+      scores[participant.id] = 1;
+      correctCount += 1;
+    }
+  }
+  return {
+    facilitatorId: game.facilitatorId,
+    target,
+    hints: [...game.hints],
+    guesses: { ...game.guesses },
+    scores,
+    correctCount,
+  };
+}
+
+function finishNativeHintQuiz(game: NativeHintQuizGameState, participants: readonly RoomParticipant[]) {
+  game.phase = "revealed";
+  game.result = resolveNativeHintQuizResult(game, participants);
+}
+
+function resolveDrawingQuizResult(game: DrawingQuizGameState, participants: readonly RoomParticipant[]): DrawingQuizResult {
+  const target = game.target ?? "";
+  const targetKey = normalizeNativeQuizText(target);
+  const scores: Record<string, number> = Object.fromEntries(participants.map((participant) => [participant.id, 0]));
+  let correctCount = 0;
+  for (const participant of participants) {
+    if (participant.id !== game.artistId && normalizeNativeQuizText(game.guesses[participant.id] ?? "") === targetKey && targetKey) {
+      scores[participant.id] = 1;
+      correctCount += 1;
+    }
+  }
+  return { artistId: game.artistId, target, guesses: { ...game.guesses }, scores, correctCount };
+}
+
+function finishDrawingQuiz(game: DrawingQuizGameState, participants: readonly RoomParticipant[]) {
+  game.phase = "revealed";
+  game.result = resolveDrawingQuizResult(game, participants);
+}
+
+function funnyLineKarutaClaims(game: FunnyLineKarutaGameState, participants: readonly RoomParticipant[]) {
+  const activeIds = new Set(participants.map((participant) => participant.id));
+  return game.claimOrder
+    .map((participantId) => game.claims[participantId])
+    .filter((claim): claim is FunnyLineKarutaClaim => Boolean(claim) && activeIds.has(claim.participantId))
+    .sort((left, right) => left.claimedAt - right.claimedAt || left.order - right.order || left.id.localeCompare(right.id));
+}
+
+function resolveFunnyLineKarutaResult(game: FunnyLineKarutaGameState, participants: readonly RoomParticipant[]): FunnyLineKarutaResult {
+  const claims = funnyLineKarutaClaims(game, participants);
+  const winnerId = claims[0]?.participantId ?? null;
+  const scores: Record<string, number> = Object.fromEntries(participants.map((participant) => [participant.id, participant.id === winnerId ? 1 : 0]));
+  return { prompt: game.prompt, claims: claims.map((claim) => ({ ...claim })), winnerId, scores };
+}
+
+function finishFunnyLineKaruta(game: FunnyLineKarutaGameState, participants: readonly RoomParticipant[]) {
+  const result = resolveFunnyLineKarutaResult(game, participants);
+  game.winnerId = result.winnerId;
+  game.phase = "revealed";
+  game.result = result;
+}
+
+function resolveHummingIntroResult(game: HummingIntroGameState, participants: readonly RoomParticipant[]): HummingIntroResult {
+  const target = game.target ?? "";
+  const targetKey = normalizeNativeQuizText(target);
+  const activeIds = new Set(participants.map((participant) => participant.id));
+  const ordered = Object.entries(game.guesses)
+    .filter(([participantId]) => activeIds.has(participantId))
+    .sort(([, left], [, right]) => left.submittedAt - right.submittedAt || left.order - right.order || left.text.localeCompare(right.text));
+  const correctEntries = ordered.filter(([, guess]) => normalizeNativeQuizText(guess.text) === targetKey && targetKey);
+  const correctRanks = new Map(correctEntries.map(([participantId], index) => [participantId, index]));
+  const scores: Record<string, number> = Object.fromEntries(participants.map((participant) => [participant.id, 0]));
+  const leaderboard = ordered.map(([participantId, guess], index) => {
+    const correct = correctRanks.has(participantId);
+    const score = correct ? correctEntries.length - (correctRanks.get(participantId) ?? 0) : 0;
+    scores[participantId] = score;
+    return { participantId, rank: index + 1, submittedAt: guess.submittedAt, correct, score };
+  });
+  return { singerId: game.singerId, target, guesses: structuredClone(game.guesses), leaderboard, scores };
+}
+
+function finishHummingIntro(game: HummingIntroGameState, participants: readonly RoomParticipant[]) {
+  game.phase = "revealed";
+  game.result = resolveHummingIntroResult(game, participants);
+}
+
+function reconcileNativeHintQuizDeparture(game: NativeHintQuizGameState, room: RoomRecord, participantId: string) {
+  delete game.guesses[participantId];
+  if (game.facilitatorId !== participantId) return;
+  const replacement = nativePresenterId(room);
+  if (!replacement) {
+    game.phase = "revealed";
+    game.result = resolveNativeHintQuizResult(game, []);
+    return;
+  }
+  game.facilitatorId = replacement;
+  game.phase = "setting";
+  game.target = null;
+  game.hints = [];
+  game.guesses = {};
+  delete game.result;
+}
+
+function reconcileDrawingQuizDeparture(game: DrawingQuizGameState, room: RoomRecord, participantId: string) {
+  game.readyIds = game.readyIds.filter((id) => id !== participantId);
+  delete game.guesses[participantId];
+  if (game.artistId !== participantId) return;
+  const replacement = nativePresenterId(room);
+  if (!replacement) {
+    game.phase = "revealed";
+    game.result = resolveDrawingQuizResult(game, []);
+    return;
+  }
+  game.artistId = replacement;
+  game.phase = "preparing";
+  game.target = null;
+  game.readyIds = [];
+  game.guesses = {};
+  delete game.result;
+}
+
+function reconcileFunnyLineKarutaDeparture(game: FunnyLineKarutaGameState, room: RoomRecord, participantId: string) {
+  delete game.claims[participantId];
+  game.claimOrder = game.claimOrder.filter((id) => id !== participantId);
+  game.winnerId = funnyLineKarutaClaims(game, activeParticipants(room))[0]?.participantId ?? null;
+}
+
+function reconcileHummingIntroDeparture(game: HummingIntroGameState, room: RoomRecord, participantId: string) {
+  delete game.guesses[participantId];
+  if (game.singerId !== participantId) return;
+  const replacement = nativePresenterId(room);
+  if (!replacement) {
+    game.phase = "revealed";
+    game.result = resolveHummingIntroResult(game, []);
+    return;
+  }
+  game.singerId = replacement;
+  game.phase = "preparing";
+  game.target = null;
+  game.guesses = {};
+  delete game.result;
 }
 
 function reconcileTruthLieDeparture(game: TruthLieGameState, room: RoomRecord, participantId: string) {
@@ -1711,7 +2021,7 @@ export class RoomService {
     if (!roomCode) throw new RoomDomainError("room_code_required");
     if (typeof command.commandId !== "string" || !command.commandId.trim()) throw new RoomDomainError("command_id_required");
     if (!Number.isInteger(command.expectedVersion) || command.expectedVersion < 0) throw new RoomDomainError("expected_version_invalid");
-    if (!("join reconnect leave kick start close reset game_reset game_start game_answer game_reveal game_phase johari_self_submit johari_peer_submit anonymous_submit anonymous_moderate game_vote werewolf_action legacy_input ng_word_hit turtle_soup_question turtle_soup_classify turtle_soup_hint yamanote_answer party_pack_action truth_lie_present truth_lie_vote truth_lie_submit reverse_word_action reverse_word_answer fast_typing_submit fast_typing_complete memory_drawing_submit memory_drawing_vote acting_guess acting_submit loanword_ban_action loanword_ban_answer value_meter_submit" as const).split(" ").includes(command.kind)) throw new RoomDomainError("command_kind_invalid");
+    if (!("join reconnect leave kick start close reset game_reset game_start game_answer game_reveal game_phase johari_self_submit johari_peer_submit anonymous_submit anonymous_moderate game_vote werewolf_action legacy_input ng_word_hit turtle_soup_question turtle_soup_classify turtle_soup_hint yamanote_answer party_pack_action truth_lie_present truth_lie_vote truth_lie_submit reverse_word_action reverse_word_answer fast_typing_submit fast_typing_complete memory_drawing_submit memory_drawing_vote acting_guess acting_submit loanword_ban_action loanword_ban_answer value_meter_submit song_association_prepare song_association_hint song_association_guess drawing_quiz_prepare drawing_quiz_ready drawing_quiz_guess funny_line_karuta_claim emo_hint_prepare emo_hint_hint emo_hint_guess person_hint_prepare person_hint_hint person_hint_guess humming_intro_prepare humming_intro_guess" as const).split(" ").includes(command.kind)) throw new RoomDomainError("command_kind_invalid");
     command = { ...command, roomCode, commandId: command.commandId.trim() };
     const suppliedToken = typeof tokenValue === "string" ? tokenValue : undefined;
     const room = await this.repository.get(command.roomCode) ?? null;
@@ -1776,7 +2086,7 @@ export class RoomService {
     }
     if (room.version !== command.expectedVersion && !canMergeStaleCommand(room, command)) throw new RoomDomainError("version_conflict");
     if (room.status === "closed" && command.kind !== "close") throw new RoomDomainError(command.kind === "join" ? "room_not_joinable" : "room_closed");
-    if (room.status === "finished" && ["game_answer", "game_reveal", "johari_self_submit", "johari_peer_submit", "anonymous_submit", "anonymous_moderate", "game_vote", "game_phase", "werewolf_action", "legacy_input", "ng_word_hit", "turtle_soup_question", "turtle_soup_classify", "turtle_soup_hint", "yamanote_answer", "party_pack_action", "truth_lie_present", "truth_lie_vote", "truth_lie_submit", "reverse_word_action", "reverse_word_answer", "fast_typing_submit", "fast_typing_complete", "memory_drawing_submit", "memory_drawing_vote", "acting_guess", "acting_submit", "loanword_ban_action", "loanword_ban_answer", "value_meter_submit"].includes(command.kind)) throw new RoomDomainError("game_finished");
+    if (room.status === "finished" && ["game_answer", "game_reveal", "johari_self_submit", "johari_peer_submit", "anonymous_submit", "anonymous_moderate", "game_vote", "game_phase", "werewolf_action", "legacy_input", "ng_word_hit", "turtle_soup_question", "turtle_soup_classify", "turtle_soup_hint", "yamanote_answer", "party_pack_action", "truth_lie_present", "truth_lie_vote", "truth_lie_submit", "reverse_word_action", "reverse_word_answer", "fast_typing_submit", "fast_typing_complete", "memory_drawing_submit", "memory_drawing_vote", "acting_guess", "acting_submit", "loanword_ban_action", "loanword_ban_answer", "value_meter_submit", "song_association_prepare", "song_association_hint", "song_association_guess", "drawing_quiz_prepare", "drawing_quiz_ready", "drawing_quiz_guess", "funny_line_karuta_claim", "emo_hint_prepare", "emo_hint_hint", "emo_hint_guess", "person_hint_prepare", "person_hint_hint", "person_hint_guess", "humming_intro_prepare", "humming_intro_guess"].includes(command.kind)) throw new RoomDomainError("game_finished");
     let issuedReconnectToken: string | undefined;
     let createdParticipantId: string | undefined;
     const presenceChanges: RoomPresenceChange[] = [];
@@ -1834,7 +2144,7 @@ export class RoomService {
       presenceChanges.push({ participantId: actor!.id, connected: true });
     } else if (command.kind === "game_start") {
       if (actor!.role !== "host") throw new RoomDomainError("host_required");
-      if (command.gameKind !== "two-choice" && command.gameKind !== "impression-ranking" && command.gameKind !== "majority-game" && command.gameKind !== "johari-window" && command.gameKind !== "anonymous-box" && command.gameKind !== "word-wolf" && command.gameKind !== "werewolf" && command.gameKind !== "ng-word" && command.gameKind !== "turtle-soup" && command.gameKind !== "yamanote" && command.gameKind !== "party-pack" && command.gameKind !== "truth-lie-game" && command.gameKind !== "reverse-word-game" && command.gameKind !== "fast-typing-game" && command.gameKind !== "memory-drawing-game" && command.gameKind !== "value-meter-game" && command.gameKind !== "acting-game" && command.gameKind !== "loanword-ban-game" && command.gameKind !== "legacy-game") throw new RoomDomainError("game_kind_invalid");
+      if (command.gameKind !== "two-choice" && command.gameKind !== "impression-ranking" && command.gameKind !== "majority-game" && command.gameKind !== "johari-window" && command.gameKind !== "anonymous-box" && command.gameKind !== "word-wolf" && command.gameKind !== "werewolf" && command.gameKind !== "ng-word" && command.gameKind !== "turtle-soup" && command.gameKind !== "yamanote" && command.gameKind !== "party-pack" && command.gameKind !== "truth-lie-game" && command.gameKind !== "reverse-word-game" && command.gameKind !== "fast-typing-game" && command.gameKind !== "memory-drawing-game" && command.gameKind !== "value-meter-game" && command.gameKind !== "acting-game" && command.gameKind !== "loanword-ban-game" && command.gameKind !== "song-association-quiz" && command.gameKind !== "drawing-quiz" && command.gameKind !== "funny-line-karuta" && command.gameKind !== "emo-hint-game" && command.gameKind !== "person-hint-quiz" && command.gameKind !== "humming-intro-quiz" && command.gameKind !== "legacy-game") throw new RoomDomainError("game_kind_invalid");
       if (room.status === "playing" && room.game && !isTerminalGame(room.game)) throw new RoomDomainError("game_in_progress");
       if (room.status !== "locked") throw new RoomDomainError("room_not_locked");
       const prompt = typeof command.prompt === "string" ? command.prompt.trim() : "";
@@ -1978,6 +2288,53 @@ export class RoomService {
           outIds: [],
           turnHistory: [],
           strikes: [],
+        };
+      } else if (nativeHintQuizKinds.includes(command.gameKind as NativeHintQuizKind)) {
+        room.game = {
+          kind: command.gameKind as NativeHintQuizKind,
+          startedVersion,
+          prompt,
+          phase: "setting",
+          facilitatorId: nativePresenterId(room,
+            command.gameKind === "song-association-quiz" ? command.songAssociationFacilitatorId
+              : command.gameKind === "emo-hint-game" ? command.emoHintFacilitatorId
+                : command.personHintFacilitatorId),
+          target: null,
+          hints: [],
+          guesses: {},
+        };
+      } else if (command.gameKind === "drawing-quiz") {
+        room.game = {
+          kind: "drawing-quiz",
+          startedVersion,
+          prompt,
+          phase: "preparing",
+          artistId: nativePresenterId(room, command.drawingQuizArtistId),
+          target: null,
+          readyIds: [],
+          guesses: {},
+        };
+      } else if (command.gameKind === "funny-line-karuta") {
+        room.game = {
+          kind: "funny-line-karuta",
+          startedVersion,
+          prompt,
+          phase: "claiming",
+          claims: {},
+          claimOrder: [],
+          nextClaimOrder: 1,
+          winnerId: null,
+        };
+      } else if (command.gameKind === "humming-intro-quiz") {
+        room.game = {
+          kind: "humming-intro-quiz",
+          startedVersion,
+          prompt,
+          phase: "preparing",
+          singerId: nativePresenterId(room, command.hummingIntroSingerId),
+          target: null,
+          guesses: {},
+          nextGuessOrder: 1,
         };
       } else if (command.gameKind === "werewolf") {
         const ids = randomOrder(activeParticipants(room).map((item) => item.id));
@@ -2172,6 +2529,88 @@ export class RoomService {
       if (!nextPlayerId) finishLoanwordBan(room.game, activeParticipants(room));
       else room.game.currentPlayerId = nextPlayerId;
       markGameFinished(room);
+    } else if (command.kind === "song_association_prepare" || command.kind === "song_association_hint" || command.kind === "song_association_guess" || command.kind === "emo_hint_prepare" || command.kind === "emo_hint_hint" || command.kind === "emo_hint_guess" || command.kind === "person_hint_prepare" || command.kind === "person_hint_hint" || command.kind === "person_hint_guess") {
+      const expectedKind: NativeHintQuizKind = command.kind.startsWith("song_association") ? "song-association-quiz" : command.kind.startsWith("emo_hint") ? "emo-hint-game" : "person-hint-quiz";
+      if (!room.game || !isNativeHintQuizGame(room.game) || room.game.kind !== expectedKind) throw new RoomDomainError("game_not_active");
+      if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
+      const game = room.game;
+      const isPrepare = command.kind.endsWith("_prepare");
+      const isHint = command.kind.endsWith("_hint");
+      if (isPrepare) {
+        if (game.phase !== "setting" || actor!.id !== game.facilitatorId) throw new RoomDomainError("not_your_turn");
+        const packedInput = typeof command.input === "string" ? command.input.trim() : "";
+        const packed = packedInput.split("|");
+        const target = typeof command.nativeQuizTarget === "string" ? command.nativeQuizTarget.trim() : packed[0]?.trim() ?? "";
+        const hint = typeof command.nativeQuizHint === "string" ? command.nativeQuizHint.trim() : typeof command.text === "string" ? command.text.trim() : packed.slice(1).join("|").trim();
+        if (!target || target.length > 200) throw new RoomDomainError("quiz_target_invalid");
+        if (!hint || hint.length > 200) throw new RoomDomainError("quiz_hint_invalid");
+        game.target = target;
+        game.hints = [hint];
+        game.guesses = {};
+        game.phase = "guessing";
+      } else if (isHint) {
+        if (game.phase !== "guessing" || actor!.id !== game.facilitatorId) throw new RoomDomainError("not_your_turn");
+        const hint = typeof command.nativeQuizHint === "string" ? command.nativeQuizHint.trim() : typeof command.input === "string" ? command.input.trim() : typeof command.text === "string" ? command.text.trim() : "";
+        if (!hint || hint.length > 200) throw new RoomDomainError("quiz_hint_invalid");
+        if (game.hints.length >= 8) throw new RoomDomainError("quiz_hint_limit");
+        game.hints.push(hint);
+      } else {
+        if (game.phase !== "guessing" || actor!.id === game.facilitatorId) throw new RoomDomainError("quiz_guess_invalid");
+        const guess = typeof command.nativeQuizGuess === "string" ? command.nativeQuizGuess.trim() : typeof command.input === "string" ? command.input.trim() : typeof command.text === "string" ? command.text.trim() : "";
+        if (!guess || guess.length > 200) throw new RoomDomainError("quiz_guess_invalid");
+        game.guesses[actor!.id] = guess;
+      }
+    } else if (command.kind === "drawing_quiz_prepare" || command.kind === "drawing_quiz_ready" || command.kind === "drawing_quiz_guess") {
+      if (!room.game || room.game.kind !== "drawing-quiz") throw new RoomDomainError("game_not_active");
+      if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
+      const game = room.game;
+      if (command.kind === "drawing_quiz_prepare") {
+        if (game.phase !== "preparing" || actor!.id !== game.artistId) throw new RoomDomainError("not_your_turn");
+        const target = typeof command.drawingQuizTarget === "string" ? command.drawingQuizTarget.trim() : typeof command.nativeQuizTarget === "string" ? command.nativeQuizTarget.trim() : typeof command.input === "string" ? command.input.trim() : typeof command.text === "string" ? command.text.trim() : "";
+        if (!target || target.length > 200) throw new RoomDomainError("drawing_target_invalid");
+        game.target = target;
+        game.phase = "guessing";
+        if (!game.readyIds.includes(actor!.id)) game.readyIds.push(actor!.id);
+      } else if (command.kind === "drawing_quiz_ready") {
+        if (game.phase !== "preparing" && game.phase !== "guessing") throw new RoomDomainError("game_not_ready");
+        if (command.drawingQuizReady === false) game.readyIds = game.readyIds.filter((id) => id !== actor!.id);
+        else if (!game.readyIds.includes(actor!.id)) game.readyIds.push(actor!.id);
+      } else {
+        if (game.phase !== "guessing" || !game.target || actor!.id === game.artistId) throw new RoomDomainError("quiz_guess_invalid");
+        const guess = typeof command.drawingQuizGuess === "string" ? command.drawingQuizGuess.trim() : typeof command.nativeQuizGuess === "string" ? command.nativeQuizGuess.trim() : typeof command.input === "string" ? command.input.trim() : typeof command.text === "string" ? command.text.trim() : "";
+        if (!guess || guess.length > 200) throw new RoomDomainError("quiz_guess_invalid");
+        game.guesses[actor!.id] = guess;
+      }
+    } else if (command.kind === "funny_line_karuta_claim") {
+      if (!room.game || room.game.kind !== "funny-line-karuta" || room.game.phase !== "claiming") throw new RoomDomainError("game_not_ready");
+      if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
+      if (Object.prototype.hasOwnProperty.call(room.game.claims, actor!.id)) throw new RoomDomainError("claim_already_submitted");
+      const response = typeof command.funnyLineKarutaResponse === "string" ? command.funnyLineKarutaResponse.trim() : typeof command.nativeQuizGuess === "string" ? command.nativeQuizGuess.trim() : typeof command.input === "string" ? command.input.trim() : typeof command.text === "string" ? command.text.trim() : "";
+      if (!response || response.length > 200) throw new RoomDomainError("claim_invalid");
+      const claim: FunnyLineKarutaClaim = { id: token(10), participantId: actor!.id, response, claimedAt: this.now(), order: room.game.nextClaimOrder };
+      room.game.nextClaimOrder += 1;
+      room.game.claims[actor!.id] = claim;
+      room.game.claimOrder.push(actor!.id);
+      if (!room.game.winnerId) room.game.winnerId = actor!.id;
+    } else if (command.kind === "humming_intro_prepare" || command.kind === "humming_intro_guess") {
+      if (!room.game || room.game.kind !== "humming-intro-quiz") throw new RoomDomainError("game_not_active");
+      if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
+      const game = room.game;
+      if (command.kind === "humming_intro_prepare") {
+        if (game.phase !== "preparing" || actor!.id !== game.singerId) throw new RoomDomainError("not_your_turn");
+        const target = typeof command.hummingIntroTarget === "string" ? command.hummingIntroTarget.trim() : typeof command.nativeQuizTarget === "string" ? command.nativeQuizTarget.trim() : typeof command.input === "string" ? command.input.trim() : typeof command.text === "string" ? command.text.trim() : "";
+        if (!target || target.length > 200) throw new RoomDomainError("humming_target_invalid");
+        game.target = target;
+        game.phase = "guessing";
+        game.guesses = {};
+      } else {
+        if (game.phase !== "guessing" || !game.target || actor!.id === game.singerId) throw new RoomDomainError("quiz_guess_invalid");
+        if (Object.prototype.hasOwnProperty.call(game.guesses, actor!.id)) throw new RoomDomainError("guess_already_submitted");
+        const guess = typeof command.hummingIntroGuess === "string" ? command.hummingIntroGuess.trim() : typeof command.nativeQuizGuess === "string" ? command.nativeQuizGuess.trim() : typeof command.input === "string" ? command.input.trim() : typeof command.text === "string" ? command.text.trim() : "";
+        if (!guess || guess.length > 200) throw new RoomDomainError("quiz_guess_invalid");
+        game.guesses[actor!.id] = { text: guess, submittedAt: this.now(), order: game.nextGuessOrder };
+        game.nextGuessOrder += 1;
+      }
     } else if (command.kind === "johari_self_submit") {
       if (!room.game || room.game.kind !== "johari-window" || room.game.phase !== "self") throw new RoomDomainError("game_not_ready");
       if (!actor!.connected) throw new RoomDomainError("participant_not_connected");
@@ -2254,6 +2693,24 @@ export class RoomService {
       } else if (room.game.kind === "loanword-ban-game") {
         if (room.game.phase !== "playing") throw new RoomDomainError("game_not_ready");
         finishLoanwordBan(room.game, activeParticipants(room));
+      } else if (isNativeHintQuizGame(room.game)) {
+        const game = room.game;
+        const requiredGuessers = nativeHintQuizVoterIds(game, room);
+        if (game.phase !== "guessing" || !game.target || requiredGuessers.some((participantId) => !game.guesses[participantId])) throw new RoomDomainError("game_not_ready");
+        finishNativeHintQuiz(game, activeParticipants(room));
+      } else if (room.game.kind === "drawing-quiz") {
+        const game = room.game;
+        const requiredGuessers = activeParticipants(room).filter((participant) => participant.id !== game.artistId);
+        if (game.phase !== "guessing" || !game.target || requiredGuessers.some((participant) => !game.guesses[participant.id])) throw new RoomDomainError("game_not_ready");
+        finishDrawingQuiz(game, activeParticipants(room));
+      } else if (room.game.kind === "funny-line-karuta") {
+        if (room.game.phase !== "claiming") throw new RoomDomainError("game_not_ready");
+        finishFunnyLineKaruta(room.game, activeParticipants(room));
+      } else if (room.game.kind === "humming-intro-quiz") {
+        const game = room.game;
+        const requiredGuessers = activeParticipants(room).filter((participant) => participant.id !== game.singerId);
+        if (game.phase !== "guessing" || !game.target || requiredGuessers.some((participant) => !game.guesses[participant.id])) throw new RoomDomainError("game_not_ready");
+        finishHummingIntro(game, activeParticipants(room));
       } else if (room.game.kind === "werewolf") {
         const game = room.game;
         if ((game.phase !== "voting" && game.phase !== "revote") || game.aliveIds.some((id) => !game.votes[id])) throw new RoomDomainError("game_not_ready");
@@ -2709,6 +3166,77 @@ export class RoomService {
         turnHistory: visibleHistory,
         strikes: visibleStrikes,
         ...(game.phase === "finished" ? { result: game.result ?? loanwordBanResult(game, activeParticipants(room)) } : {}),
+      };
+    } else if (room.game && isNativeHintQuizGame(room.game)) {
+      const game = room.game;
+      const active = activeParticipants(room);
+      const isFacilitator = participantId === game.facilitatorId;
+      const guessers = active.filter((participant) => participant.id !== game.facilitatorId);
+      projection.game = {
+        kind: game.kind,
+        prompt: game.prompt,
+        phase: game.phase,
+        facilitatorId: game.facilitatorId,
+        ownRole: isFacilitator ? "facilitator" : "guesser",
+        hints: [...game.hints],
+        hintCount: game.hints.length,
+        guessCount: guessers.filter((participant) => Boolean(game.guesses[participant.id])).length,
+        participantCount: guessers.length,
+        ...(isFacilitator && game.target ? { ownTarget: game.target } : {}),
+        ...(participantId && !isFacilitator && game.guesses[participantId] ? { ownGuess: game.guesses[participantId] } : {}),
+        ...(game.phase === "revealed" ? { result: game.result ?? resolveNativeHintQuizResult(game, active) } : {}),
+      };
+    } else if (room.game?.kind === "drawing-quiz") {
+      const game = room.game;
+      const active = activeParticipants(room);
+      const isArtist = participantId === game.artistId;
+      const guessers = active.filter((participant) => participant.id !== game.artistId);
+      projection.game = {
+        kind: "drawing-quiz",
+        prompt: game.prompt,
+        phase: game.phase,
+        artistId: game.artistId,
+        ownRole: isArtist ? "artist" : "guesser",
+        artistReady: Boolean(game.target),
+        readyCount: active.filter((participant) => game.readyIds.includes(participant.id)).length,
+        participantCount: active.length,
+        guessCount: guessers.filter((participant) => Boolean(game.guesses[participant.id])).length,
+        ...(isArtist && game.target ? { ownTarget: game.target } : {}),
+        ...(participantId ? { ownReady: game.readyIds.includes(participantId) } : {}),
+        ...(participantId && !isArtist && game.guesses[participantId] ? { ownGuess: game.guesses[participantId] } : {}),
+        ...(game.phase === "revealed" ? { result: game.result ?? resolveDrawingQuizResult(game, active) } : {}),
+      };
+    } else if (room.game?.kind === "funny-line-karuta") {
+      const game = room.game;
+      const active = activeParticipants(room);
+      const ownClaim = participantId ? game.claims[participantId] : undefined;
+      projection.game = {
+        kind: "funny-line-karuta",
+        prompt: game.prompt,
+        phase: game.phase,
+        claimCount: active.filter((participant) => Boolean(game.claims[participant.id])).length,
+        participantCount: active.length,
+        ...(game.phase === "revealed" ? { winnerId: game.winnerId } : {}),
+        ...(ownClaim ? { ownClaim: { response: ownClaim.response, claimedAt: ownClaim.claimedAt, order: ownClaim.order } } : {}),
+        ...(game.phase === "revealed" ? { result: game.result ?? resolveFunnyLineKarutaResult(game, active) } : {}),
+      };
+    } else if (room.game?.kind === "humming-intro-quiz") {
+      const game = room.game;
+      const active = activeParticipants(room);
+      const isSinger = participantId === game.singerId;
+      const guessers = active.filter((participant) => participant.id !== game.singerId);
+      const ownGuess = participantId ? game.guesses[participantId] : undefined;
+      projection.game = {
+        kind: "humming-intro-quiz",
+        prompt: game.prompt,
+        phase: game.phase,
+        singerId: game.singerId,
+        ownRole: isSinger ? "singer" : "guesser",
+        guessCount: guessers.filter((participant) => Boolean(game.guesses[participant.id])).length,
+        participantCount: guessers.length,
+        ...(isSinger && game.target ? { ownTarget: game.target } : {}),
+        ...(ownGuess ? { ownGuess: { text: ownGuess.text, submittedAt: ownGuess.submittedAt } } : {}),
+        ...(game.phase === "revealed" ? { result: game.result ?? resolveHummingIntroResult(game, active) } : {}),
       };
     } else if (room.game?.kind === "werewolf") {
       const game = room.game;

@@ -45,6 +45,13 @@ describe("room game contracts", () => {
       ["loanword-ban-game", "ストライク"],
     ] as const;
 
+    for (const key of ["song-association-quiz", "drawing-quiz", "funny-line-karuta", "emo-hint-game", "person-hint-quiz", "humming-intro-quiz"] as const) {
+      expect(isNewSyncRoomGameKey(key)).toBe(true);
+      expect(isNativeSyncRoomGameKey(key)).toBe(true);
+      expect(getSyncGameDefinition(key).key).toBe(key);
+      expect(getSyncGameDefinition(key).progression).toBe("simultaneous");
+    }
+
     for (const [key, ruleText] of nativeContracts) {
       expect(isNewSyncRoomGameKey(key)).toBe(true);
       expect(isNativeSyncRoomGameKey(key)).toBe(true);
@@ -57,5 +64,7 @@ describe("room game contracts", () => {
     expect(isNewSyncRoomGameKey("memory-logo-drawing")).toBe(false);
     expect(isNativeSyncRoomGameKey("acting-phrase-game")).toBe(false);
     expect(isNewSyncRoomGameKey("acting-phrase-game")).toBe(false);
+    expect(isNativeSyncRoomGameKey("weird-karuta-game")).toBe(false);
+    expect(isNewSyncRoomGameKey("weird-karuta-game")).toBe(false);
   });
 });
