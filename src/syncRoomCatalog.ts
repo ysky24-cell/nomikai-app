@@ -35,6 +35,10 @@ export const NEW_SYNC_ROOM_GAME_KEYS = [
 ] as const;
 
 export const NATIVE_SYNC_ROOM_GAME_KEYS = [
+  "yamanote",
+  "ng-word",
+  "turtle-soup",
+  "party-pack",
   "two-choice",
   "impression-ranking",
   "majority-game",

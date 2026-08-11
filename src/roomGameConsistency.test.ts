@@ -29,4 +29,19 @@ describe("room game contracts", () => {
     expect(isNativeSyncRoomGameKey("johari-window")).toBe(true);
     expect(getSyncGameDefinition("johari-window").rule).toContain("提出内容は結果まで非公開");
   });
+
+  it("routes the four priority games through dedicated native v2 contracts", () => {
+    const nativeContracts = [
+      ["ng-word", "自分の語だけ常に非表示"],
+      ["turtle-soup", "truth はホストの公開操作まで非表示"],
+      ["yamanote", "重複は拒否"],
+      ["party-pack", "手番制・同時入力"],
+    ] as const;
+
+    for (const [key, ruleText] of nativeContracts) {
+      expect(isNewSyncRoomGameKey(key)).toBe(true);
+      expect(isNativeSyncRoomGameKey(key)).toBe(true);
+      expect(getSyncGameDefinition(key).rule).toContain(ruleText);
+    }
+  });
 });

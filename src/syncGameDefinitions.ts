@@ -11,11 +11,11 @@ export type SyncGameDefinition = {
 };
 
 const definitions: readonly SyncGameDefinition[] = [
-  { key: "yamanote", title: "山手線ゲーム", rule: "順番に、お題に合う言葉を1つずつ答えます。全員が1回ずつ答えると1ラウンド完了です。", examplePrompt: "東京の駅名", inputLabel: "あなたの言葉", inputPlaceholder: "例：新宿", progression: "turn" },
-  { key: "ng-word", title: "NGワードゲーム", rule: "順番に会話の一言を入力します。言ってはいけない言葉を避けながら全員で1巡します。", examplePrompt: "今日あったうれしいこと", inputLabel: "あなたの一言", inputPlaceholder: "例：ランチがおいしかった", progression: "turn" },
-  { key: "party-pack", title: "定番ゲームパック", rule: "カードのお題に沿って、順番に答えます。", examplePrompt: "最近ハマっていること", inputLabel: "あなたの回答", inputPlaceholder: "例：朝の散歩", progression: "turn" },
+  { key: "yamanote", title: "山手線ゲーム", rule: "ルーム参加者の順番をサーバーが管理します。現在の人だけが答えられ、重複は拒否されます。パス・アウトも共有され、全員の1巡で結果になります。", examplePrompt: "東京の駅名", inputLabel: "あなたの言葉", inputPlaceholder: "例：新宿", progression: "turn" },
+  { key: "ng-word", title: "NGワードゲーム", rule: "サーバーが参加者ごとに1語を割り当てます。自分の語だけ常に非表示で、他の人の語は確認できます。ヒットは罰や飲酒ではなく、誰が記録したかだけを共有します。", examplePrompt: "今日あったうれしいこと", inputLabel: "ヒットを記録する対象", inputPlaceholder: "会話でNGワードを言った人を選択", progression: "turn" },
+  { key: "party-pack", title: "定番ゲームパック", rule: "ホストがミニゲームを1つ選び、サーバーがテキストのお題と進行方式を固定します。手番制・同時入力をゲームごとに切り替え、結果公開まで回答を隠します。", examplePrompt: "最近ハマっていること", inputLabel: "あなたの回答", inputPlaceholder: "例：朝の散歩", progression: "turn" },
   { key: "johari-window", title: "ジョハリの窓", rule: "まず自分の特徴を選び、次に他の全員への印象を同時に選びます。提出内容は結果まで非公開です。", examplePrompt: "自分と周りから見た特徴", inputLabel: "特徴ワード", inputPlaceholder: "自分の特徴と、他の参加者への印象を選択", progression: "simultaneous" },
-  { key: "turtle-soup", title: "ウミガメのスープ", rule: "順番に、はい・いいえで答えられる質問を1つずつ出します。", examplePrompt: "なぜ彼は傘を持たずに外出した？", inputLabel: "あなたの質問", inputPlaceholder: "例：その日は晴れていましたか？", progression: "turn" },
+  { key: "turtle-soup", title: "ウミガメのスープ", rule: "参加者は質問を共有ログへ投稿し、ホストだけが truth を確認して、はい・いいえ・関係ありませんに分類します。ヒントは段階公開、truth はホストの公開操作まで非表示です。", examplePrompt: "なぜ彼は傘を持たずに外出した？", inputLabel: "あなたの質問", inputPlaceholder: "例：その日は晴れていましたか？", progression: "turn" },
   { key: "truth-lie-game", title: "2つの真実と1つの嘘", rule: "全員が同時に、嘘だと思う番号を選びます。", examplePrompt: "1〜3のうち嘘はどれ？", inputLabel: "嘘だと思う番号", inputPlaceholder: "1 / 2 / 3", progression: "simultaneous" },
   { key: "count-up-game", title: "カウントアップゲーム", rule: "順番に1〜3個の数字を進めます。目標数に到達した人が負けです。", examplePrompt: "目標 30", inputLabel: "進める数字", inputPlaceholder: "例：1,2", progression: "count-up" },
   { key: "reverse-word-game", title: "逆さ言葉ゲーム", rule: "表示されたお題を逆から読み、順番に入力します。", examplePrompt: "さくら", inputLabel: "逆から読んだ言葉", inputPlaceholder: "例：らくさ", progression: "turn" },

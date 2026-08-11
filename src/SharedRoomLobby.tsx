@@ -98,6 +98,86 @@ type SharedGame =
       voteResults?: Record<string, number>;
     }
   | {
+      kind: "ng-word";
+      prompt: string;
+      phase: "assigned" | "playing" | "revealed" | string;
+      participantCount: number;
+      assignedCount: number;
+      assignments: Record<string, string | null>;
+      hits: Array<{ id: string; targetParticipantId: string; markerParticipantId: string }>;
+      hitCounts: Record<string, number>;
+      result?: {
+        assignments: Record<string, string>;
+        hits: Array<{ id: string; targetParticipantId: string; markerParticipantId: string }>;
+        hitCounts: Record<string, number>;
+      };
+    }
+  | {
+      kind: "turtle-soup";
+      prompt: string;
+      phase: "questioning" | "revealed" | string;
+      questionCount: number;
+      pendingQuestionCount: number;
+      questions: Array<{
+        id: string;
+        askerId: string;
+        text: string;
+        classification: "yes" | "no" | "irrelevant" | null;
+      }>;
+      hintLevel: number;
+      hints: string[];
+      availableHints?: string[];
+      hostTruth?: string;
+      truth?: string;
+    }
+  | {
+      kind: "yamanote";
+      prompt: string;
+      phase: "playing" | "finished" | string;
+      playerOrder: string[];
+      currentPlayerId: string | null;
+      actedPlayerIds: string[];
+      outIds: string[];
+      answerHistory: Array<{
+        id: string;
+        playerId: string;
+        action: "answer" | "pass" | "out";
+        answer?: string;
+      }>;
+      result?: {
+        answerHistory: Array<{
+          id: string;
+          playerId: string;
+          action: "answer" | "pass" | "out";
+          answer?: string;
+        }>;
+        outIds: string[];
+      };
+    }
+  | {
+      kind: "party-pack";
+      prompt: string;
+      promptId: string;
+      instruction: string;
+      mode: string;
+      progression: "simultaneous" | "turn";
+      phase: "playing" | "revealed" | string;
+      playerOrder: string[];
+      currentPlayerId: string | null;
+      inputCount: number;
+      participantCount: number;
+      remainingCount: number;
+      ownInput?: string;
+      hostAnswer?: string;
+      result?: {
+        summary: string;
+        inputs: Record<string, string>;
+        scores: Record<string, number>;
+        answer?: string;
+        counts?: Record<string, number>;
+      };
+    }
+  | {
       kind: "werewolf";
       phase: string;
       phaseDeadlineAt: number | null;
@@ -162,13 +242,23 @@ type CommandKind =
   | "game_vote"
   | "game_phase"
   | "werewolf_action"
-  | "legacy_input";
+  | "legacy_input"
+  | "ng_word_hit"
+  | "turtle_soup_question"
+  | "turtle_soup_classify"
+  | "turtle_soup_hint"
+  | "yamanote_answer"
+  | "party_pack_action";
 
 const SHARED_SESSION_KEY = "nomikai:shared-room-session:v1";
 const LEGACY_SYNC_GAME_KEYS = NEW_SYNC_ROOM_GAME_KEYS.filter(
   (key) => !isNativeSyncRoomGameKey(key),
 );
 const SHARED_GAME_MINIMUMS = {
+  yamanote: 2,
+  "ng-word": 3,
+  "turtle-soup": 2,
+  "party-pack": 3,
   "two-choice": 2,
   "anonymous-box": 2,
   "impression-ranking": 3,
@@ -185,6 +275,19 @@ function minimumPlayersForGame(gameKey: string) {
 function canStartWerewolf(participantCount: number) {
   return participantCount === 4 || participantCount >= 6;
 }
+
+const partyPackModeLabels: Record<string, string> = {
+  yamanote: "山手線",
+  majority: "多数派予想",
+  "truth-lie": "2真実1嘘",
+  "reverse-word": "逆さ言葉",
+  "loanword-ban": "外来語禁止",
+  typing: "早打ち",
+  "memory-drawing": "記憶描き",
+  "value-meter": "価値観メーター",
+  acting: "ひとこと演技",
+  "hint-quiz": "ヒントクイズ",
+};
 
 function readSession(): SharedSession | null {
   try {
@@ -271,6 +374,24 @@ function roomError(error: unknown) {
     johari_selection_invalid: "選択できる特徴ワードを確認してください。",
     johari_target_invalid: "評価対象を確認してください。",
     johari_submission_locked: "この入力はすでに提出済みです。",
+    ng_word_difficulty_invalid: "NGワードの設定を確認してください。",
+    hit_target_invalid: "ヒットを記録する対象を確認してください。",
+    question_required: "質問を入力してください。",
+    question_too_long: "質問は500文字以内で入力してください。",
+    turtle_soup_classification_invalid: "回答分類を確認してください。",
+    question_not_found: "その質問は見つかりません。最新状態を取得します。",
+    turtle_soup_hint_invalid: "ヒントは順番に公開してください。",
+    turtle_soup_hint_exhausted: "公開できるヒントはありません。",
+    turtle_soup_hints_invalid: "ヒントの設定を確認してください。",
+    yamanote_action_invalid: "山手線ゲームの操作を確認してください。",
+    answer_required: "答えを入力してください。",
+    answer_too_long: "答えは100文字以内で入力してください。",
+    duplicate_answer: "その答えはすでに出ています。別の言葉を選んでください。",
+    party_pack_mode_invalid: "パック内ミニゲームを確認してください。",
+    input_already_submitted: "このラウンドの入力は提出済みです。",
+    input_required: "回答を入力してください。",
+    input_too_long: "回答は500文字以内で入力してください。",
+    input_invalid: "このミニゲームの入力形式を確認してください。",
     rate_limited: "操作が多すぎます。少し待ってから試してください。",
     participant_required: "参加者情報が見つかりません。もう一度参加してください。",
     participant_auth_required:
@@ -395,6 +516,10 @@ export function SharedRoomLobby({
   const [error, setError] = useState("");
   const [anonymousText, setAnonymousText] = useState("");
   const [legacyInput, setLegacyInput] = useState("");
+  const [turtleQuestion, setTurtleQuestion] = useState("");
+  const [yamanoteInput, setYamanoteInput] = useState("");
+  const [partyPackInput, setPartyPackInput] = useState("");
+  const [partyPackMode, setPartyPackMode] = useState("yamanote");
   const [johariSelfDraft, setJohariSelfDraft] = useState<string[]>([]);
   const [johariPeerDrafts, setJohariPeerDrafts] = useState<Record<string, string[]>>({});
   const [hostPrompt, setHostPrompt] = useState("今夜、どちらを選ぶ？");
@@ -915,6 +1040,9 @@ export function SharedRoomLobby({
               "anonymous_submit",
               "werewolf_action",
               "legacy_input",
+              "ng_word_hit",
+              "turtle_soup_question",
+              "party_pack_action",
             ].includes(kind) &&
             latest
           ) {
@@ -1025,6 +1153,10 @@ export function SharedRoomLobby({
   const roomClosed = projection?.status === "closed";
   const legacyGame = activeGame?.kind === "legacy-game" ? activeGame : null;
   const johariGame = activeGame?.kind === "johari-window" ? activeGame : null;
+  const ngWordGame = activeGame?.kind === "ng-word" ? activeGame : null;
+  const turtleSoupGame = activeGame?.kind === "turtle-soup" ? activeGame : null;
+  const yamanoteGame = activeGame?.kind === "yamanote" ? activeGame : null;
+  const partyPackGame = activeGame?.kind === "party-pack" ? activeGame : null;
   const johariDeckWords = johariGame
     ? johariGame.deckWordIds
       .map((id) => johariWords.find((word) => word.id === id))
@@ -1317,6 +1449,62 @@ export function SharedRoomLobby({
                   onChange={(event) => setHostPrompt(event.currentTarget.value)}
                 />
               </label>
+              <div className="shared-room-host-actions">
+                <p className="soft-note">
+                  <strong>専用同期ゲーム</strong>：参加者一覧をそのまま使います。ゲーム開始後の追加参加や、別の「参加」操作はありません。
+                </p>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={busy || participantCount < minimumPlayersForGame("yamanote") || !hostPrompt.trim()}
+                  onClick={() => void startGame({ gameKind: "yamanote", prompt: hostPrompt.trim() || "東京の駅名" })}
+                >
+                  <Play size={18} />
+                  山手線ゲームを開始（2人以上）
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={busy || participantCount < minimumPlayersForGame("ng-word") || !hostPrompt.trim()}
+                  onClick={() => void startGame({ gameKind: "ng-word", prompt: hostPrompt.trim() || "今日あったうれしいこと", ngWordDifficulty: "easy" })}
+                >
+                  <Play size={18} />
+                  NGワードゲームを開始（3人以上）
+                </button>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={busy || participantCount < minimumPlayersForGame("turtle-soup") || !hostPrompt.trim()}
+                  onClick={() => void startGame({ gameKind: "turtle-soup", prompt: hostPrompt.trim() || "なぜ彼は傘を持たずに外出した？" })}
+                >
+                  <Play size={18} />
+                  ウミガメのスープを開始（2人以上）
+                </button>
+                <label>
+                  パックのミニゲーム
+                  <select value={partyPackMode} onChange={(event) => setPartyPackMode(event.currentTarget.value)}>
+                    <option value="yamanote">山手線</option>
+                    <option value="majority">多数派予想</option>
+                    <option value="truth-lie">2真実1嘘</option>
+                    <option value="reverse-word">逆さ言葉</option>
+                    <option value="loanword-ban">外来語禁止</option>
+                    <option value="typing">早打ち</option>
+                    <option value="memory-drawing">記憶描き</option>
+                    <option value="value-meter">価値観メーター</option>
+                    <option value="acting">ひとこと演技</option>
+                    <option value="hint-quiz">ヒントクイズ</option>
+                  </select>
+                </label>
+                <button
+                  className="secondary-button"
+                  type="button"
+                  disabled={busy || participantCount < minimumPlayersForGame("party-pack") || !hostPrompt.trim()}
+                  onClick={() => void startGame({ gameKind: "party-pack", partyPackMode, prompt: hostPrompt.trim() || "最近ハマっていること" })}
+                >
+                  <Play size={18} />
+                  定番ゲームパックを開始（3人以上）
+                </button>
+              </div>
               <button
                 className="primary-button"
                 type="button"
@@ -1604,6 +1792,227 @@ export function SharedRoomLobby({
                     {activeGame.result?.B ?? 0} / パス{" "}
                     {activeGame.result?.pass ?? 0}
                   </span>
+                </div>
+              )}
+            </div>
+          )}
+          {ngWordGame && (
+            <div className="shared-room-game-card">
+              <h3>NGワードゲーム</h3>
+              <p>{ngWordGame.prompt}</p>
+              <p className="soft-note">
+                自分のNGワードは結果公開まで表示されません。他の人のNGワードは確認できます。ヒットは罰や飲酒ではなく、記録だけを共有します。
+              </p>
+              <div className="shared-room-anonymous-list">
+                {projection.participants.map((participant) => (
+                  <div className="shared-room-anonymous-entry" key={participant.id}>
+                    <strong>{participant.name}{participant.id === session.participantId ? "（あなた）" : ""}</strong>
+                    <span>
+                      {participant.id === session.participantId && ngWordGame.phase !== "revealed"
+                        ? "あなたのNGワードは非表示"
+                        : ngWordGame.assignments[participant.id] ?? "未配布"}
+                    </span>
+                    <small>ヒット記録 {ngWordGame.hitCounts[participant.id] ?? 0}回</small>
+                    {ngWordGame.phase === "playing" && participant.id !== session.participantId && participant.connected && (
+                      <button
+                        type="button"
+                        className="secondary-button"
+                        disabled={busy}
+                        onClick={() => void command("ng_word_hit", { targetParticipantId: participant.id })}
+                      >
+                        この人のヒットを記録
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <p className="soft-note">
+                記録済み {ngWordGame.hits.length}件。誰が誰のヒットを記録したかを共有しています。
+              </p>
+              {ngWordGame.hits.length > 0 && (
+                <div className="shared-room-anonymous-list">
+                  <strong>ヒット記録の履歴</strong>
+                  {ngWordGame.hits.map((hit) => (
+                    <span key={hit.id}>
+                      {projection.participants.find((item) => item.id === hit.markerParticipantId)?.name ?? hit.markerParticipantId}さんが、{projection.participants.find((item) => item.id === hit.targetParticipantId)?.name ?? hit.targetParticipantId}さんを記録
+                    </span>
+                  ))}
+                </div>
+              )}
+              {ngWordGame.phase === "assigned" && isHost && (
+                <button type="button" className="primary-button" disabled={busy} onClick={() => void command("game_phase")}>
+                  会話タイムへ進む
+                </button>
+              )}
+              {ngWordGame.phase === "assigned" && !isHost && (
+                <p className="soft-note">ホストが配布確認を終えて会話タイムへ進めるまでお待ちください。</p>
+              )}
+              {ngWordGame.phase === "playing" && isHost && (
+                <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("game_reveal")}>
+                  結果を公開して終了
+                </button>
+              )}
+              {ngWordGame.phase === "revealed" && (
+                <div className="shared-room-result">
+                  <strong>結果</strong>
+                  <p>NGワードとヒット記録を公開しました。飲酒ペナルティはありません。</p>
+                  {Object.entries(ngWordGame.result?.assignments ?? ngWordGame.assignments).map(([participantId, word]) => (
+                    <span key={participantId}>
+                      {projection.participants.find((item) => item.id === participantId)?.name ?? participantId}：{word}（{ngWordGame.result?.hitCounts[participantId] ?? ngWordGame.hitCounts[participantId] ?? 0}回）
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {turtleSoupGame && (
+            <div className="shared-room-game-card">
+              <h3>ウミガメのスープ</h3>
+              <p>{turtleSoupGame.prompt}</p>
+              {turtleSoupGame.hostTruth && isHost && (
+                <div className="notice-panel calm">
+                  <strong>ホストだけに表示：truth</strong>
+                  <p>{turtleSoupGame.hostTruth}</p>
+                </div>
+              )}
+              {turtleSoupGame.hints.length > 0 && (
+                <div className="shared-room-result">
+                  <strong>公開済みヒント</strong>
+                  {turtleSoupGame.hints.map((hint, index) => <span key={`${index}-${hint}`}>{index + 1}. {hint}</span>)}
+                </div>
+              )}
+              {turtleSoupGame.phase === "questioning" && (
+                <>
+                  <div className="shared-room-form">
+                    <label>
+                      質問を投稿
+                      <textarea value={turtleQuestion} onChange={(event) => setTurtleQuestion(event.currentTarget.value)} maxLength={500} placeholder="例：その日は晴れていましたか？" />
+                    </label>
+                    <button
+                      type="button"
+                      className="primary-button"
+                      disabled={busy || !turtleQuestion.trim()}
+                      onClick={() => void command("turtle_soup_question", { text: turtleQuestion.trim() }).then(() => setTurtleQuestion(""))}
+                    >
+                      質問を共有
+                    </button>
+                  </div>
+                  <p className="soft-note">
+                    質問 {turtleSoupGame.questionCount}件 / 未分類 {turtleSoupGame.pendingQuestionCount}件。質問文は全員に共有され、truth はまだ公開されません。
+                  </p>
+                </>
+              )}
+              <div className="shared-room-anonymous-list">
+                {turtleSoupGame.questions.length === 0 ? (
+                  <p className="soft-note">まだ質問はありません。</p>
+                ) : turtleSoupGame.questions.map((question) => (
+                  <div className="shared-room-anonymous-entry" key={question.id}>
+                    <p>{question.text}</p>
+                    <small>
+                      {projection.participants.find((item) => item.id === question.askerId)?.name ?? question.askerId}さん / {question.classification === "yes" ? "はい" : question.classification === "no" ? "いいえ" : question.classification === "irrelevant" ? "関係ありません" : "未分類"}
+                    </small>
+                    {isHost && turtleSoupGame.phase === "questioning" && (
+                      <div className="shared-room-choice-actions">
+                        <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("turtle_soup_classify", { turtleSoupQuestionId: question.id, turtleSoupClassification: "yes" })}>はい</button>
+                        <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("turtle_soup_classify", { turtleSoupQuestionId: question.id, turtleSoupClassification: "no" })}>いいえ</button>
+                        <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("turtle_soup_classify", { turtleSoupQuestionId: question.id, turtleSoupClassification: "irrelevant" })}>関係ありません</button>
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+              {turtleSoupGame.phase === "questioning" && isHost && (
+                <div className="shared-room-choice-actions">
+                  <button type="button" className="secondary-button" disabled={busy || turtleSoupGame.hintLevel >= (turtleSoupGame.availableHints?.length ?? turtleSoupGame.hintLevel)} onClick={() => void command("turtle_soup_hint")}>ヒントを1つ公開</button>
+                  <button type="button" className="primary-button" disabled={busy || turtleSoupGame.pendingQuestionCount > 0} onClick={() => void command("game_reveal")}>truthを公開して終了</button>
+                </div>
+              )}
+              {turtleSoupGame.phase === "questioning" && !isHost && <p className="soft-note">ホストが質問を分類し、必要なヒントを公開しています。</p>}
+              {turtleSoupGame.phase === "revealed" && turtleSoupGame.truth && (
+                <div className="shared-room-result">
+                  <strong>truth</strong>
+                  <p>{turtleSoupGame.truth}</p>
+                </div>
+              )}
+            </div>
+          )}
+          {yamanoteGame && (
+            <div className="shared-room-game-card">
+              <h3>山手線ゲーム</h3>
+              <p><strong>お題：</strong>{yamanoteGame.prompt}</p>
+              {yamanoteGame.phase === "playing" && (
+                <p className="soft-note">
+                  {yamanoteGame.currentPlayerId === session.participantId
+                    ? "あなたの番です。答える、パス、アウトのいずれかを選んでください。"
+                    : `次は${projection.participants.find((item) => item.id === yamanoteGame.currentPlayerId)?.name ?? "次の参加者"}さんの番です。`}
+                </p>
+              )}
+              {yamanoteGame.phase === "playing" && yamanoteGame.currentPlayerId === session.participantId && (
+                <div className="shared-room-form">
+                  <label>
+                    あなたの言葉
+                    <input value={yamanoteInput} onChange={(event) => setYamanoteInput(event.currentTarget.value)} maxLength={100} placeholder="例：新宿" />
+                  </label>
+                  <div className="shared-room-choice-actions">
+                    <button type="button" className="primary-button" disabled={busy || !yamanoteInput.trim()} onClick={() => void command("yamanote_answer", { yamanoteAction: "answer", input: yamanoteInput.trim() }).then(() => setYamanoteInput(""))}>答える</button>
+                    <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("yamanote_answer", { yamanoteAction: "pass" })}>パス</button>
+                    <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("yamanote_answer", { yamanoteAction: "out" })}>アウト</button>
+                  </div>
+                </div>
+              )}
+              <p className="soft-note">回答履歴 {yamanoteGame.answerHistory.length}件。重複回答はサーバーが拒否します。</p>
+              <div className="shared-room-anonymous-list">
+                {yamanoteGame.answerHistory.map((entry) => (
+                  <span key={entry.id}>
+                    {projection.participants.find((item) => item.id === entry.playerId)?.name ?? entry.playerId}：{entry.action === "answer" ? entry.answer : entry.action === "pass" ? "パス" : "アウト"}
+                  </span>
+                ))}
+              </div>
+              {isHost && yamanoteGame.phase === "playing" && (
+                <button type="button" className="secondary-button" disabled={busy} onClick={() => void command("game_reveal")}>ここでラウンドを終了</button>
+              )}
+              {yamanoteGame.phase === "finished" && (
+                <div className="shared-room-result">
+                  <strong>ラウンド完了</strong>
+                  <p>参加者の番を一巡しました。アウトになった人：{yamanoteGame.outIds.length ? yamanoteGame.outIds.map((id) => projection.participants.find((item) => item.id === id)?.name ?? id).join("、") : "なし"}</p>
+                </div>
+              )}
+            </div>
+          )}
+          {partyPackGame && (
+            <div className="shared-room-game-card">
+              <h3>定番ゲームパック：{partyPackModeLabels[partyPackGame.mode] ?? partyPackGame.mode}</h3>
+              <p><strong>お題：</strong>{partyPackGame.prompt}</p>
+              <p>{partyPackGame.instruction}</p>
+              {partyPackGame.hostAnswer && isHost && <p className="soft-note">ホストだけに表示される正解：{partyPackGame.hostAnswer}</p>}
+              {partyPackGame.phase === "playing" && (
+                <p className="soft-note">
+                  {partyPackGame.progression === "turn"
+                    ? partyPackGame.currentPlayerId === session.participantId
+                      ? "あなたの番です。入力すると次の参加者へ進みます。"
+                      : `次は${projection.participants.find((item) => item.id === partyPackGame.currentPlayerId)?.name ?? "次の参加者"}さんの番です。`
+                    : `入力済み ${partyPackGame.inputCount}/${partyPackGame.participantCount}人。回答は結果公開まで非表示です。`}
+                </p>
+              )}
+              {partyPackGame.phase === "playing" && (partyPackGame.progression === "simultaneous" || partyPackGame.currentPlayerId === session.participantId) && (
+                <div className="shared-room-form">
+                  <label>
+                    あなたの回答
+                    <input value={partyPackInput} onChange={(event) => setPartyPackInput(event.currentTarget.value)} maxLength={500} placeholder={partyPackGame.mode === "majority" ? "A / B / pass" : partyPackGame.mode === "value-meter" ? "72|理由" : partyPackGame.mode === "typing" ? "文章|1200" : "回答を入力"} />
+                  </label>
+                  <button type="button" className="primary-button" disabled={busy || !partyPackInput.trim() || Boolean(partyPackGame.ownInput)} onClick={() => void command("party_pack_action", { input: partyPackInput.trim() }).then(() => setPartyPackInput(""))}>回答を送信</button>
+                </div>
+              )}
+              {partyPackGame.phase === "playing" && partyPackGame.progression === "turn" && !partyPackGame.currentPlayerId && <p className="soft-note">全員の入力が揃いました。ホストが結果を公開します。</p>}
+              {partyPackGame.phase === "playing" && isHost && (
+                <button type="button" className="secondary-button" disabled={busy || partyPackGame.remainingCount > 0} onClick={() => void command("game_reveal")}>結果を公開して終了</button>
+              )}
+              {partyPackGame.phase === "revealed" && partyPackGame.result && (
+                <div className="shared-room-result">
+                  <strong>結果</strong>
+                  <p>{partyPackGame.result.summary}</p>
+                  {partyPackGame.result.answer && <span>正解：{partyPackGame.result.answer}</span>}
+                  {Object.entries(partyPackGame.result.inputs).map(([participantId, input]) => <span key={participantId}>{projection.participants.find((item) => item.id === participantId)?.name ?? participantId}：{input}（{partyPackGame.result?.scores[participantId] ?? 0}）</span>)}
                 </div>
               )}
             </div>

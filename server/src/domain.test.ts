@@ -11,6 +11,19 @@ async function lockRoom(service: RoomService, roomCode: string, version: number,
   return service.execute(command(roomCode, commandId, version, "start", { participantId }), token);
 }
 
+async function createRoomWithPlayers(names: string[]) {
+  const service = new RoomService(new MemoryRoomRepository());
+  const host = await service.createRoom("Host");
+  const sessions = [{ id: host.room.self!.id, token: host.hostToken }];
+  let version = host.room.version;
+  for (const [index, name] of names.entries()) {
+    const joined = await service.execute(command(host.room.code, `native-join-${index}`, version, "join", { name }));
+    sessions.push({ id: joined.credentials!.participantId, token: joined.credentials!.reconnectToken });
+    version = joined.version;
+  }
+  return { service, host, sessions, version };
+}
+
 test("creates readable room credentials and keeps projection secrets private", async () => {
   const service = new RoomService(new MemoryRoomRepository());
   const created = await service.createRoom(" Host ");
@@ -704,4 +717,238 @@ test("priority legacy games resolve game-specific results after the shared revea
     assert.match(finished.game.result?.summary ?? "", game.summary);
     assert.equal(Object.keys(finished.game.result?.scores ?? {}).length, sessions.length);
   }
+});
+
+test("native NG word keeps each actor masked, records safe hits, and reconnects without leaks", async () => {
+  const { service, host, sessions, version } = await createRoomWithPlayers(["Alice", "Bob"]);
+  const hostSession = sessions[0]!;
+  const alice = sessions[1]!;
+  const bob = sessions[2]!;
+  const locked = await lockRoom(service, host.room.code, version, hostSession.id, hostSession.token, "ng-lock");
+  const started = await service.execute(command(host.room.code, "ng-start", locked.version, "game_start", {
+    participantId: hostSession.id,
+    gameKind: "ng-word",
+    prompt: "会話を楽しもう",
+    ngWordDifficulty: "normal",
+  }), hostSession.token);
+  assert.equal(started.game?.kind, "ng-word");
+
+  const publicView = await service.getProjection(host.room.code, null);
+  if (!publicView?.game || publicView.game.kind !== "ng-word") throw new Error("NG word public projection missing");
+  assert.ok(Object.values(publicView.game.assignments).every((word) => word === null));
+
+  const aliceView = await service.getProjection(host.room.code, alice.id, alice.token);
+  if (!aliceView?.game || aliceView.game.kind !== "ng-word") throw new Error("NG word player projection missing");
+  assert.equal(aliceView.game.assignments[alice.id], null);
+  assert.ok(aliceView.game.assignments[bob.id]);
+  assert.equal("result" in aliceView.game, false);
+
+  await assert.rejects(
+    service.execute(command(host.room.code, "ng-player-phase", started.version, "game_phase", { participantId: alice.id }), alice.token),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "host_required",
+  );
+  const playing = await service.execute(command(host.room.code, "ng-play", started.version, "game_phase", { participantId: hostSession.id }), hostSession.token);
+  const hit = await service.execute(command(host.room.code, "ng-hit", playing.version, "ng_word_hit", {
+    participantId: alice.id,
+    targetParticipantId: bob.id,
+  }), alice.token);
+  if (!hit.game || hit.game.kind !== "ng-word") throw new Error("NG word hit projection missing");
+  assert.equal(hit.game.hits.length, 1);
+  assert.equal(hit.game.hits[0]?.markerParticipantId, alice.id);
+  assert.equal(hit.game.hits[0]?.targetParticipantId, bob.id);
+
+  const left = await service.execute(command(host.room.code, "ng-leave", hit.version, "leave", { participantId: alice.id }), alice.token);
+  const reconnected = await service.execute(command(host.room.code, "ng-reconnect", left.version, "reconnect", { participantId: alice.id }), alice.token);
+  if (!reconnected.game || reconnected.game.kind !== "ng-word") throw new Error("NG word reconnect projection missing");
+  assert.equal(reconnected.game.assignments[alice.id], null);
+  assert.ok(reconnected.game.assignments[bob.id]);
+  assert.equal(reconnected.game.hits.length, 1);
+
+  const revealed = await service.execute(command(host.room.code, "ng-reveal", reconnected.version, "game_reveal", { participantId: hostSession.id }), hostSession.token);
+  assert.equal(revealed.status, "finished");
+  if (!revealed.game || revealed.game.kind !== "ng-word") throw new Error("NG word result projection missing");
+  assert.ok(revealed.game.result);
+  assert.equal("penalties" in revealed.game, false);
+  assert.ok(revealed.game.result?.assignments[alice.id]);
+});
+
+test("native turtle soup keeps truth facilitator-only, shares classified questions, and supports rematch", async () => {
+  const { service, host, sessions, version } = await createRoomWithPlayers(["Alice"]);
+  const hostSession = sessions[0]!;
+  const alice = sessions[1]!;
+  const locked = await lockRoom(service, host.room.code, version, hostSession.id, hostSession.token, "turtle-lock");
+  const started = await service.execute(command(host.room.code, "turtle-start", locked.version, "game_start", {
+    participantId: hostSession.id,
+    gameKind: "turtle-soup",
+    prompt: "傘が盗まれた？",
+    turtleSoupTruth: "答えは、主人公が傘を置き忘れたからです。",
+    turtleSoupHints: ["盗難ではありません。", "置き忘れです。"],
+  }), hostSession.token);
+  if (!started.game || started.game.kind !== "turtle-soup") throw new Error("turtle soup start projection missing");
+  assert.equal(started.game.hostTruth, "答えは、主人公が傘を置き忘れたからです。");
+
+  const aliceBefore = await service.getProjection(host.room.code, alice.id, alice.token);
+  if (!aliceBefore?.game || aliceBefore.game.kind !== "turtle-soup") throw new Error("turtle soup player projection missing");
+  assert.equal("hostTruth" in aliceBefore.game, false);
+  assert.equal("truth" in aliceBefore.game, false);
+
+  const question = await service.execute(command(host.room.code, "turtle-question", started.version, "turtle_soup_question", {
+    participantId: alice.id,
+    text: "誰かに盗まれましたか？",
+  }), alice.token);
+  if (!question.game || question.game.kind !== "turtle-soup") throw new Error("turtle soup question projection missing");
+  const questionId = question.game.questions[0]?.id;
+  if (!questionId) throw new Error("turtle soup question id missing");
+  await assert.rejects(
+    service.execute(command(host.room.code, "turtle-player-classify", question.version, "turtle_soup_classify", {
+      participantId: alice.id,
+      turtleSoupQuestionId: questionId,
+      turtleSoupClassification: "yes",
+    }), alice.token),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "host_required",
+  );
+  const hinted = await service.execute(command(host.room.code, "turtle-hint", question.version, "turtle_soup_hint", {
+    participantId: hostSession.id,
+    turtleSoupHintIndex: 0,
+  }), hostSession.token);
+  if (!hinted.game || hinted.game.kind !== "turtle-soup") throw new Error("turtle soup hint projection missing");
+  assert.deepEqual(hinted.game.hints, ["盗難ではありません。"]);
+  await assert.rejects(
+    service.execute(command(host.room.code, "turtle-early-reveal", hinted.version, "game_reveal", { participantId: hostSession.id }), hostSession.token),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "game_not_ready",
+  );
+
+  const classified = await service.execute(command(host.room.code, "turtle-classify", hinted.version, "turtle_soup_classify", {
+    participantId: hostSession.id,
+    turtleSoupQuestionId: questionId,
+    turtleSoupClassification: "yes",
+  }), hostSession.token);
+  const revealed = await service.execute(command(host.room.code, "turtle-reveal", classified.version, "game_reveal", { participantId: hostSession.id }), hostSession.token);
+  assert.equal(revealed.status, "finished");
+  const publicResult = await service.getProjection(host.room.code, null);
+  if (!publicResult?.game || publicResult.game.kind !== "turtle-soup") throw new Error("turtle soup result projection missing");
+  assert.equal(publicResult.game.truth, "答えは、主人公が傘を置き忘れたからです。");
+
+  const reset = await service.execute(command(host.room.code, "turtle-reset", revealed.version, "reset", { participantId: hostSession.id }), hostSession.token);
+  const rematchLock = await lockRoom(service, host.room.code, reset.version, hostSession.id, hostSession.token, "turtle-rematch-lock");
+  const rematch = await service.execute(command(host.room.code, "turtle-rematch", rematchLock.version, "game_start", {
+    participantId: hostSession.id,
+    gameKind: "turtle-soup",
+    prompt: "もう一度？",
+  }), hostSession.token);
+  assert.equal(rematch.game?.kind, "turtle-soup");
+  assert.equal(rematch.status, "playing");
+});
+
+test("native Yamanote enforces roster turns, duplicate answers, and safe current-player departure", async () => {
+  const { service, host, sessions, version } = await createRoomWithPlayers(["Alice", "Bob", "Carol"]);
+  const hostSession = sessions[0]!;
+  const alice = sessions[1]!;
+  const bob = sessions[2]!;
+  const carol = sessions[3]!;
+  const locked = await lockRoom(service, host.room.code, version, hostSession.id, hostSession.token, "yamanote-lock");
+  const started = await service.execute(command(host.room.code, "yamanote-start", locked.version, "game_start", {
+    participantId: hostSession.id,
+    gameKind: "yamanote",
+    prompt: "東京の駅名",
+  }), hostSession.token);
+  if (!started.game || started.game.kind !== "yamanote") throw new Error("Yamanote start projection missing");
+  assert.equal(started.game.currentPlayerId, hostSession.id);
+  await assert.rejects(
+    service.execute(command(host.room.code, "yamanote-out-of-turn", started.version, "yamanote_answer", { participantId: alice.id, yamanoteAction: "pass" }), alice.token),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "not_your_turn",
+  );
+  const hostAnswer = await service.execute(command(host.room.code, "yamanote-host-answer", started.version, "yamanote_answer", {
+    participantId: hostSession.id,
+    yamanoteAction: "answer",
+    input: "新宿",
+  }), hostSession.token);
+  assert.equal(hostAnswer.game?.kind, "yamanote");
+  assert.equal(hostAnswer.game?.currentPlayerId, alice.id);
+  await assert.rejects(
+    service.execute(command(host.room.code, "yamanote-duplicate", hostAnswer.version, "yamanote_answer", { participantId: alice.id, yamanoteAction: "answer", input: "新宿" }), alice.token),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "duplicate_answer",
+  );
+  const alicePass = await service.execute(command(host.room.code, "yamanote-alice-pass", hostAnswer.version, "yamanote_answer", { participantId: alice.id, yamanoteAction: "pass" }), alice.token);
+  assert.equal(alicePass.game?.kind, "yamanote");
+  assert.equal(alicePass.game?.currentPlayerId, bob.id);
+  const bobLeft = await service.execute(command(host.room.code, "yamanote-bob-leave", alicePass.version, "leave", { participantId: bob.id }), bob.token);
+  if (!bobLeft.game || bobLeft.game.kind !== "yamanote") throw new Error("Yamanote departure projection missing");
+  assert.equal(bobLeft.game.phase, "playing");
+  assert.equal(bobLeft.game.currentPlayerId, carol.id);
+  assert.equal(bobLeft.game.playerOrder.includes(bob.id), false);
+
+  const finished = await service.execute(command(host.room.code, "yamanote-carol-out", bobLeft.version, "yamanote_answer", { participantId: carol.id, yamanoteAction: "out" }), carol.token);
+  assert.equal(finished.status, "finished");
+  if (!finished.game || finished.game.kind !== "yamanote") throw new Error("Yamanote result projection missing");
+  assert.equal(finished.game.phase, "finished");
+  assert.deepEqual(finished.game.outIds, [carol.id]);
+  assert.equal(finished.game.result?.answerHistory.length, 3);
+});
+
+test("native party pack supports private simultaneous answers, turn progression, deterministic reveal, and rematch", async () => {
+  const { service, host, sessions, version } = await createRoomWithPlayers(["Alice", "Bob"]);
+  const hostSession = sessions[0]!;
+  const alice = sessions[1]!;
+  const bob = sessions[2]!;
+  const locked = await lockRoom(service, host.room.code, version, hostSession.id, hostSession.token, "party-lock");
+  const started = await service.execute(command(host.room.code, "party-start", locked.version, "game_start", {
+    participantId: hostSession.id,
+    gameKind: "party-pack",
+    partyPackMode: "truth-lie",
+    partyPackPromptId: "truth-lie-01",
+    prompt: "3つの話のうち嘘はどれ？",
+  }), hostSession.token);
+  if (!started.game || started.game.kind !== "party-pack") throw new Error("party pack start projection missing");
+  assert.equal(started.game.progression, "simultaneous");
+  const hostPrivate = await service.getProjection(host.room.code, hostSession.id, hostSession.token);
+  const alicePrivate = await service.getProjection(host.room.code, alice.id, alice.token);
+  if (!hostPrivate?.game || hostPrivate.game.kind !== "party-pack") throw new Error("party pack host projection missing");
+  if (!alicePrivate?.game || alicePrivate.game.kind !== "party-pack") throw new Error("party pack player projection missing");
+  assert.equal(hostPrivate.game.hostAnswer, "2");
+  assert.equal("hostAnswer" in alicePrivate.game, false);
+
+  const aliceInput = await service.execute(command(host.room.code, "party-alice-input", started.version, "party_pack_action", { participantId: alice.id, input: "1" }), alice.token);
+  const bobInput = await service.execute(command(host.room.code, "party-bob-input", aliceInput.version, "party_pack_action", { participantId: bob.id, input: "2" }), bob.token);
+  const aliceAfter = await service.getProjection(host.room.code, alice.id, alice.token);
+  if (!aliceAfter?.game || aliceAfter.game.kind !== "party-pack") throw new Error("party pack private answer missing");
+  assert.equal(aliceAfter.game.ownInput, "1");
+  assert.equal("result" in aliceAfter.game, false);
+  await assert.rejects(
+    service.execute(command(host.room.code, "party-early-reveal", bobInput.version, "game_reveal", { participantId: hostSession.id }), hostSession.token),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "game_not_ready",
+  );
+  const hostInput = await service.execute(command(host.room.code, "party-host-input", bobInput.version, "party_pack_action", { participantId: hostSession.id, input: "2" }), hostSession.token);
+  const simultaneousResult = await service.execute(command(host.room.code, "party-reveal", hostInput.version, "game_reveal", { participantId: hostSession.id }), hostSession.token);
+  assert.equal(simultaneousResult.status, "finished");
+  if (!simultaneousResult.game || simultaneousResult.game.kind !== "party-pack") throw new Error("party pack simultaneous result missing");
+  assert.equal(simultaneousResult.game.result?.answer, "2");
+  assert.equal(simultaneousResult.game.result?.scores[hostSession.id], 1);
+  assert.equal(simultaneousResult.game.result?.scores[alice.id], 0);
+  assert.equal(simultaneousResult.game.result?.scores[bob.id], 1);
+
+  const reset = await service.execute(command(host.room.code, "party-reset", simultaneousResult.version, "reset", { participantId: hostSession.id }), hostSession.token);
+  const rematchLock = await lockRoom(service, host.room.code, reset.version, hostSession.id, hostSession.token, "party-rematch-lock");
+  const rematch = await service.execute(command(host.room.code, "party-rematch", rematchLock.version, "game_start", {
+    participantId: hostSession.id,
+    gameKind: "party-pack",
+    partyPackMode: "reverse-word",
+    partyPackPromptId: "reverse-word-01",
+    prompt: "さくら",
+  }), hostSession.token);
+  if (!rematch.game || rematch.game.kind !== "party-pack") throw new Error("party pack turn rematch missing");
+  assert.equal(rematch.game.progression, "turn");
+  assert.equal(rematch.game.currentPlayerId, hostSession.id);
+  await assert.rejects(
+    service.execute(command(host.room.code, "party-turn-out-of-turn", rematch.version, "party_pack_action", { participantId: alice.id, input: "らくさ" }), alice.token),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "not_your_turn",
+  );
+  const rematchHost = await service.execute(command(host.room.code, "party-turn-host", rematch.version, "party_pack_action", { participantId: hostSession.id, input: "らくさ" }), hostSession.token);
+  const rematchAlice = await service.execute(command(host.room.code, "party-turn-alice", rematchHost.version, "party_pack_action", { participantId: alice.id, input: "くさ" }), alice.token);
+  const rematchBob = await service.execute(command(host.room.code, "party-turn-bob", rematchAlice.version, "party_pack_action", { participantId: bob.id, input: "さく" }), bob.token);
+  assert.equal(rematchBob.game?.kind, "party-pack");
+  const rematchResult = await service.execute(command(host.room.code, "party-turn-reveal", rematchBob.version, "game_reveal", { participantId: hostSession.id }), hostSession.token);
+  assert.equal(rematchResult.status, "finished");
+  assert.equal(rematchResult.game?.kind, "party-pack");
+  if (rematchResult.game?.kind === "party-pack") assert.equal(rematchResult.game.result?.answer, "らくさ");
 });
