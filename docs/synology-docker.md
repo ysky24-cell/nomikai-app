@@ -89,7 +89,7 @@ Container Manager の「プロジェクト」から作成する場合も、Compo
 
 ## このComposeでの違い
 
-- `web` は `npm run build` 後、`vite preview` でビルド済みフロントを配信します。
+- `web` は `npm run build` 後、Nginxでビルド済みフロントを配信します。
 - `api` は TypeScript をビルドしてから `npm start` で実行します。
 - `db` と `redis` は外部ポートを公開しません。コンテナ間通信だけで使います。
 - PostgreSQL は `postgres_data` ボリュームに永続化します。
@@ -101,8 +101,12 @@ Container Manager の「プロジェクト」から作成する場合も、Compo
 アプリ更新時:
 
 ```bash
+git switch main
+git pull --ff-only origin main
 docker compose -p nomikai-app -f docker-compose.synology.yml --env-file .env up -d --build
 ```
+
+以前の `docker-room` ブランチから切り替える場合も、上記の `git switch main` を一度実行します。`.env` はGit管理外、PostgreSQLとRedisのデータはDockerボリュームにあるため、`docker compose down -v` を実行しない限り引き継がれます。
 
 `VITE_API_URL` はフロントのビルド時に埋め込まれるため、APIのURLやポートを変えたときも `--build` 付きで `web` を作り直します。
 

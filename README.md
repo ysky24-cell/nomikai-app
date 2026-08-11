@@ -1,11 +1,11 @@
 # 飲み会アプリ
 
-飲み会や交流会で使えるゲーム集です。1台の端末で遊ぶ静的版と、参加者が各自のスマホから同じ部屋へ入るDockerルーム版があります。
+飲み会や交流会で使えるゲーム集です。参加者が各自のスマホから同じ部屋へ入るSynology版を正式版とし、1台の端末で遊ぶGitHub Pages版も体験用として公開しています。
 
 ## 公開URL
 
-- 静的版: https://ysky24-cell.github.io/nomikai-app/
-- Dockerルーム版: `docker-room` ブランチを自分のサーバーへ配置して利用します
+- 正式版: `main`ブランチをSynologyへ配置して利用します
+- 1台共有版: https://ysky24-cell.github.io/nomikai-app/
 
 静的版はGitHub Pagesだけで動きます。データベースやログインはなく、設定と進行状況はブラウザの `localStorage` に保存します。
 
@@ -44,7 +44,7 @@ Dockerルーム版では全33ゲームを正式なv2同期ゲームとして扱�
 - カード選択、抽選、盤面、すごろく位置、資源と交渉、トーナメント表
 - 再接続、ホスト交代、参加者の退出・削除、ルーム終了
 
-## Dockerで起動
+## 正式版をSynologyで起動
 
 必要なもの:
 
@@ -52,16 +52,38 @@ Dockerルーム版では全33ゲームを正式なv2同期ゲームとして扱�
 - Docker Compose
 - Git
 
-起動:
+初回配置:
 
 ```bash
 git clone https://github.com/ysky24-cell/nomikai-app.git
 cd nomikai-app
-git switch docker-room
-docker compose up -d --build
+git switch main
 ```
 
-標準設定では次を開きます。
+NASのIPに合わせて `.env` を作成してから、正式版Composeを起動します。
+
+```bash
+docker compose -p nomikai-app -f docker-compose.synology.yml --env-file .env up -d --build
+```
+
+既に `docker-room` ブランチを配置している場合は、次の一度だけ `main` へ切り替えます。`.env` とデータベース用Dockerボリュームはそのまま利用できます。
+
+```bash
+git fetch origin
+git switch main
+git pull --ff-only origin main
+docker compose -p nomikai-app -f docker-compose.synology.yml --env-file .env up -d --build
+```
+
+NASのIP、公開ポート、`.env` の具体例は [docs/synology-docker.md](docs/synology-docker.md) を参照してください。
+
+## ローカル開発用Docker
+
+PC上で確認する場合は次を実行します。
+
+```bash
+docker compose up -d --build
+```
 
 - Web: http://localhost:5173/nomikai-app/
 - API: http://localhost:3000/health
@@ -78,7 +100,7 @@ docker compose down
 docker compose down -v
 ```
 
-Synologyへの配置は [docs/synology-docker.md](docs/synology-docker.md)、環境変数や公開時の構成は [docs/docker-room-setup.md](docs/docker-room-setup.md) を参照してください。
+環境変数や外部公開時の構成は [docs/docker-room-setup.md](docs/docker-room-setup.md) を参照してください。
 
 ## 開発とテスト
 
@@ -135,8 +157,9 @@ API_URL=http://localhost:3100 npm run room:lifecycle:check:all
 - インターネット公開時はHTTPS、強いパスワード、アクセス制限、バックアップ、ログ監視、保存期間の設計が必要です。
 - 飲酒を必須にするルールや危険な罰ゲームは実装していません。飲まない、休む、スキップする選択を優先してください。
 
-## ブランチ
+## ブランチと版管理
 
-- `main`: GitHub Pagesで公開する静的版
-- `docker-room`: PostgreSQLとRedisを含む多人数ルーム版
-- `static-v1`: 静的版完成時点の保存タグ
+- `main`: 正式版。Synology向けのWeb、API、PostgreSQL、Redisと、GitHub Pages向け1台共有ビルドをすべて収録
+- `static-v1`: 静的版完成時点を残す保存タグ
+
+今後の更新は`main`へ集約します。Synologyでは`main`を取得し、`docker-compose.synology.yml`で起動してください。

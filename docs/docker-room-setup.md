@@ -1,6 +1,6 @@
 # Docker / ルーム版セットアップ
 
-`docker-room` ブランチでは、静的版のReactアプリにルーム同期用APIを追加しています。
+正式版の `main` ブランチには、静的版のReactアプリとルーム同期用APIの両方が入っています。Synology運用では `main` を取得し、`docker-compose.synology.yml` を使います。
 
 ## 構成
 
