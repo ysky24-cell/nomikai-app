@@ -34,6 +34,10 @@ describe("人狼ロジック", () => {
     expect(roles).toContain("knight");
   });
 
+  it("4人用の既存役職プリセットを生成する", () => {
+    expect(getWerewolfRoleDeck(4)).toEqual(["werewolf", "seer", "knight", "villager"]);
+  });
+
   it("役職割当は参加者IDを一度ずつ保持する", () => {
     const assignments = createWerewolfAssignments(
       [{ id: "a" }, { id: "b" }, { id: "c" }, { id: "d" }],

@@ -230,7 +230,7 @@ function optionsFor(style: GameSpec["style"], topic: string, scene: PromptScene,
     case "arm":
       return ["通常勝負", "利き手ではない手", "5秒だけ耐える", "笑わせ禁止"];
     case "werewolf":
-      return ["6人: 人狼1/占い師1/村人4", "8人: 人狼2/占い師1/騎士1/村人4", "10人以上: 人狼2/占い師1/騎士1/霊媒師1/村人残り"];
+      return ["4人: 人狼1/占い師1/騎士1/村人1", "6人: 人狼1/占い師1/騎士1/村人3", "8人: 人狼2/占い師1/騎士1/村人4", "10人以上: 人狼2/占い師1/騎士1/霊媒師1/村人残り"];
     default:
       return index % 3 === 0 ? ["司会判断", "拍手で決める", "理由を一言"] : undefined;
   }
@@ -795,19 +795,19 @@ const specs: readonly GameSpec[] = [
     articleOrder: 26,
     title: "人狼ゲーム",
     description: "役職を隠して、昼の話し合いと投票で人狼を探す",
-    people: "6人から",
+    people: "4人、または6人以上",
     minutes: "15分から",
     accent: "indigo",
     icon: "shield",
     groups: ["url", "talk", "large"],
     kind: "default",
-    minPlayers: 6,
+    minPlayers: 4,
     maxPlayers: 12,
     style: "werewolf",
     promptDeck: "none",
     answerMode: "open",
     setupSteps: [
-      "参加者を6〜12人で登録し、司会を1人決めます。司会は役職を秘密で割り当てます。",
+      "参加者を4人、または6〜12人で登録し、司会を1人決めます。5人構成は対象外です。司会は役職を秘密で割り当てます。",
       "基本役職は人狼、村人、占い師。人数が多い場合は騎士や霊媒師を追加します。",
       "夜は目を閉じて役職行動、昼は話し合い、最後に投票で1人を追放します。",
       "脱落した人も責めず、観戦や司会補助で場を見守ります。",

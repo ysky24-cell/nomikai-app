@@ -18,7 +18,7 @@ const definitions: readonly SyncGameDefinition[] = [
   { key: "turtle-soup", title: "ウミガメのスープ", rule: "順番に、はい・いいえで答えられる質問を1つずつ出します。", examplePrompt: "なぜ彼は傘を持たずに外出した？", inputLabel: "あなたの質問", inputPlaceholder: "例：その日は晴れていましたか？", progression: "turn" },
   { key: "truth-lie-game", title: "2つの真実と1つの嘘", rule: "全員が同時に、嘘だと思う番号を選びます。", examplePrompt: "1〜3のうち嘘はどれ？", inputLabel: "嘘だと思う番号", inputPlaceholder: "1 / 2 / 3", progression: "simultaneous" },
   { key: "count-up-game", title: "カウントアップゲーム", rule: "順番に1〜3個の数字を進めます。目標数に到達した人が負けです。", examplePrompt: "目標 30", inputLabel: "進める数字", inputPlaceholder: "例：1,2", progression: "count-up" },
-  { key: "reverse-word-game", title: "逆さ言葉ゲーム", rule: "表示されたお題を逆から読み、全員同時に入力します。", examplePrompt: "さくら", inputLabel: "逆から読んだ言葉", inputPlaceholder: "例：らくさ", progression: "simultaneous" },
+  { key: "reverse-word-game", title: "逆さ言葉ゲーム", rule: "表示されたお題を逆から読み、順番に入力します。", examplePrompt: "さくら", inputLabel: "逆から読んだ言葉", inputPlaceholder: "例：らくさ", progression: "turn" },
   { key: "song-association-quiz", title: "曲名連想クイズ", rule: "ヒントから連想した曲名や歌手を、順番に答えます。", examplePrompt: "夏・海・夕方", inputLabel: "あなたの答え", inputPlaceholder: "曲名または歌手名", progression: "turn" },
   { key: "drawing-quiz", title: "お絵描きクイズ", rule: "順番にお題を描写し、ほかの人は答えを考えます。", examplePrompt: "動物", inputLabel: "絵の説明・ヒント", inputPlaceholder: "例：長い首で草を食べる", progression: "turn" },
   { key: "hazard-card-game", title: "ドキドキはずれカード", rule: "順番にカードを1枚選び、引いた結果を共有します。", examplePrompt: "1〜5から1枚選ぶ", inputLabel: "選ぶカード番号", inputPlaceholder: "1〜5", progression: "turn" },

@@ -1029,7 +1029,7 @@ export function SharedRoomLobby({
               : activeGame.gameKey === "count-up-game"
                 ? "1〜3をカンマ区切りで回答（例: 1,2）"
                 : activeGame.gameKey === "reverse-word-game"
-                  ? "お題を逆順に入力（全員同時回答版）"
+                  ? "お題を逆順に入力（順番に回答する手番制）"
                   : activeGame.gameKey === "value-meter-game"
                     ? "数値|理由（例: 72|甘め）で回答"
                     : activeGame.gameKey === "typing-speed-game"

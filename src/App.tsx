@@ -4961,6 +4961,10 @@ function countWerewolfRoles(roles: readonly WerewolfRole[]) {
   }));
 }
 
+export function isWerewolfPlayerCountSupported(playerCount: number) {
+  return Number.isInteger(playerCount) && (playerCount === 4 || playerCount >= 6);
+}
+
 function getWerewolfAssignment(assignments: readonly WerewolfAssignment[], playerId: string) {
   return assignments.find((assignment) => assignment.playerId === playerId) ?? null;
 }
@@ -5109,8 +5113,10 @@ function WerewolfGame({
   const setupPlayers = isWerewolfRoom && roomSnapshot ? roomParticipantPlayers : state.players;
   const isRoomHost = isWerewolfRoom && roomSession?.participantRole === "host";
   const canControlWerewolf = !isWerewolfRoom || (isRoomHost && Boolean(roomSnapshot));
-  const canStart = setupPlayers.length >= 6 && setupPlayers.every((player) => player.name.trim());
-  const rolePreview = countWerewolfRoles(getWerewolfRoleDeck(Math.max(6, setupPlayers.length || 6)));
+  const canStart =
+    isWerewolfPlayerCountSupported(setupPlayers.length) &&
+    setupPlayers.every((player) => player.name.trim());
+  const rolePreview = countWerewolfRoles(getWerewolfRoleDeck(Math.max(4, setupPlayers.length || 4)));
   const alivePlayers = getAliveWerewolfPlayers(state.players, state.assignments);
   const voteTargets = state.tiedTargetIds.length > 1
     ? alivePlayers.filter((player) => state.tiedTargetIds.includes(player.id))
@@ -5385,7 +5391,7 @@ function WerewolfGame({
           <div className="howto-panel">
             <h3>詳しい進め方</h3>
             <ol className="rule-list">
-              <li>参加者を6〜12人で登録し、役職を配ります。ルームでは参加者一覧にいる全員が入ります。</li>
+              <li>参加者を4人、または6〜12人で登録し、役職を配ります。5人構成は対象外です。ルームでは参加者一覧にいる全員が入ります。</li>
               <li>各自の端末で、自分だけが役職を確認します。</li>
               <li>夜は司会の合図で、人狼の襲撃、占い師の占い、騎士の護衛、霊媒師の確認を処理します。</li>
               <li>昼は議論してから投票します。人狼を全員追放すれば村人側、人狼が村人側以上の人数になれば人狼側の勝ちです。</li>
@@ -5413,12 +5419,15 @@ function WerewolfGame({
                 </p>
               </div>
             ) : (
-              <PlayerSetup
-                players={state.players}
-                minPlayers={6}
-                maxPlayers={12}
-                onChange={(players) => setState({ ...state, players, assignments: [], phase: "setup" })}
-              />
+              <>
+                <PlayerSetup
+                  players={state.players}
+                  minPlayers={4}
+                  maxPlayers={12}
+                  onChange={(players) => setState({ ...state, players, assignments: [], phase: "setup" })}
+                />
+                <p className="soft-note">4人、または6〜12人で開始できます。5人構成は対象外です。</p>
+              </>
             )
           ) : (
             <div className="howto-panel compact">

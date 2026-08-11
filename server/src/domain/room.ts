@@ -233,6 +233,7 @@ const legacyProgressionByKey: Record<string, LegacyGameState["progression"]> = {
   "person-hint-quiz": "turn",
   "humming-intro-quiz": "turn",
   "loanword-ban-game": "turn",
+  "reverse-word-game": "turn",
   "count-up-game": "count-up",
 };
 

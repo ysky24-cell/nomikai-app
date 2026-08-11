@@ -409,6 +409,61 @@ test("priority legacy games enforce typed input contracts", () => {
   assert.equal(validateLegacyInput("value-meter-game", "72"), false);
 });
 
+test("reverse-word-game follows the turn-based room UX", async () => {
+  const service = new RoomService(new MemoryRoomRepository());
+  const host = await service.createRoom("Host");
+  const joined = await service.execute(command(host.room.code, "reverse-join", 0, "join", { name: "Alice" }));
+  const hostId = host.room.self!.id;
+  const playerId = joined.credentials!.participantId;
+  const locked = await lockRoom(service, host.room.code, joined.version, hostId, host.hostToken, "reverse-lock");
+  const started = await service.execute(
+    command(host.room.code, "reverse-start", locked.version, "game_start", {
+      participantId: hostId,
+      gameKind: "legacy-game",
+      legacyGameKey: "reverse-word-game",
+      prompt: "hello",
+    }),
+    host.hostToken,
+  );
+  assert.equal(started.game?.kind, "legacy-game");
+  assert.equal(started.game?.progression, "turn");
+  assert.equal(started.game?.currentPlayerId, hostId);
+
+  await assert.rejects(
+    service.execute(
+      command(host.room.code, "reverse-out-of-turn", started.version, "legacy_input", {
+        participantId: playerId,
+        input: "olleh",
+      }),
+      joined.credentials!.reconnectToken,
+    ),
+    (error: unknown) => error instanceof RoomDomainError && error.code === "not_your_turn",
+  );
+
+  const hostInput = await service.execute(
+    command(host.room.code, "reverse-host-input", started.version, "legacy_input", {
+      participantId: hostId,
+      input: "olleh",
+    }),
+    host.hostToken,
+  );
+  if (!hostInput.game || hostInput.game.kind !== "legacy-game") throw new Error("reverse game disappeared after host input");
+  assert.equal(hostInput.game?.phase, "playing");
+  assert.equal(hostInput.game?.currentPlayerId, playerId);
+
+  const finished = await service.execute(
+    command(host.room.code, "reverse-player-input", hostInput.version, "legacy_input", {
+      participantId: playerId,
+      input: "wrong",
+    }),
+    joined.credentials!.reconnectToken,
+  );
+  if (!finished.game || finished.game.kind !== "legacy-game") throw new Error("reverse game did not finish");
+  assert.equal(finished.game?.phase, "finished");
+  assert.equal(finished.game?.result?.inputs[hostId], "olleh");
+  assert.equal(finished.game?.result?.scores[hostId], 1);
+});
+
 test("turn-based catalog games advance to the next player and finish a round automatically", async () => {
   const service = new RoomService(new MemoryRoomRepository());
   const host = await service.createRoom("Host");
